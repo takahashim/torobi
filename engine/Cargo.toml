@@ -1,0 +1,15 @@
+[package]
+name = "torobi-engine"
+version = "0.0.1"
+edition = "2021"
+description = "Torobi's execution engine: interprets GraphConfig on MLX"
+license = "MIT"
+
+[dependencies]
+# M1 spike: a path dependency on the local OminiX-MLX checkout, pinned by
+# the ledger in ../docs/vendoring.md (rev 4988a3f). Selective vendoring with
+# provenance replaces this before anything ships (docs/plan.md section 5).
+mlx-rs = { path = "/Users/maki/git/OminiX-MLX/mlx-rs" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
