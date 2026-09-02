@@ -5,6 +5,9 @@ require_relative "torobi/errors"
 require_relative "torobi/freeze"
 require_relative "torobi/ir"
 require_relative "torobi/graph_config"
+require_relative "torobi/ops"
+require_relative "torobi/shape"
+require_relative "torobi/dsl"
 
 # Torobi describes models and training objectives in Ruby, once, as an
 # immutable GraphConfig; an MLX-backed engine executes them. Ruby owns the

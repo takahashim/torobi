@@ -1,0 +1,135 @@
+# The single source of truth for the IR's operation vocabulary.
+#
+# Each entry declares: how many value inputs the op takes (an integer, or
+# [min, max]), how many parameters it references, its attributes and their
+# types, the shape rule that infers its output, and where the DSL surfaces
+# it ("handle" ops become methods on node handles; everything else is either
+# an operator, a builder on `g`, or internal to a lowering).
+#
+# Semantic ops (sdpa, rope, layer_norm, rms_norm) are kept whole: a backend
+# may run a fused kernel or decompose them, but the IR does not lower them.
+
+- name: parameter
+  inputs: 0
+  params: 1
+  attributes: {}
+  shape_rule: parameter
+
+- name: add
+  inputs: 2
+  shape_rule: broadcast
+- name: sub
+  inputs: 2
+  shape_rule: broadcast
+- name: mul
+  inputs: 2
+  shape_rule: broadcast
+- name: div
+  inputs: 2
+  shape_rule: broadcast
+
+- name: add_scalar
+  inputs: 1
+  attributes: { value: number }
+  shape_rule: same_as_input
+- name: sub_scalar
+  inputs: 1
+  attributes: { value: number }
+  shape_rule: same_as_input
+- name: mul_scalar
+  inputs: 1
+  attributes: { value: number }
+  shape_rule: same_as_input
+- name: div_scalar
+  inputs: 1
+  attributes: { value: number }
+  shape_rule: same_as_input
+
+- name: neg
+  inputs: 1
+  shape_rule: same_as_input
+  handle: true
+- name: abs
+  inputs: 1
+  shape_rule: same_as_input
+  handle: true
+- name: sqrt
+  inputs: 1
+  shape_rule: same_as_input
+  handle: true
+- name: square
+  inputs: 1
+  shape_rule: same_as_input
+  handle: true
+- name: exp
+  inputs: 1
+  shape_rule: same_as_input
+  handle: true
+- name: log
+  inputs: 1
+  shape_rule: same_as_input
+  handle: true
+- name: gelu
+  inputs: 1
+  shape_rule: same_as_input
+  handle: true
+- name: relu
+  inputs: 1
+  shape_rule: same_as_input
+  handle: true
+- name: sigmoid
+  inputs: 1
+  shape_rule: same_as_input
+  handle: true
+- name: tanh
+  inputs: 1
+  shape_rule: same_as_input
+  handle: true
+
+- name: softmax
+  inputs: 1
+  attributes: { axis: int }
+  shape_rule: same_as_input
+  handle: true
+- name: rope
+  inputs: 1
+  attributes: { theta: number }
+  shape_rule: same_as_input
+  handle: true
+
+- name: transpose
+  inputs: 1
+  attributes: { axes: int_list }
+  shape_rule: transpose
+- name: slice
+  inputs: 1
+  attributes: { axis: int, start: int, length: int }
+  shape_rule: slice
+- name: mean
+  inputs: 1
+  attributes: { axes: int_list_or_null, keepdims: bool }
+  shape_rule: reduce
+- name: sum
+  inputs: 1
+  attributes: { axes: int_list_or_null, keepdims: bool }
+  shape_rule: reduce
+
+- name: matmul
+  inputs: 2
+  shape_rule: matmul
+- name: take
+  inputs: 2
+  shape_rule: take
+
+- name: layer_norm
+  inputs: [2, 3]
+  attributes: { eps: number }
+  shape_rule: same_as_input
+- name: rms_norm
+  inputs: 2
+  attributes: { eps: number }
+  shape_rule: same_as_input
+- name: sdpa
+  inputs: [3, 4]
+  attributes: { scale: number_or_null }
+  shape_rule: sdpa
