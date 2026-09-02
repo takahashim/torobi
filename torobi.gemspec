@@ -18,9 +18,13 @@ Gem::Specification.new do |spec|
   spec.license  = "MIT"
   spec.required_ruby_version = ">= 3.2"
 
-  spec.files = Dir["lib/**/*.rb", "README.md", "LICENSE", "docs/plan.md"]
+  spec.files = Dir["lib/**/*.rb", "config/ops.yml", "ext/**/*.{rs,rb,toml}",
+                   "engine/**/*.{rs,toml}", "README.md", "LICENSE", "docs/plan.md"]
   spec.require_paths = ["lib"]
+  spec.extensions = ["ext/torobi/extconf.rb"]
 
   spec.add_development_dependency "minitest", "~> 5.0"
+  spec.add_development_dependency "rake-compiler", "~> 1.2"
+  spec.add_development_dependency "rb_sys", "~> 0.9"
   spec.add_development_dependency "rake", "~> 13.0"
 end

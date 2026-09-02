@@ -1,0 +1,5 @@
+# One workspace so the engine and the Ruby extension share a target
+# directory (MLX is large; building it twice is not worth the disk).
+[workspace]
+members = ["engine", "ext/torobi"]
+resolver = "2"

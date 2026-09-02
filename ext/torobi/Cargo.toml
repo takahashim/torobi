@@ -1,0 +1,17 @@
+[package]
+name = "torobi"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[lib]
+name = "torobi"
+crate-type = ["cdylib"]
+
+[dependencies]
+torobi-engine = { path = "../../engine" }
+# The narrow waist: magnus for the Ruby objects, rb-sys for the one thing
+# magnus does not cover (releasing the GVL around a long computation).
+magnus = "0.8"
+rb-sys = "0.9"
+anyhow = "1"

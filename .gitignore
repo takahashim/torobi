@@ -1,4 +1,10 @@
 /pkg/
 /tmp/
 *.gem
-engine/target
+/notes/
+
+/target/
+engine/spike/*.json
+lib/torobi/torobi.bundle
+/ext/torobi/target/
+lib/torobi/mlx.metallib
