@@ -25,6 +25,19 @@ require "net/http"
 where, out = ARGV
 abort "usage: inventory.rb <checkpoint-dir|owner/name> <out.json>" unless where && out
 
+# The token a gated repository wants, if this machine has one.
+#
+# Where `hf auth login` puts it, or the environment. Gemma and Llama are
+# behind a licence somebody has to accept, and reading a header is still
+# reading a file.
+def hf_token
+  given = ENV.fetch("HF_TOKEN", nil)
+  return given unless given.to_s.empty?
+
+  path = File.expand_path(ENV.fetch("HF_TOKEN_PATH", "~/.cache/huggingface/token"))
+  File.file?(path) ? File.read(path).strip : nil
+end
+
 # One GET, following the Hub's redirect to storage, of a byte range.
 def fetch(url, range, hops: 5)
   abort "#{url} redirects too far" if hops.zero?
@@ -32,6 +45,11 @@ def fetch(url, range, hops: 5)
   uri = URI.parse(url)
   request = Net::HTTP::Get.new(uri)
   request["Range"] = "bytes=#{range}"
+  # Only to the Hub itself. The redirect goes to storage with the
+  # permission already in the URL, and a bearer token sent there is a
+  # credential handed to somebody who did not ask for it.
+  token = hf_token
+  request["Authorization"] = "Bearer #{token}" if token && uri.host == "huggingface.co"
   response = Net::HTTP.start(uri.host, uri.port, use_ssl: true) { |http| http.request(request) }
   case response
   when Net::HTTPRedirection
@@ -40,6 +58,9 @@ def fetch(url, range, hops: 5)
     body, = fetch(URI.join(url, response["location"]).to_s, range, hops: hops - 1)
     [body, response["x-repo-commit"]]
   when Net::HTTPSuccess then [response.body, response["x-repo-commit"]]
+  when Net::HTTPUnauthorized, Net::HTTPForbidden
+    abort "#{url} answered #{response.code}: this model is behind a licence. " \
+          "Accept it on the Hub and log in (hf auth login), or set HF_TOKEN."
   else abort "#{url} answered #{response.code} #{response.message}"
   end
 end
