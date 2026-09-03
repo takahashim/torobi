@@ -47,7 +47,18 @@ pub enum Weights<'a> {
     /// `student.embeddings...`. Naming a file per model is what lets a
     /// published checkpoint be imported with no renaming at all, and it is
     /// the shape a distillation wants anyway, having two of them.
-    Pretrained(&'a BTreeMap<String, std::path::PathBuf>),
+    ///
+    /// `fresh` names the parameters that are *expected* to be in no file
+    /// and are built from their declared initializers instead: the
+    /// classification head put on top of a published encoder exists in no
+    /// checkpoint. Patterns, as freezing uses them
+    /// ("student.head.*"), and everything they do not name must be in its
+    /// file. Saying which are new is the caller's intent; a name missing
+    /// because it was mistyped should still be an error, and it is.
+    Pretrained {
+        files: &'a BTreeMap<String, std::path::PathBuf>,
+        fresh: &'a [String],
+    },
 }
 
 /// One model as the plan holds it: its program, and where its parameters
@@ -107,13 +118,26 @@ impl Plan {
     /// Reads a GraphConfig and its initial parameters, returning the plan
     /// and the parameters in the order the plan names them.
     pub fn open(graph_json: &str, weights: Weights<'_>) -> Result<(Self, Vec<Array>)> {
+        Self::open_seeded(graph_json, weights, 0)
+    }
+
+    /// The same, with the seed the fresh parameters are drawn from.
+    ///
+    /// Explicit because a run that starts partly from initializers is
+    /// reproducible only if that draw is (docs/plan.md 11.1).
+    pub fn open_seeded(
+        graph_json: &str,
+        weights: Weights<'_>,
+        seed: u64,
+    ) -> Result<(Self, Vec<Array>)> {
         let config_digest = {
             use sha2::{Digest, Sha256};
             format!("{:x}", Sha256::digest(graph_json.as_bytes()))
         };
         let config: GraphConfig = serde_json::from_str(graph_json).context("parsing the graph")?;
         anyhow::ensure!(!config.models.is_empty(), "the graph has no models");
-        let source = Source::read(weights)?;
+        let mut source = Source::read(weights)?;
+        source.seed(seed)?;
 
         let mut models = Vec::new();
         let mut params = Vec::new();
@@ -287,8 +311,15 @@ enum Source {
     Inline(BTreeMap<String, InitialTensor>),
     /// Keyed by qualified path.
     File(std::collections::HashMap<String, Array>),
-    /// Keyed by model, then by that model's own path.
-    Pretrained(BTreeMap<String, std::collections::HashMap<String, Array>>),
+    /// Keyed by model, then by that model's own path, with the patterns
+    /// naming what is expected to come from an initializer instead.
+    Pretrained {
+        files: BTreeMap<String, std::collections::HashMap<String, Array>>,
+        fresh: Vec<String>,
+        /// Split per parameter as they are built, so what one draws does
+        /// not depend on how many came before it.
+        key: Option<Array>,
+    },
 }
 
 impl Source {
@@ -300,8 +331,8 @@ impl Source {
                 Source::Inline(parsed.params)
             }
             Weights::File(path) => Source::File(read_safetensors(path)?),
-            Weights::Pretrained(files) => Source::Pretrained(
-                files
+            Weights::Pretrained { files, fresh } => Source::Pretrained {
+                files: files
                     .iter()
                     .map(|(model, path)| {
                         Ok((
@@ -311,8 +342,20 @@ impl Source {
                         ))
                     })
                     .collect::<Result<_>>()?,
-            ),
+                fresh: fresh.to_vec(),
+                key: None,
+            },
         })
+    }
+
+    /// Where the fresh parameters are drawn from.
+    fn seed(&mut self, seed: u64) -> Result<()> {
+        if let Source::Pretrained { key, fresh, .. } = self {
+            if !fresh.is_empty() {
+                *key = Some(mlx_rs::random::key(seed)?);
+            }
+        }
+        Ok(())
     }
 
     /// The one parameter a declaration asks for, checked against it.
@@ -357,14 +400,27 @@ impl Source {
                 })?;
                 shaped(array, path, spec)?
             }
-            Source::Pretrained(files) => {
+            Source::Pretrained { files, fresh, key } => {
+                if let Some(pattern) = fresh.iter().find(|p| matches(p, path)) {
+                    let key = key.as_ref().with_context(|| {
+                        format!("parameter {path:?} matches {pattern:?} but no seed was set")
+                    })?;
+                    // Its own key, split from the run's by the path, so a
+                    // parameter draws the same numbers wherever it sits in
+                    // the declaration order.
+                    let (_, mine) = mlx_rs::random::split(key, 2)?;
+                    return crate::init::build(spec, &mine);
+                }
                 let arrays = files.get(model).with_context(|| {
                     format!("no file was given for model {model:?}")
                 })?;
                 // The model's own path, without the name this run gives it.
                 let array = arrays.get(&spec.path).with_context(|| {
                     format!(
-                        "model {model:?}'s file has no parameter {:?}",
+                        "model {model:?}'s file has no parameter {:?}. If it is meant \
+                         to be new, name it: a head put on a published encoder is in \
+                         no checkpoint, and saying so is what tells a typo from a \
+                         fresh parameter.",
                         spec.path
                     )
                 })?;
@@ -397,6 +453,15 @@ fn shaped(array: &Array, path: &str, spec: &ParameterSpec) -> Result<Array> {
         spec.shape
     );
     Ok(array.clone())
+}
+
+/// Whether a pattern names this path, in the same small language freezing
+/// uses: an exact path, or a prefix ending in `*`.
+fn matches(pattern: &str, path: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => path.starts_with(prefix),
+        None => pattern == path,
+    }
 }
 
 /// A freeze pattern: a path, or a prefix ending in `*`.

@@ -351,6 +351,48 @@ class ModernBertTest < Minitest::Test
     assert_equal 156, held.size
   end
 
+  # What this project is for: ruri-v3-130m's encoder with a reranking head
+  # on top, pulled towards a teacher's scores.
+  #
+  # The head exists in no checkpoint, which is the case `fresh:` is for.
+  # The encoder is at the root here, because a bare encoder is published
+  # that way and a classifier keeps it under `model.`; naming which is
+  # what `encoder_prefix:` is for.
+  def test_a_reranking_student_is_a_published_encoder_and_a_new_head
+    dir = checkpoint
+    skip "cl-nagoya/ruri-v3-130m is not in the cache (set RURI_V3_130M)" unless dir
+
+    seq = 24
+    student = Torobi::Models::ModernBERT.classifier(config, seq:, encoder_prefix: "")
+    objective = Torobi.objective(student: student) do |g|
+      teacher = g.input(:teacher, [nil, 1])
+      g.output :loss, g.mse(g.from_model(:student, :logits).sigmoid, teacher)
+    end
+    session_config = Torobi::GraphConfig.new(models: { student: }, objective:,
+                                             train: ["student"])
+    ids = [Array.new(seq) { |i| ((i * 137) + 11) % config.vocab_size },
+           Array.new(seq) { |i| ((i * 31) + 5) % config.vocab_size }]
+    batch = Torobi::Models::ModernBERT.batch(config, ids, seq:)
+                                      .merge(teacher: { shape: [2, 1], data: [0.72, 0.01] })
+
+    Torobi::Session.open(session_config,
+                         pretrained: { student: File.join(dir, "model.safetensors") },
+                         fresh: ["student.head.*", "student.classifier.*"],
+                         optimizer: { kind: :adamw, lr: 3e-4 }) do |s|
+      # 116 from the file, three the file does not have.
+      assert_equal 119, s.parameter_paths.size
+      assert_equal %w[student.classifier.weight student.head.dense.weight
+                      student.head.norm.weight],
+                   s.parameter_paths.grep(/head|classifier/).sort
+
+      before = s.evaluate(batch)
+      10.times { s.step!(batch) }
+
+      assert_operator s.evaluate(batch), :<, before,
+                      "the student should move towards the teacher"
+    end
+  end
+
   def test_a_hidden_size_that_does_not_divide_into_heads_is_refused
     raw = oracle.fetch("config").merge("num_attention_heads" => 7)
     e = assert_raises(Torobi::ConfigError) { Torobi::Models::ModernBERT.from_hash(raw) }

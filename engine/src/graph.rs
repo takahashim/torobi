@@ -64,6 +64,9 @@ pub struct ParameterSpec {
     /// What the graph says this parameter is. An imported file may hold
     /// another precision; this is the one the run trains in.
     pub dtype: String,
+    /// How it starts when it comes from no file: {"type": "zeros"},
+    /// {"type": "normal", "std": 0.02}, and so on (`crate::init`).
+    pub initializer: serde_json::Map<String, serde_json::Value>,
     pub trainable: bool,
 }
 

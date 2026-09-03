@@ -61,7 +61,9 @@ impl SessionCore {
         weights: Weights<'_>,
         optimizer: OptimizerConfig,
     ) -> Result<Self> {
-        let (plan, params) = Plan::open(graph_json, weights)?;
+        // Zero is where a run's RNG starts, so a parameter built from its
+        // declaration is drawn from the same place a step would draw from.
+        let (plan, params) = Plan::open_seeded(graph_json, weights, 0)?;
         let state = TrainState::new(&plan, params, optimizer)?;
         Ok(Self {
             plan,

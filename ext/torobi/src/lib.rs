@@ -255,17 +255,31 @@ impl Session {
     /// own does not know what this run will call it, so its tensors carry
     /// no model prefix; naming a file per model is what lets it be
     /// imported without renaming anything.
+    /// `fresh_json` is the patterns naming parameters that are expected to
+    /// be in no file and are built from their declarations instead.
     fn open_pretrained(
         ruby: &Ruby,
         graph_json: String,
         files_json: String,
+        fresh_json: String,
         optimizer_json: String,
     ) -> Result<Self, Error> {
         let files: std::collections::BTreeMap<String, std::path::PathBuf> =
             serde_json::from_str(&files_json).map_err(|e| {
                 Error::new(ruby.exception_arg_error(), format!("bad file list: {e}"))
             })?;
-        Self::opened(ruby, &graph_json, Weights::Pretrained(&files), &optimizer_json)
+        let fresh: Vec<String> = serde_json::from_str(&fresh_json).map_err(|e| {
+            Error::new(ruby.exception_arg_error(), format!("bad fresh list: {e}"))
+        })?;
+        Self::opened(
+            ruby,
+            &graph_json,
+            Weights::Pretrained {
+                files: &files,
+                fresh: &fresh,
+            },
+            &optimizer_json,
+        )
     }
 
     fn opened(
@@ -717,7 +731,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let class = native.define_class("Session", ruby.class_object())?;
     class.define_singleton_method("open", function!(Session::open, 3))?;
     class.define_singleton_method("open_from_file", function!(Session::open_from_file, 3))?;
-    class.define_singleton_method("open_pretrained", function!(Session::open_pretrained, 3))?;
+    class.define_singleton_method("open_pretrained", function!(Session::open_pretrained, 4))?;
     class.define_method("run_step", method!(Session::run_step, 1))?;
     class.define_method("evaluate", method!(Session::evaluate, 1))?;
     class.define_method("save", method!(Session::save, 2))?;

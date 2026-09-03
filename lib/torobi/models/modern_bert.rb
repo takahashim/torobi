@@ -83,10 +83,18 @@ module Torobi
       # which is what a CrossEncoder reports for a one-label model. Whether
       # to distil against the logit or its sigmoid is the recipe's, so this
       # emits the logit and stops.
-      def classifier(config, seq:)
+      # `encoder_prefix:` is where the encoder's parameters sit. Published
+      # classifiers keep it under `model.`; a classifier built on a bare
+      # encoder checkpoint (ruri-v3-130m holds `embeddings.*` at the root)
+      # wants none, and its head is `fresh:` because no file has one.
+      def classifier(config, seq:, encoder_prefix: "model")
         config.check!
         Torobi.graph do |g|
-          x = g.scope("model") { encode(g, config, seq:) }
+          x = if encoder_prefix.to_s.empty?
+                encode(g, config, seq:)
+              else
+                g.scope(encoder_prefix) { encode(g, config, seq:) }
+              end
           pooled = pool(g, x, config, seq:)
           # ModernBERT's head: a dense, gelu, a norm, then the classifier.
           pooled = norm(g, g.linear(pooled, config.hidden_size, name: "head.dense",

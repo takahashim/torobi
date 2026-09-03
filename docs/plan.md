@@ -1254,6 +1254,56 @@ encoder は `model.` の下、その上に pooled head と分類器)、310M の�
 
 この時点で Ruby 193 件 / Rust 109 件。
 
+### 15.21 混成の重み供給。蒸留が組めた(2026-09-03)
+
+「Ruby だけで学習できるか」を測っていて穴が 2 つ出た。どちらも fine-tuning の本筋に
+あるもので、塞いだ。
+
+**1. 公開の配置が 2 種類ある。** bare encoder(`embeddings.*` が root)と分類器
+(`model.*` + `head.*` + `classifier.*`)。kohagi も `contains_tensor("model.embeddings...")`
+で見分けている。`classifier(config, seq:, encoder_prefix:)` で選べるようにした。
+
+**2. 新しい head はどのファイルにも無い。** ここが本題である。公開 encoder の上に
+分類 head を乗せるのが fine-tuning なので、**encoder はファイルから、head は宣言から**
+という混成が要る。
+
+「ファイルに無いものは初期化子から」と暗黙にすると、**名前の打ち間違いが静かに
+乱数になる**。そこで `fresh:` に「新しいのはこれ」をパターンで名指させ、名指されて
+いない欠けは今までどおり拒否する。拒否のメッセージがその区別を説明する。
+
+```ruby
+pretrained: { student: "ruri-130m/model.safetensors" },
+fresh: ["student.head.*", "student.classifier.*"]
+```
+
+engine に `init.rs` を足した(zeros / ones / normal / kaiming_uniform)。IR は前から
+初期化子を宣言していたが、engine は読んでいなかった。**seed から引く**ので、同じ seed と
+同じグラフは同じ初期値になる(§11.1 が「parameter 初期化 seed」を明示管理の対象に
+挙げている、その実装)。パラメータごとに key を split するので、宣言順を変えても
+引く値は変わらない。
+
+**実際に蒸留が回った。** kohagi の tool が出した (ids, 教師スコア) を読み、
+ruri-v3-130m の encoder + 新しい head、AdamW で 30 step:
+
+    parameters: 119 (116 from the file, 3 new)
+    loss 0.397718 -> 0.128939
+
+**「Ruby だけで学習できるか」への答え。** `tokenizers` gem があれば**できる**。教師も
+Torobi の中で回せる(§5A.3 の 2 モデル配線がそのためにある)。ただし測った上で、
+この案件では勧めない:
+
+| | batch 8 × seq 128 |
+| --- | --- |
+| 教師 310M の forward | 0.34s / 1261 MB |
+| 学生 130M の step | 0.67s / peak 4074 MB |
+
+オンラインは step あたり 1.5 倍だが、決定的なのは倍率ではなく**回数**である。教師の
+答えは run をまたいでも変わらないので、10 回回せばオンラインは同じ数字を 10 回計算
+する。固定ペアの蒸留はオフラインが素直で、データ拡張や動的サンプリングを入れる
+実験ではオンラインしかない。**どちらも今の Torobi で書ける**。
+
+この時点で Ruby 197 件 / Rust 109 件。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

@@ -47,6 +47,16 @@ module Torobi
     #                    pretrained: { student: "ruri-130m/model.safetensors",
     #                                  teacher: "reranker-310m/model.safetensors" }
     #
+    # `fresh:` goes with `pretrained:` and names the parameters that are
+    # meant to be in no file, built from the initializers the graph
+    # declares instead. A classification head put on a published encoder
+    # is the case: it exists in no checkpoint. Patterns, as freezing uses
+    # them. Everything they do not name must be in its file, so a mistyped
+    # parameter is still an error rather than a quietly random one:
+    #
+    #   pretrained: { student: "ruri-130m/model.safetensors" },
+    #   fresh: ["student.head.*", "student.classifier.*"]
+    #
     # A file in another precision is converted: importing is starting
     # somewhere, not resuming.
     #
@@ -76,8 +86,12 @@ module Torobi
     #   dataset: { name: "jaqket-train", rows: 12_000,
     #              tokenizer: "cl-nagoya/ruri-v3-130m",
     #              tokenizer_revision: "e3114c6...", max_seq_length: 512 }
-    def self.open(config, weights: nil, weights_file: nil, pretrained: nil,
+    def self.open(config, weights: nil, weights_file: nil, pretrained: nil, fresh: [],
                   optimizer: DEFAULT_OPTIMIZER, journal: nil, io: nil, dataset: nil)
+      if !fresh.empty? && pretrained.nil?
+        raise ArgumentError, "fresh: names what no file holds, so it goes with pretrained:"
+      end
+
       sources = { weights:, weights_file:, pretrained: }.compact
       unless sources.size == 1
         raise ArgumentError,
@@ -96,6 +110,7 @@ module Torobi
         elsif pretrained
           files = pretrained.to_h { |model, path| [model.to_s, path.to_s] }
           Native::Session.open_pretrained(config.canonical_json, JSON.generate(files),
+                                          JSON.generate(Array(fresh).map(&:to_s)),
                                           JSON.generate(optimizer))
         else
           Native::Session.open(config.canonical_json, JSON.generate(weights),

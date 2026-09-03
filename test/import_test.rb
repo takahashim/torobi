@@ -135,6 +135,86 @@ class ImportTest < Minitest::Test
     assert_match(/no parameters at/, e.message)
   end
 
+  # Fine-tuning is a mixed source: the body comes from a published
+  # checkpoint, and what is put on top of it exists in no file.
+  def test_what_no_file_holds_can_be_named_and_built_from_its_declaration
+    model = Torobi.graph do |g|
+      x = g.input :x, [nil, DIM]
+      y = g.input :y, [nil, 1]
+      body = g.linear(x, DIM, name: "body", bias: false)
+      g.output :loss, g.mse(g.linear(body, 1, name: "head", bias: false), y)
+    end
+    config = Torobi::GraphConfig.new(models: { m: model })
+    file = File.join(@dir, "body.safetensors")
+    IO.binwrite(file, safetensors({
+      "body.weight" => { shape: [DIM, DIM], data: Array.new(DIM * DIM, 0.1) }
+    }))
+
+    Torobi::Session.open(config, pretrained: { m: file }, fresh: ["m.head.*"]) do |s|
+      assert_equal %w[m.body.weight m.head.weight], s.parameter_paths.sort
+      body = s.fetch("m.body.weight")[:data]
+
+      assert_equal DIM * DIM, body.size
+      body.each { |v| assert_in_delta 0.1, v, 1e-6, "the body came from the file" }
+      head = s.fetch("m.head.weight")[:data]
+
+      refute(head.all?(&:zero?), "the head was drawn, not left empty")
+      # kaiming_uniform on a [1, DIM] weight: bound is sqrt(6 / DIM).
+      bound = Math.sqrt(6.0 / DIM)
+      assert(head.all? { |v| v.abs <= bound }, "#{head.inspect} is outside +-#{bound}")
+      s.step!(batch)
+      assert_predicate s.loss, :finite?
+    end
+  end
+
+  # Naming what is new is the point: a parameter missing because it was
+  # mistyped is still a mistake, and says so.
+  def test_a_parameter_no_file_holds_and_nobody_named_is_still_refused
+    model = Torobi.graph do |g|
+      x = g.input :x, [nil, DIM]
+      y = g.input :y, [nil, 1]
+      g.output :loss, g.mse(g.linear(x, 1, name: "head", bias: false), y)
+    end
+    config = Torobi::GraphConfig.new(models: { m: model })
+    file = File.join(@dir, "empty.safetensors")
+    IO.binwrite(file, safetensors({ "elsewhere" => { shape: [1], data: [0.0] } }))
+
+    e = assert_raises(Torobi::StepError) do
+      Torobi::Session.open(config, pretrained: { m: file })
+    end
+    assert_match(/head\.weight/, e.message)
+    assert_match(/If it is meant to be new, name it/, e.message)
+  end
+
+  def test_fresh_says_where_it_belongs
+    e = assert_raises(ArgumentError) do
+      Torobi::Session.open(config, weights: weights, fresh: ["m.head.*"])
+    end
+
+    assert_match(/goes with pretrained:/, e.message)
+  end
+
+  # The same seed gives the same start, which is what makes a run that
+  # begins partly from a declaration reproducible (docs/plan.md 11.1).
+  def test_a_drawn_parameter_is_a_function_of_the_seed
+    model = Torobi.graph do |g|
+      x = g.input :x, [nil, DIM]
+      y = g.input :y, [nil, 1]
+      g.output :loss, g.mse(g.linear(x, 1, name: "head", bias: false), y)
+    end
+    config = Torobi::GraphConfig.new(models: { m: model })
+    file = File.join(@dir, "none.safetensors")
+    IO.binwrite(file, safetensors({ "elsewhere" => { shape: [1], data: [0.0] } }))
+
+    drawn = 2.times.map do
+      Torobi::Session.open(config, pretrained: { m: file }, fresh: ["m.*"]) do |s|
+        s.fetch("m.head.weight")[:data]
+      end
+    end
+
+    assert_equal drawn.first, drawn.last, "the same seed draws the same parameters"
+  end
+
   def test_exactly_one_source_is_named
     e = assert_raises(ArgumentError) do
       Torobi::Session.open(config, weights: weights, weights_file: "x.safetensors")
