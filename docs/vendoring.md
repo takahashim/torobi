@@ -160,6 +160,27 @@ lets the gem build on a machine without Xcode.
 | `xcrun -sdk macosx metal --version` works | builds MLX from source through cmake, patching `device.cpp` / `device.h` to disable NAX for older Metal |
 | no Metal compiler (this machine) | downloads `mlx-prebuilt-v0.1.0-macos-arm64.tar.gz` from OminiX's releases |
 
+This machine takes the third: `xcrun -sdk macosx metal --version` answers
+`cannot execute tool 'metal' due to missing Metal Toolchain`.
+
+**The download is `curl -L -f` and nothing else.** No checksum, no
+signature, nothing in `build.rs` that verifies what arrived beyond TLS
+(`grep -n 'sha256|checksum|verify|digest'` finds nothing). It runs during
+`gem install`, on the machine of whoever installs, and announces itself
+as `cargo:warning=Downloading pre-built MLX from: ...`. Whoever wants
+that guarantee sets `MLX_PREBUILT_PATH` to a directory they trust; that
+is the first branch, and it exists for exactly this.
+
+**Where it lands, and who moves it afterwards.** `build.rs` extracts into
+`OUT_DIR/mlx-prebuilt/` (reused on later builds if the three files are
+there) and then copies the metallib to `target/<profile>/mlx.metallib`.
+Everything past that point is Torobi's own: `extconf.rb` appends a
+Makefile rule that puts it beside the installed bundle, `rake metallib`
+puts it in `lib/torobi/` for a checkout, and the command line finds it
+beside itself in `target/`. `Torobi::Preflight` and `runtime.rs` refuse
+when it is missing, which is the end of the chain and the reason a
+missing file is an error rather than an abort.
+
 bindgen runs in every mode, from the mlx-c headers in the submodule.
 
 Two things follow.
