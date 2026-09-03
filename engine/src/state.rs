@@ -317,3 +317,258 @@ impl TrainState {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::{self, Taps};
+    use crate::fixtures;
+    use crate::tensor::{Tensor, Values};
+
+    fn open(which: (String, String), optimizer: OptimizerConfig) -> (Plan, TrainState) {
+        let (config, weights) = which;
+        let (plan, params) = Plan::open(&config, &weights).unwrap();
+        let state = TrainState::new(&plan, params, optimizer).unwrap();
+        (plan, state)
+    }
+
+    fn sgd(lr: f32) -> OptimizerConfig {
+        OptimizerConfig::Sgd { lr }
+    }
+
+    fn adamw() -> OptimizerConfig {
+        OptimizerConfig::AdamW {
+            lr: 0.1,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.0,
+        }
+    }
+
+    fn values(t: &Tensor) -> Vec<f32> {
+        match &t.values {
+            Values::F32(v) => v.clone(),
+            Values::I32(v) => v.iter().map(|&i| i as f32).collect(),
+        }
+    }
+
+    /// One step, the way a session takes it.
+    fn step(plan: &Plan, state: &mut TrainState, rows: &[f32]) -> f32 {
+        let batch = fixtures::batch_x(rows);
+        let fields = plan.bind(&batch).unwrap();
+        let (loss, grads, _) = executor::differentiate(
+            plan,
+            &state.params,
+            &state.argnums,
+            &fields,
+            &state.rng,
+            &Taps::new(),
+        )
+        .unwrap();
+        state.advance(&loss, &grads).unwrap()
+    }
+
+    #[test]
+    fn a_new_state_differentiates_everything_the_plan_allows() {
+        let (plan, state) = open(fixtures::teacher_and_student(), sgd(0.1));
+        assert_eq!(state.argnums, plan.candidates);
+        assert_eq!(state.step(), 0);
+        assert!(state.loss().is_nan());
+        assert_eq!(state.seed(), 0);
+    }
+
+    #[test]
+    fn a_step_moves_only_what_is_differentiated() {
+        let (plan, mut state) = open(fixtures::teacher_and_student(), sgd(0.1));
+        step(&plan, &mut state, &[1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(state.step(), 1);
+        // The teacher is frozen, so its parameter is exactly as given.
+        let teacher = state.fetch(&plan, "teacher.scale").unwrap();
+        assert_eq!(values(&teacher), vec![3.0, 4.0]);
+        let student = state.fetch(&plan, "student.scale").unwrap();
+        assert_ne!(values(&student), vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn the_lr_knob_takes_effect_from_the_next_step() {
+        let (plan, mut state) = open(fixtures::scaled_mean(), sgd(0.5));
+        assert_eq!(state.lr(), 0.5);
+        state.set_lr(0.25);
+        assert_eq!(state.lr(), 0.25);
+        // d(mean(x*w))/dw with x = [[2, 2]] is [1, 1] (two values, mean
+        // over both), so one step at 0.25 lands at w - 0.25.
+        step(&plan, &mut state, &[2.0, 2.0]);
+        let w = values(&state.fetch(&plan, "m.w").unwrap());
+        assert!((w[0] - 0.75).abs() < 1e-6, "{w:?}");
+    }
+
+    #[test]
+    fn reseeding_restarts_the_draws() {
+        let (_, mut state) = open(fixtures::scaled_mean(), sgd(0.1));
+        let first = state.rng.clone();
+        state.set_seed(7).unwrap();
+        assert_eq!(state.seed(), 7);
+        let seven = crate::tensor::to_tensor(&state.rng).unwrap();
+        state.set_seed(0).unwrap();
+        let zero = crate::tensor::to_tensor(&state.rng).unwrap();
+        assert_eq!(values(&zero), values(&crate::tensor::to_tensor(&first).unwrap()));
+        assert_ne!(values(&seven), values(&zero));
+    }
+
+    #[test]
+    fn freezing_moves_what_autodiff_differentiates() {
+        let (plan, mut state) = open(fixtures::teacher_and_student(), adamw());
+        assert_eq!(plan.paths_of(&state.argnums), vec!["student.scale"]);
+        let moved = state.set_frozen(&plan, "student.*", true);
+        // Nothing would be left to train, so it is refused whole.
+        let e = moved.unwrap_err().to_string();
+        assert!(e.contains("would leave nothing to train"), "{e}");
+        assert_eq!(plan.paths_of(&state.argnums), vec!["student.scale"]);
+    }
+
+    #[test]
+    fn freezing_a_pattern_that_matches_nothing_is_refused() {
+        let (plan, mut state) = open(fixtures::teacher_and_student(), sgd(0.1));
+        let e = state
+            .set_frozen(&plan, "nowhere.*", true)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("no parameter matches"), "{e}");
+    }
+
+    #[test]
+    fn freezing_a_frozen_parameter_is_a_no_op_not_an_error() {
+        // "teacher.scale" is a real path but not a candidate: the pattern
+        // matched, so this is nothing to do rather than a mistake.
+        let (plan, mut state) = open(fixtures::teacher_and_student(), sgd(0.1));
+        let moved = state.set_frozen(&plan, "student.scale", false).unwrap();
+        assert!(moved.is_empty());
+    }
+
+    #[test]
+    fn put_writes_a_parameter_and_refuses_a_mismatch() {
+        let (plan, mut state) = open(fixtures::scaled_mean(), sgd(0.1));
+        let good = Tensor {
+            dtype: mlx_rs::Dtype::Float32,
+            shape: vec![2],
+            values: Values::F32(vec![9.0, 9.0]),
+        };
+        state.put(&plan, "m.w", &good).unwrap();
+        assert_eq!(values(&state.fetch(&plan, "m.w").unwrap()), vec![9.0, 9.0]);
+
+        let wrong_shape = Tensor {
+            dtype: mlx_rs::Dtype::Float32,
+            shape: vec![3],
+            values: Values::F32(vec![0.0; 3]),
+        };
+        let e = state
+            .put(&plan, "m.w", &wrong_shape)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("is not"), "{e}");
+        // Refused, and the parameter is still what it was.
+        assert_eq!(values(&state.fetch(&plan, "m.w").unwrap()), vec![9.0, 9.0]);
+
+        let wrong_dtype = Tensor {
+            dtype: mlx_rs::Dtype::Int32,
+            shape: vec![2],
+            values: Values::I32(vec![0, 0]),
+        };
+        assert!(state.put(&plan, "m.w", &wrong_dtype).is_err());
+        assert!(state.put(&plan, "m.nowhere", &good).is_err());
+        assert!(state.fetch(&plan, "m.nowhere").is_err());
+    }
+
+    #[test]
+    fn a_restored_run_steps_where_a_continuous_one_would() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ckpt").display().to_string();
+        let rows = [1.0f32, 2.0, 3.0, 4.0];
+
+        let (plan, mut straight) = open(fixtures::teacher_and_student(), adamw());
+        for _ in 0..2 {
+            step(&plan, &mut straight, &rows);
+        }
+        straight.save(&plan, &path).unwrap();
+        for _ in 0..3 {
+            step(&plan, &mut straight, &rows);
+        }
+
+        let (plan2, mut resumed) = open(fixtures::teacher_and_student(), adamw());
+        resumed.restore(&plan2, &path).unwrap();
+        assert_eq!(resumed.step(), 2);
+        assert!(resumed.loss().is_nan(), "a restore has taken no step yet");
+        for _ in 0..3 {
+            step(&plan2, &mut resumed, &rows);
+        }
+
+        assert_eq!(resumed.step(), straight.step());
+        let want = values(&straight.fetch(&plan, "student.scale").unwrap());
+        let got = values(&resumed.fetch(&plan2, "student.scale").unwrap());
+        for (w, g) in want.iter().zip(&got) {
+            assert!((w - g).abs() < 1e-6, "{want:?} against {got:?}");
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_of_another_graph_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ckpt").display().to_string();
+        let (plan, state) = open(fixtures::scaled_mean(), sgd(0.1));
+        state.save(&plan, &path).unwrap();
+
+        let (other, mut into) = open(fixtures::teacher_and_student(), sgd(0.1));
+        let e = into.restore(&other, &path).unwrap_err().to_string();
+        assert!(e.contains("belongs to another graph"), "{e}");
+    }
+
+    #[test]
+    fn a_checkpoint_of_another_optimizer_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ckpt").display().to_string();
+        let (plan, state) = open(fixtures::scaled_mean(), sgd(0.1));
+        state.save(&plan, &path).unwrap();
+
+        let (plan2, mut into) = open(fixtures::scaled_mean(), adamw());
+        let e = into.restore(&plan2, &path).unwrap_err().to_string();
+        assert!(e.contains("different optimizer"), "{e}");
+    }
+
+    #[test]
+    fn an_adamw_checkpoint_without_its_slots_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ckpt").display().to_string();
+        let (plan, mut state) = open(fixtures::scaled_mean(), adamw());
+        step(&plan, &mut state, &[1.0, 2.0]);
+        let written = state.save(&plan, &path).unwrap();
+        std::fs::remove_file(std::path::Path::new(&written).join("optimizer.safetensors")).unwrap();
+
+        let (plan2, mut into) = open(fixtures::scaled_mean(), adamw());
+        let e = into.restore(&plan2, &path).unwrap_err().to_string();
+        assert!(e.contains("no optimizer state"), "{e}");
+        // Refused before anything moved.
+        assert_eq!(into.step(), 0);
+    }
+
+    #[test]
+    fn a_refused_restore_leaves_the_run_exactly_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ckpt").display().to_string();
+        let (plan, state) = open(fixtures::scaled_mean(), sgd(0.1));
+        state.save(&plan, &path).unwrap();
+
+        let (plan2, mut into) = open(fixtures::scaled_mean(), sgd(0.1));
+        step(&plan2, &mut into, &[1.0, 2.0]);
+        let before = values(&into.fetch(&plan2, "m.w").unwrap());
+
+        // A parameter file the manifest promises but the directory lacks.
+        std::fs::remove_file(
+            std::path::Path::new(&path).join("parameters.safetensors"),
+        )
+        .unwrap();
+        assert!(into.restore(&plan2, &path).is_err());
+        assert_eq!(into.step(), 1);
+        assert_eq!(values(&into.fetch(&plan2, "m.w").unwrap()), before);
+    }
+}

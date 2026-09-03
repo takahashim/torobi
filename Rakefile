@@ -26,8 +26,19 @@ task :metallib do
   puts "copied #{source} -> #{destination}"
 end
 
+# The engine's own tests, which reach MLX directly rather than through the
+# extension. Serial, and not by preference: MLX's default stream is one
+# command queue, and two threads submitting to it at once trips a Metal
+# assertion ("Completed handler provided after commit call") that aborts
+# the process. The extension holds a mutex for the same reason; a cargo
+# test binary has nothing holding one, so the harness is told not to.
+desc "run the engine's Rust tests"
+task :rust_test do
+  sh "cargo test -p torobi-engine -- --test-threads=1"
+end
+
 Minitest::TestTask.create
 
 task compile: [] # defined by RbSys::ExtensionTask above
 task test: %i[compile metallib]
-task default: :test
+task default: %i[test rust_test]

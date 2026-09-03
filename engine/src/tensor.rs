@@ -41,6 +41,21 @@ impl Values {
     }
 }
 
+/// A shape and a size, never the numbers: a batch tensor can hold a
+/// million of them, and a panic message that printed them all would be
+/// unreadable.
+impl std::fmt::Debug for Tensor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Tensor({:?} {:?}, {} values)",
+            self.dtype,
+            self.shape,
+            self.values.len()
+        )
+    }
+}
+
 impl Tensor {
     pub fn to_array(&self) -> Array {
         match &self.values {
@@ -135,4 +150,125 @@ pub fn to_tensor(array: &Array) -> Result<Tensor> {
         shape: array.shape().to_vec(),
         values,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn packed(dtype: &str, shape: &[i32], bytes: Vec<u8>) -> PackedTensor {
+        PackedTensor {
+            dtype: dtype.to_string(),
+            shape: shape.to_vec(),
+            bytes,
+        }
+    }
+
+    #[test]
+    fn unpacks_f32_in_native_order() {
+        let bytes = [1.5f32, -2.0]
+            .iter()
+            .flat_map(|v| v.to_ne_bytes())
+            .collect();
+        let t = packed("f32", &[2], bytes).to_tensor("x").unwrap();
+        assert_eq!(t.dtype, Dtype::Float32);
+        assert_eq!(t.shape, vec![2]);
+        match t.values {
+            Values::F32(v) => assert_eq!(v, vec![1.5, -2.0]),
+            _ => panic!("f32 came back as something else"),
+        }
+    }
+
+    #[test]
+    fn unpacks_i32_because_an_embedding_reads_ids() {
+        let bytes = [7i32, 0].iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let t = packed("i32", &[2], bytes).to_tensor("ids").unwrap();
+        assert_eq!(t.dtype, Dtype::Int32);
+        match t.values {
+            Values::I32(v) => assert_eq!(v, vec![7, 0]),
+            _ => panic!("i32 came back as something else"),
+        }
+    }
+
+    #[test]
+    fn refuses_bytes_that_do_not_divide_and_says_which_input() {
+        let e = packed("f32", &[1], vec![0, 1, 2]).to_tensor("x").unwrap_err();
+        let message = e.to_string();
+        assert!(message.contains("\"x\""), "{message}");
+        assert!(message.contains("3 bytes"), "{message}");
+    }
+
+    #[test]
+    fn refuses_a_dtype_the_boundary_does_not_carry() {
+        let e = packed("f64", &[1], vec![0; 8]).to_tensor("x").unwrap_err();
+        assert!(e.to_string().contains("f64"), "{e}");
+    }
+
+    #[test]
+    fn unpack_names_the_input_that_failed() {
+        let batch: PackedBatch = [
+            ("good".to_string(), packed("f32", &[1], vec![0; 4])),
+            ("bad".to_string(), packed("f32", &[1], vec![0; 5])),
+        ]
+        .into_iter()
+        .collect();
+        let e = unpack(&batch).unwrap_err();
+        assert!(e.to_string().contains("\"bad\""), "{e}");
+    }
+
+    #[test]
+    fn a_strided_array_comes_back_in_reading_order() {
+        // A gradient can arrive through a transpose. Reading it out needs
+        // contiguous memory, so to_tensor must not hand back the strides.
+        let a = Array::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let t = to_tensor(&a.transpose_axes(&[1, 0]).unwrap()).unwrap();
+        assert_eq!(t.shape, vec![3, 2]);
+        match t.values {
+            Values::F32(v) => assert_eq!(v, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]),
+            _ => panic!("f32 came back as something else"),
+        }
+    }
+
+    #[test]
+    fn an_i32_array_stays_i32_and_anything_else_converts() {
+        let ids = to_tensor(&Array::from_slice(&[3i32, 4], &[2])).unwrap();
+        assert_eq!(ids.dtype, Dtype::Int32);
+        assert!(matches!(ids.values, Values::I32(_)));
+
+        let flags = to_tensor(&Array::from_slice(&[true, false], &[2])).unwrap();
+        assert_eq!(flags.dtype, Dtype::Bool);
+        match flags.values {
+            Values::F32(v) => assert_eq!(v, vec![1.0, 0.0]),
+            _ => panic!("bool should convert to f32, not be reinterpreted"),
+        }
+    }
+
+    #[test]
+    fn to_array_round_trips_both_payloads() {
+        for t in [
+            Tensor {
+                dtype: Dtype::Float32,
+                shape: vec![2, 1],
+                values: Values::F32(vec![1.0, 2.0]),
+            },
+            Tensor {
+                dtype: Dtype::Int32,
+                shape: vec![2, 1],
+                values: Values::I32(vec![1, 2]),
+            },
+        ] {
+            let back = to_tensor(&t.to_array()).unwrap();
+            assert_eq!(back.dtype, t.dtype);
+            assert_eq!(back.shape, t.shape);
+        }
+    }
+
+    #[test]
+    fn only_the_declared_dtypes_have_names() {
+        assert_eq!(dtype_named("f32"), Some(Dtype::Float32));
+        assert_eq!(dtype_named("bf16"), Some(Dtype::Bfloat16));
+        assert_eq!(dtype_named("i32"), Some(Dtype::Int32));
+        assert_eq!(dtype_named("bool"), Some(Dtype::Bool));
+        assert_eq!(dtype_named("f64"), None);
+    }
 }

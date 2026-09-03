@@ -25,3 +25,7 @@ anyhow = "1"
 # The config digest a checkpoint records, computed over the same bytes
 # the Ruby side hashed.
 sha2 = "0.10"
+
+[dev-dependencies]
+# Checkpoint tests write real directories; nothing here mocks a filesystem.
+tempfile = "3"

@@ -259,3 +259,220 @@ impl Session {
         Ok(loss)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures;
+    use crate::tensor::Values;
+
+    fn session(which: (String, String)) -> Session {
+        let (config, weights) = which;
+        Session::open(&config, &weights).unwrap()
+    }
+
+    fn values(t: &Tensor) -> Vec<f32> {
+        match &t.values {
+            Values::F32(v) => v.clone(),
+            Values::I32(v) => v.iter().map(|&i| i as f32).collect(),
+        }
+    }
+
+    fn close(got: &[f32], want: &[f32]) {
+        within(got, want, 1e-6);
+    }
+
+    fn within(got: &[f32], want: &[f32], tolerance: f32) {
+        assert_eq!(got.len(), want.len(), "{got:?} against {want:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < tolerance, "{got:?} against {want:?}");
+        }
+    }
+
+    #[test]
+    fn the_gradient_is_the_one_the_arithmetic_says() {
+        // loss = mean(x * w) over four values, so d(loss)/dw_j is the sum
+        // of column j divided by four.
+        let session = session(fixtures::scaled_mean());
+        let batch = fixtures::batch_x(&[1.0, 2.0, 3.0, 4.0]);
+        let grads = session.gradients(&batch).unwrap();
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, "m.w");
+        close(&values(&grads[0].1), &[(1.0 + 3.0) / 4.0, (2.0 + 4.0) / 4.0]);
+
+        let (loss, _) = session.loss_and_grads(&batch).unwrap();
+        // w = [1, 2], so x * w is [[1, 4], [3, 8]] and the mean is 4.
+        assert!((loss.item::<f32>() - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_frozen_model_has_no_gradient_to_report() {
+        let session = session(fixtures::teacher_and_student());
+        let grads = session.gradients(&fixtures::batch_x(&[1.0, 1.0])).unwrap();
+        assert_eq!(
+            grads.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
+            vec!["student.scale"]
+        );
+        assert_eq!(
+            session.parameter_paths(),
+            vec!["student.scale", "teacher.scale"]
+        );
+        assert_eq!(session.trainable(), vec!["student.scale"]);
+    }
+
+    #[test]
+    fn a_model_that_reads_one_declared_after_it_is_refused_by_name() {
+        let session = session(fixtures::reader_before_producer());
+        let e = session
+            .gradients(&fixtures::batch_x(&[1.0, 1.0]))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("source.out has not been produced"), "{e}");
+        assert!(e.contains("declared before what reads it"), "{e}");
+    }
+
+    #[test]
+    fn training_moves_the_loss_toward_the_teacher() {
+        let mut session = session(fixtures::teacher_and_student());
+        session.set_lr(0.05);
+        let batch = fixtures::batch_x(&[1.0, 1.0, 2.0, 2.0]);
+        let first = session.run_step(&batch).unwrap();
+        for _ in 0..50 {
+            session.run_step(&batch).unwrap();
+        }
+        assert_eq!(session.step(), 51);
+        assert!(session.loss() < first * 0.1, "{} -> {}", first, session.loss());
+        // It converged on the teacher's scale, which is what the objective
+        // asks for. Fifty steps of plain SGD get three digits, not six.
+        within(&values(&session.fetch("student.scale").unwrap()), &[3.0, 4.0], 1e-2);
+        // And the teacher did not move.
+        close(&values(&session.fetch("teacher.scale").unwrap()), &[3.0, 4.0]);
+    }
+
+    #[test]
+    fn a_span_needs_at_least_one_batch() {
+        let mut session = session(fixtures::scaled_mean());
+        let e = session.run_steps(&[]).unwrap_err().to_string();
+        assert!(e.contains("at least one batch"), "{e}");
+        assert_eq!(session.step(), 0);
+    }
+
+    #[test]
+    fn a_span_takes_one_step_per_batch() {
+        let mut session = session(fixtures::scaled_mean());
+        let batches = vec![
+            fixtures::batch_x(&[1.0, 1.0]),
+            fixtures::batch_x(&[2.0, 2.0, 3.0, 3.0]),
+        ];
+        let loss = session.run_steps(&batches).unwrap();
+        assert_eq!(session.step(), 2);
+        assert_eq!(loss, session.loss());
+    }
+
+    #[test]
+    fn a_tap_reports_what_the_step_computed() {
+        let mut session = session(fixtures::scaled_mean());
+        assert_eq!(session.node_names(), vec!["scaled"]);
+        assert!(session.tapped().unwrap().is_empty());
+
+        session.tap("scaled", "mean").unwrap();
+        assert_eq!(session.taps(), vec!["scaled"]);
+        // x * w with x = [[1, 1]] and w = [1, 2] is [[1, 2]], mean 1.5.
+        session.run_step(&fixtures::batch_x(&[1.0, 1.0])).unwrap();
+        let seen = session.tapped().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "scaled");
+        close(&values(&seen[0].1), &[1.5]);
+
+        assert!(session.untap("scaled"));
+        assert!(!session.untap("scaled"));
+        assert!(session.taps().is_empty());
+    }
+
+    #[test]
+    fn a_full_tap_brings_back_the_tensor_and_a_reduction_a_scalar() {
+        let mut session = session(fixtures::scaled_mean());
+        session.tap("scaled", "full").unwrap();
+        session.run_step(&fixtures::batch_x(&[1.0, 1.0])).unwrap();
+        let seen = session.tapped().unwrap();
+        assert_eq!(seen[0].1.shape, vec![1, 2]);
+        close(&values(&seen[0].1), &[1.0, 2.0]);
+    }
+
+    #[test]
+    fn a_tap_on_a_name_no_node_carries_is_refused() {
+        let mut session = session(fixtures::scaled_mean());
+        let e = session.tap("nowhere", "mean").unwrap_err().to_string();
+        assert!(e.contains("no value is named"), "{e}");
+        let e = session.tap("scaled", "median").unwrap_err().to_string();
+        assert!(e.contains("is not a statistic"), "{e}");
+        assert!(session.taps().is_empty());
+    }
+
+    #[test]
+    fn taps_do_not_change_what_a_step_computes() {
+        let batch = fixtures::batch_x(&[1.0, 2.0, 3.0, 4.0]);
+        let mut quiet = session(fixtures::scaled_mean());
+        let mut watched = session(fixtures::scaled_mean());
+        watched.tap("scaled", "norm").unwrap();
+        for _ in 0..3 {
+            quiet.run_step(&batch).unwrap();
+            watched.run_step(&batch).unwrap();
+        }
+        assert_eq!(quiet.loss(), watched.loss());
+        close(
+            &values(&watched.fetch("m.w").unwrap()),
+            &values(&quiet.fetch("m.w").unwrap()),
+        );
+    }
+
+    #[test]
+    fn the_session_reports_what_it_reads_and_what_it_holds() {
+        let session = session(fixtures::teacher_and_student());
+        assert_eq!(session.input_names(), vec!["x"]);
+        assert_eq!(session.trainable_candidates(), vec!["student.scale"]);
+        assert_eq!(session.optimizer_config().name(), "sgd");
+        assert_eq!(session.seed(), 0);
+        assert!(session.loss().is_nan());
+    }
+
+    #[test]
+    fn freezing_and_thawing_move_what_a_step_reports() {
+        let (config, weights) = fixtures::teacher_and_student();
+        // Train both, so there is something to freeze that leaves a rest.
+        let both = config.replace(r#""train":["student"]"#, r#""train":["student","teacher"]"#);
+        let mut session = Session::open(&both, &weights).unwrap();
+        assert_eq!(
+            session.trainable(),
+            vec!["student.scale", "teacher.scale"]
+        );
+        let moved = session.set_frozen("teacher.*", true).unwrap();
+        assert_eq!(moved, vec!["teacher.scale"]);
+        assert_eq!(session.trainable(), vec!["student.scale"]);
+
+        let grads = session.gradients(&fixtures::batch_x(&[1.0, 1.0])).unwrap();
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, "student.scale");
+
+        assert_eq!(session.set_frozen("teacher.*", false).unwrap(), vec!["teacher.scale"]);
+        assert_eq!(session.trainable(), vec!["student.scale", "teacher.scale"]);
+    }
+
+    #[test]
+    fn a_checkpoint_round_trips_through_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ckpt").display().to_string();
+        let batch = fixtures::batch_x(&[1.0, 2.0, 3.0, 4.0]);
+
+        let mut session = session(fixtures::scaled_mean());
+        session.run_step(&batch).unwrap();
+        let written = session.save(&path).unwrap();
+        assert!(std::path::Path::new(&written).join("manifest.json").exists());
+        let want = values(&session.fetch("m.w").unwrap());
+
+        let mut fresh = self::session(fixtures::scaled_mean());
+        fresh.restore(&path).unwrap();
+        assert_eq!(fresh.step(), 1);
+        close(&values(&fresh.fetch("m.w").unwrap()), &want);
+    }
+}

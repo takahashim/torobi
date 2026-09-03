@@ -267,3 +267,232 @@ impl Pattern {
         hit
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures;
+    use crate::tensor::Values;
+    use mlx_rs::Dtype;
+    use serde_json::{json, Value};
+
+    fn open(config: &str, weights: &str) -> Result<(Plan, Vec<Array>)> {
+        Plan::open(config, weights)
+    }
+
+    /// The message from an open that should have failed. `unwrap_err`
+    /// would want Debug on a Plan, which is a lot of Array to print.
+    fn refusal(config: &str, weights: &str) -> String {
+        match open(config, weights) {
+            Ok(_) => panic!("this should not have opened"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn parameters_are_ordered_by_model_name_then_declaration() {
+        let (config, weights) = fixtures::teacher_and_student();
+        let (plan, params) = open(&config, &weights).unwrap();
+        // "student" sorts before "teacher", which is the order a
+        // checkpoint's parameter list has to follow.
+        assert_eq!(plan.paths, vec!["student.scale", "teacher.scale"]);
+        assert_eq!(params.len(), 2);
+        assert_eq!(plan.models[0].slice, 0..1);
+        assert_eq!(plan.models[1].slice, 1..2);
+    }
+
+    #[test]
+    fn only_a_trained_models_parameters_are_candidates() {
+        let (config, weights) = fixtures::teacher_and_student();
+        let (plan, _) = open(&config, &weights).unwrap();
+        assert_eq!(plan.candidates, vec![0]);
+        assert_eq!(plan.candidate_paths(), vec!["student.scale"]);
+    }
+
+    #[test]
+    fn the_digest_is_of_the_bytes_handed_over() {
+        let (config, weights) = fixtures::scaled_mean();
+        let (plan, _) = open(&config, &weights).unwrap();
+        let same = open(&config, &weights).unwrap().0;
+        assert_eq!(plan.config_digest, same.config_digest);
+        assert_eq!(plan.config_digest.len(), 64);
+
+        // Whitespace is part of the bytes, not of the meaning; the Ruby
+        // side digests the canonical form, and the engine digests whatever
+        // it was actually given. They agree because they see the same bytes.
+        let spaced = format!("{config} ");
+        let other = open(&spaced, &weights).unwrap().0;
+        assert_ne!(plan.config_digest, other.config_digest);
+    }
+
+    #[test]
+    fn a_missing_parameter_is_named() {
+        let (config, _) = fixtures::scaled_mean();
+        let e = refusal(&config, r#"{"params":{}}"#);
+        assert!(e.contains("m.w"), "{e}");
+    }
+
+    #[test]
+    fn a_parameter_of_the_wrong_shape_is_refused() {
+        let (config, _) = fixtures::scaled_mean();
+        let weights = json!({"params": {"m.w": {"shape": [3], "data": [1.0, 2.0, 3.0]}}});
+        let e = refusal(&config, &weights.to_string());
+        assert!(e.contains("is not the declared"), "{e}");
+    }
+
+    #[test]
+    fn a_parameter_with_too_few_values_is_refused_rather_than_read_past() {
+        let (config, _) = fixtures::scaled_mean();
+        let weights = json!({"params": {"m.w": {"shape": [2], "data": [1.0]}}});
+        let e = refusal(&config, &weights.to_string());
+        assert!(e.contains("1 values for shape"), "{e}");
+    }
+
+    #[test]
+    fn a_run_with_nothing_to_train_is_refused() {
+        let (config, weights) = fixtures::teacher_and_student();
+        let frozen = config.replace(r#""train":["student"]"#, r#""train":[]"#);
+        assert_ne!(frozen, config, "the fixture's train list moved");
+        let e = refusal(&frozen, &weights);
+        assert!(e.contains("nothing to train"), "{e}");
+    }
+
+    #[test]
+    fn a_config_with_no_models_is_refused() {
+        let config = fixtures::config(json!({}), Value::Null, json!([]));
+        let e = refusal(&config, r#"{"params":{}}"#);
+        assert!(e.contains("no models"), "{e}");
+    }
+
+    #[test]
+    fn input_names_are_sorted_and_deduplicated_across_graphs() {
+        let (config, weights) = fixtures::teacher_and_student();
+        let (plan, _) = open(&config, &weights).unwrap();
+        // Both models read the same field; the objective reads neither.
+        assert_eq!(plan.input_names(), vec!["x"]);
+    }
+
+    #[test]
+    fn node_names_are_what_a_tap_may_ask_for() {
+        let (config, weights) = fixtures::scaled_mean();
+        let (plan, _) = open(&config, &weights).unwrap();
+        assert_eq!(plan.node_names(), vec!["scaled"]);
+    }
+
+    fn tensor(shape: Vec<i32>, values: Values) -> Tensor {
+        let dtype = match values {
+            Values::F32(_) => Dtype::Float32,
+            Values::I32(_) => Dtype::Int32,
+        };
+        Tensor {
+            dtype,
+            shape,
+            values,
+        }
+    }
+
+    fn plan_for_bind() -> Plan {
+        let (config, weights) = fixtures::scaled_mean();
+        open(&config, &weights).unwrap().0
+    }
+
+    #[test]
+    fn a_symbolic_dimension_may_differ_from_batch_to_batch() {
+        let plan = plan_for_bind();
+        for rows in [1, 5] {
+            let batch: BTreeMap<String, Tensor> = [(
+                "x".to_string(),
+                tensor(vec![rows, 2], Values::F32(vec![0.0; rows as usize * 2])),
+            )]
+            .into_iter()
+            .collect();
+            assert!(plan.bind(&batch).is_ok(), "{rows} rows should bind");
+        }
+    }
+
+    #[test]
+    fn a_fixed_dimension_may_not() {
+        let plan = plan_for_bind();
+        let batch = [(
+            "x".to_string(),
+            tensor(vec![2, 3], Values::F32(vec![0.0; 6])),
+        )]
+        .into_iter()
+        .collect();
+        let e = plan.bind(&batch).unwrap_err();
+        assert!(e.to_string().contains("dimension 1 is 3"), "{e}");
+    }
+
+    #[test]
+    fn a_batch_of_the_wrong_rank_is_refused() {
+        let plan = plan_for_bind();
+        let batch = [("x".to_string(), tensor(vec![4], Values::F32(vec![0.0; 4])))]
+            .into_iter()
+            .collect();
+        let e = plan.bind(&batch).unwrap_err();
+        assert!(e.to_string().contains("rank 1"), "{e}");
+    }
+
+    #[test]
+    fn a_batch_of_the_wrong_dtype_is_refused() {
+        let plan = plan_for_bind();
+        let batch = [("x".to_string(), tensor(vec![2, 2], Values::I32(vec![0; 4])))]
+            .into_iter()
+            .collect();
+        let e = plan.bind(&batch).unwrap_err();
+        assert!(e.to_string().contains("declared f32"), "{e}");
+    }
+
+    #[test]
+    fn a_batch_whose_values_do_not_fill_its_shape_is_refused() {
+        let plan = plan_for_bind();
+        let batch = [(
+            "x".to_string(),
+            tensor(vec![2, 2], Values::F32(vec![0.0; 3])),
+        )]
+        .into_iter()
+        .collect();
+        let e = plan.bind(&batch).unwrap_err();
+        assert!(e.to_string().contains("3 values for shape"), "{e}");
+    }
+
+    #[test]
+    fn a_field_no_graph_reads_is_refused_rather_than_ignored() {
+        let plan = plan_for_bind();
+        let batch = [
+            ("x".to_string(), tensor(vec![1, 2], Values::F32(vec![0.0; 2]))),
+            ("y".to_string(), tensor(vec![1], Values::F32(vec![0.0]))),
+        ]
+        .into_iter()
+        .collect();
+        let e = plan.bind(&batch).unwrap_err();
+        assert!(e.to_string().contains("no input named \"y\""), "{e}");
+    }
+
+    #[test]
+    fn a_field_a_graph_reads_but_the_batch_omits_is_refused() {
+        let plan = plan_for_bind();
+        let e = plan.bind(&BTreeMap::new()).unwrap_err();
+        assert!(e.to_string().contains("missing input \"x\""), "{e}");
+    }
+
+    #[test]
+    fn a_pattern_is_a_path_or_a_prefix() {
+        let mut exact = Pattern::parse("a.b").unwrap();
+        assert!(exact.matches("a.b"));
+        assert!(!exact.matches("a.bc"));
+        assert!(!exact.matches("a"));
+        assert!(exact.matched_any);
+
+        let mut prefix = Pattern::parse("a.*").unwrap();
+        assert!(prefix.matches("a.b"));
+        assert!(prefix.matches("a.b.c"));
+        assert!(!prefix.matches("ab.c"));
+
+        let mut nothing = Pattern::parse("z").unwrap();
+        assert!(!nothing.matches("a"));
+        assert!(!nothing.matched_any);
+
+        assert!(Pattern::parse("").is_err());
+    }
+}

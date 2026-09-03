@@ -7,6 +7,8 @@
 
 pub mod checkpoint;
 pub mod executor;
+#[cfg(test)]
+mod fixtures;
 pub mod graph;
 pub mod interp;
 pub mod memory;

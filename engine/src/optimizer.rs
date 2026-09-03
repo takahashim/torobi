@@ -79,6 +79,20 @@ pub struct Optimizer {
     t: u64,
 }
 
+/// The rule and how much state it is carrying, never the slots
+/// themselves: a moment is the size of the parameter it belongs to.
+impl std::fmt::Debug for Optimizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Optimizer({}, {} slots, {} steps)",
+            self.config.name(),
+            self.m.len(),
+            self.t
+        )
+    }
+}
+
 impl Optimizer {
     pub fn new(config: Config, params: &[Array], argnums: &[i32]) -> Result<Self> {
         let slots = || -> Result<Vec<Array>> {
@@ -242,5 +256,212 @@ impl Optimizer {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mlx_rs::transforms::eval;
+
+    fn array(values: &[f32]) -> Array {
+        Array::from_slice(values, &[values.len() as i32])
+    }
+
+    fn read(array: &Array) -> Vec<f32> {
+        eval(std::iter::once(array)).unwrap();
+        array.as_slice::<f32>().to_vec()
+    }
+
+    fn close(got: &[f32], want: &[f32]) {
+        assert_eq!(got.len(), want.len(), "{got:?} against {want:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 1e-6, "{got:?} against {want:?}");
+        }
+    }
+
+    const ADAMW: Config = Config::AdamW {
+        lr: 0.1,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+        weight_decay: 0.0,
+    };
+
+    #[test]
+    fn a_config_names_itself_the_way_a_manifest_reads_it() {
+        // serde would have called this "adam_w"; a checkpoint written by
+        // one spelling and read by the other would be refused as foreign.
+        let json = serde_json::to_string(&ADAMW).unwrap();
+        assert!(json.contains(r#""kind":"adamw""#), "{json}");
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ADAMW);
+    }
+
+    #[test]
+    fn adamw_defaults_are_filled_in_from_a_bare_config() {
+        let back: Config = serde_json::from_str(r#"{"kind":"adamw","lr":0.5}"#).unwrap();
+        assert_eq!(
+            back,
+            Config::AdamW {
+                lr: 0.5,
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: 0.0,
+            }
+        );
+    }
+
+    #[test]
+    fn sgd_subtracts_the_gradient_scaled_by_the_rate() {
+        let opt = Optimizer::new(Config::Sgd { lr: 0.5 }, &[array(&[1.0, 2.0])], &[0]).unwrap();
+        let mut params = vec![array(&[1.0, 2.0])];
+        let next = opt.next(&mut params, &[0], &[array(&[2.0, 4.0])]).unwrap();
+        close(&read(&params[0]), &[0.0, 0.0]);
+        assert_eq!(next.steps_taken(), 1);
+        // The original is untouched: a step that fails must leave the run
+        // as it was, which is why next() returns rather than mutates.
+        assert_eq!(opt.steps_taken(), 0);
+    }
+
+    #[test]
+    fn adamws_first_step_is_the_rate_regardless_of_the_gradients_size() {
+        // With t = 1 the bias correction cancels the moments, so the step
+        // is lr * g / (|g| + eps): the sign of the gradient, times lr.
+        // This is the property that catches a missing correction.
+        let params0 = vec![array(&[0.0, 0.0])];
+        let opt = Optimizer::new(ADAMW, &params0, &[0]).unwrap();
+        let mut params = params0.clone();
+        opt.next(&mut params, &[0], &[array(&[1e-3, -50.0])]).unwrap();
+        close(&read(&params[0]), &[-0.1, 0.1]);
+    }
+
+    #[test]
+    fn adamw_carries_its_step_count_so_a_resumed_run_steps_the_same() {
+        let params0 = vec![array(&[0.0])];
+        let grads = [array(&[1.0])];
+
+        let mut straight = vec![array(&[0.0])];
+        let mut opt = Optimizer::new(ADAMW, &params0, &[0]).unwrap();
+        for _ in 0..3 {
+            opt = opt.next(&mut straight, &[0], &grads).unwrap();
+        }
+
+        // The same three steps, with the state carried across a restore.
+        let mut resumed = vec![array(&[0.0])];
+        let mut a = Optimizer::new(ADAMW, &params0, &[0]).unwrap();
+        a = a.next(&mut resumed, &[0], &grads).unwrap();
+        let (m, v) = a.slots();
+        let (m, v) = (m.to_vec(), v.to_vec());
+        let t = a.steps_taken();
+        let mut b = Optimizer::new(ADAMW, &params0, &[0]).unwrap();
+        b.restore(m, v, t);
+        for _ in 0..2 {
+            b = b.next(&mut resumed, &[0], &grads).unwrap();
+        }
+
+        assert_eq!(b.steps_taken(), opt.steps_taken());
+        close(&read(&resumed[0]), &read(&straight[0]));
+    }
+
+    #[test]
+    fn a_forgotten_step_count_would_take_a_different_step() {
+        // Pins that the assertion above has teeth: restoring t = 0 does
+        // not land where a continuous run lands.
+        let params0 = vec![array(&[0.0])];
+        let grads = [array(&[1.0])];
+        let mut straight = vec![array(&[0.0])];
+        let mut opt = Optimizer::new(ADAMW, &params0, &[0]).unwrap();
+        for _ in 0..2 {
+            opt = opt.next(&mut straight, &[0], &grads).unwrap();
+        }
+
+        let mut wrong = vec![array(&[0.0])];
+        let mut a = Optimizer::new(ADAMW, &params0, &[0]).unwrap();
+        a = a.next(&mut wrong, &[0], &grads).unwrap();
+        let (m, v) = a.slots();
+        let (m, v) = (m.to_vec(), v.to_vec());
+        let mut b = Optimizer::new(ADAMW, &params0, &[0]).unwrap();
+        b.restore(m, v, 0);
+        b.next(&mut wrong, &[0], &grads).unwrap();
+
+        let (want, got) = (read(&straight[0]), read(&wrong[0]));
+        assert!((want[0] - got[0]).abs() > 1e-4, "{want:?} against {got:?}");
+    }
+
+    #[test]
+    fn decoupled_decay_shrinks_the_parameter_and_not_the_moments() {
+        let decayed = Config::AdamW {
+            lr: 0.1,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.5,
+        };
+        let params0 = vec![array(&[2.0])];
+        let opt = Optimizer::new(decayed, &params0, &[0]).unwrap();
+        let mut params = params0.clone();
+        let next = opt.next(&mut params, &[0], &[array(&[1.0])]).unwrap();
+        // Adam's own step is lr, and the decay is lr * wd * param.
+        close(&read(&params[0]), &[2.0 - 0.1 - 0.1 * 0.5 * 2.0]);
+        // The moment saw the gradient alone: 0.1 * 1.0.
+        close(&read(&next.slots().0[0]), &[0.1]);
+    }
+
+    #[test]
+    fn refit_keeps_what_stays_zeroes_what_thaws_and_drops_what_freezes() {
+        let params = vec![array(&[0.0]), array(&[0.0]), array(&[0.0])];
+        let mut opt = Optimizer::new(ADAMW, &params, &[0, 1]).unwrap();
+        let mut copy = params.clone();
+        opt = opt
+            .next(&mut copy, &[0, 1], &[array(&[1.0]), array(&[2.0])])
+            .unwrap();
+        let before: Vec<Vec<f32>> = opt.slots().0.iter().map(read).collect();
+        assert_eq!(before.len(), 2);
+
+        // Freeze 0, thaw 2: parameter 1's slot follows it to the front.
+        opt.refit(&[0, 1], &[1, 2], &params).unwrap();
+        let after: Vec<Vec<f32>> = opt.slots().0.iter().map(read).collect();
+        assert_eq!(after.len(), 2);
+        close(&after[0], &before[1]);
+        close(&after[1], &[0.0]);
+        // A thawed parameter joins a run in progress; the count is the
+        // run's, so its bias correction is too.
+        assert_eq!(opt.steps_taken(), 1);
+    }
+
+    #[test]
+    fn refit_is_nothing_for_an_optimizer_with_no_slots() {
+        let params = vec![array(&[0.0]), array(&[0.0])];
+        let mut opt = Optimizer::new(Config::Sgd { lr: 0.1 }, &params, &[0]).unwrap();
+        opt.refit(&[0], &[0, 1], &params).unwrap();
+        assert!(opt.slots().0.is_empty());
+        assert!(!opt.wants_slots());
+    }
+
+    #[test]
+    fn a_gradient_count_that_does_not_match_is_refused() {
+        let params = vec![array(&[0.0]), array(&[0.0])];
+        let opt = Optimizer::new(Config::Sgd { lr: 0.1 }, &params, &[0, 1]).unwrap();
+        let mut copy = params.clone();
+        let e = opt
+            .next(&mut copy, &[0, 1], &[array(&[1.0])])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("1 gradients for 2"), "{e}");
+    }
+
+    #[test]
+    fn slots_that_do_not_belong_to_this_run_are_refused_not_indexed_past() {
+        let params = vec![array(&[0.0]), array(&[0.0])];
+        let mut opt = Optimizer::new(ADAMW, &params, &[0, 1]).unwrap();
+        opt.restore(Vec::new(), Vec::new(), 7);
+        let mut copy = params.clone();
+        let e = opt
+            .next(&mut copy, &[0, 1], &[array(&[1.0]), array(&[1.0])])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("did not come from this session"), "{e}");
     }
 }

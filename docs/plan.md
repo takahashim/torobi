@@ -554,16 +554,21 @@ Ruby へ返すのは loss・metrics・明示的に copy したテンソルに限
 
 1. **純 Ruby の構造テスト**: 所有権、位相順序、安定した parameter path、直列化の
    round-trip、決定的 digest、shape / dtype 推論、config 検証。native 不要
-2. **native 境界テスト**(§4.1): 例外変換、panic が C を貫通しないこと、致命の挙動、
+2. **engine の Rust 単体テスト**(`rake rust_test`): 境界値型、GraphConfig の受理と拒否、
+   batch の束縛、optimizer の算術と slot の追従、freeze 窓、checkpoint の往復と拒否。
+   Ruby を通さずエンジン内部の契約を留める層。**`--test-threads=1` で回す**: MLX の
+   default stream は単一のコマンドキューで、2 スレッドが同時に投入すると Metal の
+   assertion がプロセスごと落とす(拡張が mutex を持つのと同じ理由)
+3. **native 境界テスト**(§4.1): 例外変換、panic が C を貫通しないこと、致命の挙動、
    GVL 解放、GC 下での生存、二重 close。**subprocess で回す**
-3. **Python MLX との differential**: forward、scalar loss、parameter path ごとの
+4. **Python MLX との differential**: forward、scalar loss、parameter path ごとの
    gradient、optimizer state、更新後 parameter、checkpoint load 後の最初の step。
    oracle は版付きの成果物として生成し、**生成できない場合は fail closed**(pass 扱いにしない)
-4. **数学的テスト**: 小さいテンソルでの有限差分、broadcasting と reduction の property、
+5. **数学的テスト**: 小さいテンソルでの有限差分、broadcasting と reduction の property、
    weight sharing 時の勾配加算、softmax / cross entropy の数値安定性、極値・zero-size・
    singleton、dtype ごとの tolerance
-5. **収束テスト**: 線形回帰、小さな MLP、tiny dataset の過学習、そして M3b の parity
-6. **運用テスト**: memory plateau(1,000 / 10,000 step)、強制 GC、checkpoint の中断と
+6. **収束テスト**: 線形回帰、小さな MLP、tiny dataset の過学習、そして M3b の parity
+7. **運用テスト**: memory plateau(1,000 / 10,000 step)、強制 GC、checkpoint の中断と
    resume、スレッドの進行、隔離環境での installed-gem smoke
 
 ## 13. リスク台帳(v3.2 で更新)
@@ -681,7 +686,24 @@ digest・path・shape・optimizer 種別を読み戻しで検証し、不一致�
 
 - checkpoint の完全性(§11.2 の graph.json、epoch、sampler position、dtype inventory)。
   現状は engine-state checkpoint であって run checkpoint ではない
-- Rust 側の単体テストが 0 件
-- `session.rs` の分割(ExecutionPlan / TrainState / Executor / Session)
 - rollback ノブ、損失重みノブ
 - 長時間学習のための `Process.spawn` runner(§11.4 の配布方針と同じ判断)
+
+### 15.5 engine の内部整理(2026-09-03)
+
+916 行の `session.rs` が 7 つの責務を抱えていたのを、境界に沿って割った。
+
+| module | 何を持つか |
+| --- | --- |
+| `tensor.rs` | 境界を渡る値(`Tensor` / `PackedTensor` / packed の解凍) |
+| `plan.rs` | run が何をするか。open 時に確定し、以後動かない(models、paths、candidates、digest、batch の束縛、freeze パターン) |
+| `state.rs` | run が何を溜めたか。動くのはここだけで、動くのは `advance` 1 箇所(params、argnums、optimizer、RNG、counters、checkpoint) |
+| `executor.rs` | step をどう計算するか。状態を持たない関数だけ(forward / resolve / differentiate) |
+| `session.rs` | 上 3 つに至る語彙。261 行 |
+
+Rust 単体テスト 64 件を同時に入れた(§12 の層 2)。書いている最中に、**MLX を 2 スレッドから
+同時に叩くと Metal の assertion でプロセスが落ちる**ことが分かった(`Completed handler
+provided after commit call`)。拡張側は既に mutex で直列化しているので実害はないが、
+cargo のテストハーネスは既定で並列なので `rake rust_test` は `--test-threads=1` を渡す。
+あわせて `engine/build.rs` が metallib をテストバイナリの隣(`target/<profile>/deps/`)へ
+symlink する。105MB なのでコピーではなく symlink。
