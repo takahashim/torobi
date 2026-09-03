@@ -53,6 +53,21 @@ class ErrorsTest < Minitest::Test
     end
   end
 
+  # The hierarchy is a contract about what survives a failure, so a caller
+  # can act on the class rather than on the message
+  # (notes/SESSION_CONCURRENCY_SPEC.md section 6).
+  def test_busy_is_a_step_error_and_the_rest_are_not
+    # "the engine refused, the session is still mine" is true of Busy.
+    assert_operator Torobi::Busy, :<, Torobi::StepError
+
+    # It is false of these: either nothing ran at all, or the session is
+    # gone. A `rescue StepError` that retried would be wrong for both.
+    [Torobi::Interrupted, Torobi::SessionPoisoned, Torobi::SessionClosed].each do |klass|
+      assert_operator klass, :<, Torobi::Error
+      refute_operator klass, :<, Torobi::StepError
+    end
+  end
+
   def test_engine_unavailable_is_raised_before_the_engine_is_touched
     skip "extension not compiled" unless defined?(Torobi::Session)
     # Preflight's contract; the abort it prevents is pinned in

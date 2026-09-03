@@ -38,8 +38,8 @@ class LifecycleTest < Minitest::Test
     reader = Thread.new do
       200.times do
         session.loss
-      rescue Torobi::StepError => e
-        busy += 1 if e.message.include?("busy")
+      rescue Torobi::Busy
+        busy += 1
       end
     end
     session.run([batch] * 40)
@@ -61,9 +61,11 @@ class LifecycleTest < Minitest::Test
     assert_predicate session, :closed?
     refute session.close, "a second close is a no-op"
 
-    e = assert_raises(Torobi::StepError) { session.step!(batch) }
+    e = assert_raises(Torobi::SessionClosed) { session.step!(batch) }
     assert_match(/closed/, e.message)
-    assert_raises(Torobi::StepError) { session.loss }
+    assert_raises(Torobi::SessionClosed) { session.loss }
+    # Not a StepError: a step error means the session is still yours.
+    refute_kind_of Torobi::StepError, e
   end
 
   # The block form owns the lifetime, so the device memory goes when the

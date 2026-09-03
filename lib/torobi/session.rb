@@ -93,9 +93,15 @@ module Torobi
     # the loss. The GVL is released for the step, so other Ruby threads
     # proceed.
     def step!(batch)
-      loss = @native.run_step(Batch.pack(batch))
-      @journal&.span(steps: 1, loss:, step: @native.step,
-                     batches_digest: Provenance.digest_of(batch.keys.map(&:to_s)))
+      packed = Batch.pack(batch)
+      loss = atomically do
+        value = @native.run_step(packed)
+        @journal&.span(steps: 1, loss: value, step: @native.step,
+                       batches_digest: Provenance.digest_of(batch.keys.map(&:to_s)))
+        value
+      end
+      # Outside the fence: a hook runs the caller's own code, and that
+      # should be interruptible like any other Ruby.
       @hooks.fire(:step, step: @native.step, loss:)
       loss
     end
@@ -175,16 +181,18 @@ module Torobi
     # Knobs take effect from the next step, and are recorded: a journal
     # that holds the decisions is what a replay applies (docs/plan.md 8.6).
     def adjust(lr: nil, seed: nil)
-      turned = {}
-      if lr
-        @native.lr = lr
-        turned[:lr] = lr
+      atomically do
+        turned = {}
+        if lr
+          @native.lr = lr
+          turned[:lr] = lr
+        end
+        if seed
+          @native.seed = seed
+          turned[:seed] = seed
+        end
+        @journal&.adjust(step: @native.step, **turned) unless turned.empty?
       end
-      if seed
-        @native.seed = seed
-        turned[:seed] = seed
-      end
-      @journal&.adjust(step: @native.step, **turned) unless turned.empty?
       self
     end
 
@@ -209,8 +217,11 @@ module Torobi
     #   s.checkpoint!("run/000200", at: { epoch: 2, batch: 1_400 })
     def checkpoint!(dir, at: nil)
       record = { "provenance" => @provenance, "position" => stringify(at) }.compact
-      path = @native.save(dir.to_s, JSON.generate(record))
-      @journal&.checkpoint(path:, step: @native.step)
+      path = atomically do
+        written = @native.save(dir.to_s, JSON.generate(record))
+        @journal&.checkpoint(path: written, step: @native.step)
+        written
+      end
       @hooks.fire(:checkpoint_written, step: @native.step, loss: @native.loss)
       path
     end
@@ -223,8 +234,11 @@ module Torobi
     # whoever owns the data can put its sampler back where it was. The
     # whole record, provenance included, is `Torobi::Checkpoint.manifest`.
     def restore(dir)
-      recorded = JSON.parse(@native.restore(dir.to_s))
-      @journal&.note(step: @native.step, event: "restored", path: dir.to_s)
+      recorded = atomically do
+        state = JSON.parse(@native.restore(dir.to_s))
+        @journal&.note(step: @native.step, event: "restored", path: dir.to_s)
+        state
+      end
       recorded.is_a?(Hash) ? recorded["position"] : nil
     end
 
@@ -258,16 +272,20 @@ module Torobi
     # stays, dropped for what freezes, started at zero for what thaws. It
     # takes effect from the next step, like every knob, and is recorded.
     def freeze!(pattern)
-      moved = @native.set_frozen(pattern.to_s, true)
-      @journal&.adjust(step: @native.step, freeze: pattern.to_s, moved:) unless moved.empty?
-      moved
+      atomically do
+        moved = @native.set_frozen(pattern.to_s, true)
+        @journal&.adjust(step: @native.step, freeze: pattern.to_s, moved:) unless moved.empty?
+        moved
+      end
     end
 
     # The reverse: gradual unfreezing is the usual reason.
     def unfreeze!(pattern)
-      moved = @native.set_frozen(pattern.to_s, false)
-      @journal&.adjust(step: @native.step, unfreeze: pattern.to_s, moved:) unless moved.empty?
-      moved
+      atomically do
+        moved = @native.set_frozen(pattern.to_s, false)
+        @journal&.adjust(step: @native.step, unfreeze: pattern.to_s, moved:) unless moved.empty?
+        moved
+      end
     end
 
     # What is being trained right now, by qualified path.
@@ -278,8 +296,10 @@ module Torobi
     # a journal names what was written without holding it.
     def put(path, tensor)
       packed = Batch.pack({ path.to_s => tensor }).fetch(path.to_s)
-      @native.put(path.to_s, packed)
-      @journal&.put(path: path.to_s, digest: Provenance.digest_of(packed[2]))
+      atomically do
+        @native.put(path.to_s, packed)
+        @journal&.put(path: path.to_s, digest: Provenance.digest_of(packed[2]))
+      end
       self
     end
 
@@ -332,6 +352,20 @@ module Torobi
     end
 
     private
+
+    # Runs an engine change and the journal's record of it as one, so an
+    # asynchronous interrupt cannot land between them.
+    #
+    # Without this the engine takes a step and Ruby is interrupted before
+    # writing it down, leaving a record one operation behind what actually
+    # happened. A replay follows the record, so that difference is not
+    # cosmetic (notes/SESSION_CONCURRENCY_SPEC.md section 10).
+    #
+    # What it costs in responsiveness is bounded by one step, which is the
+    # granularity a span is interruptible at anyway.
+    def atomically(&)
+      Thread.handle_interrupt(Object => :never, &)
+    end
 
     # A position travels as JSON, so its keys are strings by the time it
     # comes back. Convert on the way in, so that what a caller reads after

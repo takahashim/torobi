@@ -7,6 +7,7 @@
 
 mod gvl;
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Mutex;
 
 use magnus::exception::ExceptionClass;
@@ -24,13 +25,25 @@ use torobi_engine::Session as EngineSession;
 /// `rescue` catches. Blocking would be worse still: the second thread
 /// would hold the GVL while waiting, and the first needs the GVL back to
 /// return. So a session in use answers "busy" and stays alive.
+///
+/// The engine is taken *out* of the slot for the duration of a step, and
+/// put back before the GVL is reacquired. Holding the guard across that
+/// boundary is what an interrupt used to destroy: CRuby raises on the way
+/// out of a blocking region, the Rust frame is skipped, and the guard is
+/// never dropped, leaving the session permanently busy. Nothing may be
+/// left to do after the boundary (notes/SESSION_CONCURRENCY_SPEC.md 0, 3.1).
 #[magnus::wrap(class = "Torobi::Native::Session", free_immediately, size)]
-struct Session(Mutex<State>);
+struct Session {
+    slot: Mutex<Slot>,
+}
 
 /// What a session is, from the outside.
-enum State {
-    /// Usable. One conversation at a time, which the mutex enforces.
-    Live(Box<EngineSession>),
+enum Slot {
+    /// Usable, and nobody is inside it.
+    Ready(Box<EngineSession>),
+    /// A step is running. The engine belongs to that call's Rust frame,
+    /// not to this slot.
+    Running,
     /// A panic escaped the engine. The state it left behind is not known
     /// to be consistent, so nothing more is attempted with it.
     Poisoned(String),
@@ -38,44 +51,102 @@ enum State {
     Closed,
 }
 
-impl State {
-    fn engine(&mut self) -> Result<&mut EngineSession, String> {
+/// Why a slot could not hand its engine over.
+///
+/// Data rather than a `magnus::Error`, because it is decided with the GVL
+/// released, where no Ruby object may be touched.
+enum Refusal {
+    Busy,
+    Poisoned(String),
+    Closed,
+}
+
+impl Refusal {
+    fn of(slot: &Slot) -> Self {
+        match slot {
+            Slot::Ready(_) => unreachable!("a ready slot refuses nothing"),
+            Slot::Running => Refusal::Busy,
+            Slot::Poisoned(what) => Refusal::Poisoned(what.clone()),
+            Slot::Closed => Refusal::Closed,
+        }
+    }
+
+    fn into_error(self, ruby: &Ruby) -> Error {
         match self {
-            State::Live(session) => Ok(session),
-            State::Poisoned(what) => Err(format!(
-                "this session is poisoned: the engine panicked ({what}), so its \
-                 state cannot be trusted. Open a new one, from a checkpoint if \
-                 you have it."
-            )),
-            State::Closed => Err("this session is closed".to_string()),
+            Refusal::Busy => busy(ruby),
+            Refusal::Poisoned(what) => Error::new(
+                error_class(ruby, "SessionPoisoned"),
+                format!(
+                    "this session is poisoned: the engine panicked ({what}), so its \
+                     state cannot be trusted. Open a new one, from a checkpoint if \
+                     you have it."
+                ),
+            ),
+            Refusal::Closed => Error::new(
+                error_class(ruby, "SessionClosed"),
+                "this session is closed",
+            ),
         }
     }
 }
+
+/// What one call produced, decided where the GVL may be released.
+enum Ran<T> {
+    Finished(anyhow::Result<T>),
+    Refused(Refusal),
+    Panicked(String),
+}
+
+impl<T> Ran<T> {
+    /// Turned into Ruby's terms, which happens only once the GVL is back.
+    fn into_result(self, ruby: &Ruby) -> Result<T, Error> {
+        match self {
+            Ran::Finished(result) => result.map_err(|e| to_error(ruby, e)),
+            Ran::Refused(refusal) => Err(refusal.into_error(ruby)),
+            Ran::Panicked(what) => Err(poisoned(ruby, &what)),
+        }
+    }
+}
+
+/// How many times a call retries after the blocking region refuses to
+/// start. `RB_NOGVL_INTR_FAIL` refuses whenever Ruby's interrupt flag is
+/// set, and that flag is also the scheduler's timer, so most refusals mean
+/// nothing at all. `rb_thread_check_ints` clears a timer and raises a real
+/// interrupt; a handful of rounds is more than enough, and the bound is
+/// there so this can never spin.
+const ENTRY_ATTEMPTS: u32 = 8;
+
+const BUSY: &str = "this session is busy: it serves one thread at a time (a step is \
+                    running). Use one session per thread, or a pool.";
 
 fn to_error(ruby: &Ruby, error: anyhow::Error) -> Error {
     Error::new(step_error_class(ruby), format!("{error:#}"))
 }
 
-/// The class a failed step raises. Defined on the Ruby side (errors.rb), so
-/// that the pure-Ruby half has the same hierarchy without this extension;
-/// looked up here rather than duplicated.
-fn step_error_class(ruby: &Ruby) -> ExceptionClass {
+/// One of Torobi's error classes by name. They are defined on the Ruby side
+/// (errors.rb), so that the pure-Ruby half has the same hierarchy without
+/// this extension; looked up here rather than duplicated.
+fn error_class(ruby: &Ruby, name: &str) -> ExceptionClass {
     ruby.class_object()
         .const_get::<_, magnus::RModule>("Torobi")
-        .and_then(|m| m.const_get::<_, ExceptionClass>("StepError"))
+        .and_then(|m| m.const_get::<_, ExceptionClass>(name))
         .unwrap_or_else(|_| ruby.exception_runtime_error())
 }
 
-fn busy(ruby: &Ruby) -> Error {
+/// The class a failed step raises.
+fn step_error_class(ruby: &Ruby) -> ExceptionClass {
+    error_class(ruby, "StepError")
+}
+
+fn poisoned(ruby: &Ruby, what: &str) -> Error {
     Error::new(
-        step_error_class(ruby),
-        "this session is busy: it serves one thread at a time (a step is \
-         running). Use one session per thread, or a pool.",
+        error_class(ruby, "SessionPoisoned"),
+        format!("the engine panicked ({what}); this session is now poisoned"),
     )
 }
 
-fn message(ruby: &Ruby, what: String) -> Error {
-    Error::new(step_error_class(ruby), what)
+fn busy(ruby: &Ruby) -> Error {
+    Error::new(error_class(ruby, "Busy"), BUSY)
 }
 
 impl Session {
@@ -91,7 +162,9 @@ impl Session {
             Error::new(ruby.exception_arg_error(), format!("bad optimizer: {e}"))
         })?;
         EngineSession::open_with(&graph_json, &weights_json, optimizer)
-            .map(|session| Self(Mutex::new(State::Live(Box::new(session)))))
+            .map(|session| Self {
+                slot: Mutex::new(Slot::Ready(Box::new(session))),
+            })
             .map_err(|e| to_error(ruby, e))
     }
 
@@ -100,33 +173,102 @@ impl Session {
     /// This is the one place the state machine is enforced: a busy session
     /// answers rather than panics, a poisoned one refuses, and a panic
     /// inside the engine poisons rather than escaping.
+    ///
+    /// The shape matters as much as the rules
+    /// (notes/SESSION_CONCURRENCY_SPEC.md 3.1, 5). The engine is taken from
+    /// the slot, used, and put back entirely inside the GVL-released
+    /// region. Before that region nothing is held; after it there is
+    /// nothing to do but read a value. An interrupt raised at either edge
+    /// therefore costs nothing, which is what a `MutexGuard` held across
+    /// the boundary used to cost: it was never dropped, and the session
+    /// stayed busy for good.
     fn with_engine<T>(
         &self,
         ruby: &Ruby,
         release_gvl: bool,
         work: impl FnOnce(&mut EngineSession) -> anyhow::Result<T>,
     ) -> Result<T, Error> {
-        let mut guard = self.0.try_lock().map_err(|_| busy(ruby))?;
-        let engine = guard.engine().map_err(|what| message(ruby, what))?;
+        if !release_gvl {
+            // A reading: short, and it touches no Ruby either way.
+            return self.run(work).into_result(ruby);
+        }
 
-        let outcome = if release_gvl {
-            // Nothing inside touches the Ruby VM: the engine sees only its
-            // own data.
-            gvl::without_gvl(|| work(engine))
-        } else {
-            Ok(work(engine))
-        };
-
-        match outcome {
-            Ok(result) => result.map_err(|e| to_error(ruby, e)),
-            Err(panic) => {
-                *guard = State::Poisoned(panic.clone());
-                Err(message(
-                    ruby,
-                    format!("the engine panicked ({panic}); this session is now poisoned"),
-                ))
+        // `work` waits here rather than being captured by value: the region
+        // can refuse to start, and a closure dropped without running would
+        // take `work` with it, leaving nothing to retry with.
+        let mut pending = Some(work);
+        for _ in 0..ENTRY_ATTEMPTS {
+            let outcome = gvl::without_gvl(|| {
+                let work = pending.take().expect("the region is entered at most once");
+                self.run(work)
+            });
+            match outcome {
+                gvl::Outcome::Done(ran) => return ran.into_result(ruby),
+                gvl::Outcome::Panicked(what) => return Err(poisoned(ruby, &what)),
+                gvl::Outcome::Interrupted => {
+                    // The region was never entered, so nothing was taken
+                    // and nothing ran. Let Ruby act on whatever it was
+                    // flagging: a real interrupt raises here, safely,
+                    // because this frame holds nothing, and the scheduler's
+                    // timer is simply cleared. Then try again.
+                    unsafe { rb_sys::rb_thread_check_ints() };
+                }
             }
         }
+
+        // Ruby's flag stayed set through every round. Do the work with the
+        // GVL held rather than refuse it: impolite to the other threads for
+        // one call, but nothing is lost and this terminates.
+        let work = pending.take().expect("no attempt entered the region");
+        self.run(work).into_result(ruby)
+    }
+
+    /// Take the engine, use it, put it back. Touches no Ruby, so this is
+    /// the whole of what runs with the GVL released.
+    fn run<T>(&self, work: impl FnOnce(&mut EngineSession) -> anyhow::Result<T>) -> Ran<T> {
+        let mut engine = match self.take() {
+            Ok(engine) => engine,
+            Err(refusal) => return Ran::Refused(refusal),
+        };
+        match catch_unwind(AssertUnwindSafe(|| work(&mut engine))) {
+            Ok(result) => {
+                self.put_back(Ok(engine));
+                Ran::Finished(result)
+            }
+            Err(panic) => {
+                let what = gvl::describe(panic);
+                self.put_back(Err(what.clone()));
+                Ran::Panicked(what)
+            }
+        }
+    }
+
+    /// Takes the engine out of the slot, leaving `Running` behind.
+    fn take(&self) -> Result<Box<EngineSession>, Refusal> {
+        let Ok(mut guard) = self.slot.try_lock() else {
+            return Err(Refusal::Busy);
+        };
+        match std::mem::replace(&mut *guard, Slot::Running) {
+            Slot::Ready(engine) => Ok(engine),
+            other => {
+                let refusal = Refusal::of(&other);
+                *guard = other;
+                Err(refusal)
+            }
+        }
+    }
+
+    /// Puts the engine back, or records why there is none to put back.
+    ///
+    /// Blocking rather than `try_lock`, and safe to block: the only other
+    /// holders are Ruby threads whose critical section is pure Rust and
+    /// never waits for the GVL.
+    fn put_back(&self, engine: Result<Box<EngineSession>, String>) {
+        let mut guard = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = match engine {
+            Ok(engine) => Slot::Ready(engine),
+            Err(panic) => Slot::Poisoned(panic),
+        };
     }
 
     /// A reading, which needs no GVL release and no engine mutation.
@@ -177,23 +319,28 @@ impl Session {
     /// Releases the engine and its device memory. Idempotent, and the
     /// session refuses everything afterwards rather than pretending.
     fn close(ruby: &Ruby, rb_self: &Self) -> Result<bool, Error> {
-        let mut guard = rb_self.0.try_lock().map_err(|_| busy(ruby))?;
-        let was_live = matches!(*guard, State::Live(_));
-        *guard = State::Closed;
+        let mut guard = rb_self.slot.try_lock().map_err(|_| busy(ruby))?;
+        // A running session is not closed out from under its own step:
+        // the caller closes it at a step boundary (the spec, section 8).
+        if matches!(*guard, Slot::Running) {
+            return Err(busy(ruby));
+        }
+        let was_live = matches!(*guard, Slot::Ready(_));
+        *guard = Slot::Closed;
         Ok(was_live)
     }
 
     fn closed(&self) -> bool {
-        match self.0.try_lock() {
-            Ok(guard) => matches!(*guard, State::Closed),
+        match self.slot.try_lock() {
+            Ok(guard) => matches!(*guard, Slot::Closed),
             // In use, therefore not closed.
             Err(_) => false,
         }
     }
 
     fn poisoned(&self) -> bool {
-        match self.0.try_lock() {
-            Ok(guard) => matches!(*guard, State::Poisoned(_)),
+        match self.slot.try_lock() {
+            Ok(guard) => matches!(*guard, Slot::Poisoned(_)),
             Err(_) => false,
         }
     }

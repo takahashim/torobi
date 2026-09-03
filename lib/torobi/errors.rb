@@ -10,9 +10,20 @@ module Torobi
   #                      Nothing to recover: the description is wrong.
   #   StepError          found while running. The engine reported it, the
   #                      session survives, and another step may be tried.
+  #     Busy             the session is serving another thread. Nothing is
+  #                      wrong with it; the call may be retried.
+  #   Interrupted        a call was interrupted before it began. No step was
+  #                      taken and no state moved.
+  #   SessionPoisoned    the engine panicked. The session is not usable.
+  #   SessionClosed      the session was closed.
   #   EngineUnavailable  the engine cannot run here at all. Raised before
   #                      MLX is touched, because some of these failures
   #                      would otherwise end the process (section 4.1).
+  #
+  # Why Busy sits under StepError and the last three do not: a caller that
+  # rescues StepError means "the engine refused, the session is still mine".
+  # That is true of Busy and false of the others, where either nothing
+  # happened at all or the session is gone.
   #
   # A fourth kind exists and has no class, by necessity: a failure MLX
   # raises as a C++ exception during initialization aborts the process.
@@ -30,6 +41,24 @@ module Torobi
   # graph declared, a parameter that is missing, a shape only MLX could
   # settle. The session is still usable.
   class StepError < Error; end
+
+  # The session is serving another thread. It serves one at a time, so this
+  # is not a fault: wait and try again, or use one session per thread.
+  class Busy < StepError; end
+
+  # A call that was interrupted before it began, because an interrupt was
+  # already pending when it reached the engine. Nothing ran: no step was
+  # taken and no state moved. Ruby delivers the interrupt itself at its next
+  # checkpoint, so this is usually superseded immediately.
+  class Interrupted < Error; end
+
+  # The engine panicked under this session. Whatever state it left behind
+  # cannot be trusted, so the session refuses everything afterwards. Open a
+  # new one, from a checkpoint if there is one.
+  class SessionPoisoned < Error; end
+
+  # An operation on a session that has been closed.
+  class SessionClosed < Error; end
 
   # The engine cannot run here: the extension is missing, or something it
   # needs at runtime is not in place.
