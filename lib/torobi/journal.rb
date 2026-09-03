@@ -39,11 +39,11 @@ module Torobi
     # `provenance` is everything about the run that is not an event: the
     # config's digest, the runtime, the dataset. Built by `Provenance`.
     def initialize(provenance, io: nil)
-      @header = {
+      @header = Freeze.deep({
         "schema_version" => SCHEMA_VERSION,
         "started_at" => Time.now.utc.iso8601,
         "provenance" => provenance
-      }.freeze
+      })
       @entries = []
       @io = io
       write(@header)
@@ -95,15 +95,19 @@ module Torobi
         "step" => fields.delete(:step),
         "at" => Time.now.utc.iso8601
       }.merge(fields.transform_keys(&:to_s)).compact
-      @entries << entry.freeze
+      @entries << Freeze.deep(entry)
       write(entry)
       entry
     end
 
+    # Flushed per entry, because the promise is that an interrupted run
+    # leaves a readable file, and a buffer that never reached the disk is
+    # not one.
     def write(entry)
       return unless @io
 
       @io.puts(JSON.generate(entry))
+      @io.flush
     end
   end
 
@@ -143,9 +147,19 @@ module Torobi
 
     # A digest of data, so that a journal names what it was fed without
     # holding it.
+    #
+    # Framed: each part contributes its length before its bytes, so that
+    # ("ab", "c") and ("a", "bc") do not agree, which plain concatenation
+    # let them do. Hashes are serialized with their keys sorted, so a
+    # digest depends on the data and not on the order it was written in.
     def digest_of(*parts)
       digest = Digest::SHA256.new
-      parts.each { |part| digest << (part.is_a?(String) ? part : JSON.generate(part)) }
+      digest << "torobi/1\n"
+      parts.each do |part|
+        bytes = part.is_a?(String) ? part : JSON.generate(IR::Json.canonical(part))
+        digest << "#{bytes.bytesize}:"
+        digest << bytes
+      end
       digest.hexdigest
     end
   end

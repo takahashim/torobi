@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
+require "benchmark"
 
 # The error contract of docs/plan.md section 5A.4: three classes, three
 # moments, three things that survive. This holds the implementation to it.
@@ -58,5 +59,19 @@ class ErrorsTest < Minitest::Test
     # BoundaryTest, which must run in a subprocess to survive it.
     assert_respond_to Torobi::Preflight, :check!
     assert_operator Torobi::EngineUnavailable, :<, Torobi::Error
+  end
+
+  # A review reached a machine where the metallib was present and MLX still
+  # ended the process on device initialization. Preflight therefore asks in
+  # a subprocess, where an abort is an exit status rather than the end of
+  # this one. Once per process: the answer is memoized.
+  def test_the_device_is_probed_where_an_abort_is_survivable
+    skip "extension not compiled" unless defined?(Torobi::Session)
+    Torobi::Preflight.forget_probe!
+    assert Torobi::Preflight.probe!, "MLX should start on this machine"
+
+    first = Benchmark.realtime { Torobi::Preflight.check! }
+    second = Benchmark.realtime { Torobi::Preflight.check! }
+    assert_operator second, :<, first, "the probe should be asked once, not per session"
   end
 end

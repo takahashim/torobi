@@ -92,4 +92,27 @@ class JournalTest < Minitest::Test
     refute_equal a, c
     assert_match(/\A[0-9a-f]{64}\z/, a)
   end
+
+  # Plain concatenation let ("ab", "c") and ("a", "bc") agree; each part
+  # now contributes its length before its bytes.
+  def test_the_digest_frames_its_parts
+    refute_equal Torobi::Provenance.digest_of("ab", "c"),
+                 Torobi::Provenance.digest_of("a", "bc")
+    refute_equal Torobi::Provenance.digest_of("a", "b"),
+                 Torobi::Provenance.digest_of("ab")
+  end
+
+  # And it depends on the data, not on the order a hash was written in.
+  def test_the_digest_ignores_key_order
+    assert_equal Torobi::Provenance.digest_of({ "a" => 1, "b" => { "x" => 1, "y" => 2 } }),
+                 Torobi::Provenance.digest_of({ "b" => { "y" => 2, "x" => 1 }, "a" => 1 })
+  end
+
+  def test_entries_cannot_be_changed_after_they_are_written
+    journal = Torobi::Journal.new(Torobi::Provenance.of(config))
+    journal.note(detail: { "nested" => [1, 2] })
+    entry = journal.entries.last
+    assert_raises(FrozenError) { entry["kind"] = "other" }
+    assert_raises(FrozenError) { entry.fetch("detail")["nested"] << 3 }
+  end
 end

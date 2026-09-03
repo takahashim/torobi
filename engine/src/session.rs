@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use mlx_rs::transforms::{eval, value_and_grad_with_argnums};
-use mlx_rs::Array;
+use mlx_rs::{Array, Dtype};
 use serde::Deserialize;
 
 use crate::checkpoint;
@@ -18,17 +18,43 @@ use crate::graph::{Graph, GraphConfig};
 use crate::interp;
 use crate::optimizer::{Config as OptimizerConfig, Optimizer};
 
-/// A tensor as it crosses the boundary: flat data plus its shape. The only
-/// tensor shape that travels, in either direction, and always as a copy.
-#[derive(Deserialize)]
+/// A tensor as it crosses the boundary: a dtype, a shape, and the values.
+/// Always a copy, never a handle.
+///
+/// The dtype travels because a graph can declare an i32 input - which is
+/// what an embedding reads - and a boundary that assumed f32 could not
+/// carry one (docs/plan.md section 5A.2).
 pub struct Tensor {
+    pub dtype: Dtype,
     pub shape: Vec<i32>,
-    pub data: Vec<f32>,
+    pub values: Values,
+}
+
+/// The payload, in the only two forms the boundary carries.
+pub enum Values {
+    F32(Vec<f32>),
+    I32(Vec<i32>),
+}
+
+impl Values {
+    pub fn len(&self) -> usize {
+        match self {
+            Values::F32(v) => v.len(),
+            Values::I32(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl Tensor {
     fn to_array(&self) -> Array {
-        Array::from_slice(&self.data, &self.shape)
+        match &self.values {
+            Values::F32(data) => Array::from_slice(data, &self.shape),
+            Values::I32(data) => Array::from_slice(data, &self.shape),
+        }
     }
 }
 
@@ -40,6 +66,8 @@ impl Tensor {
 /// boundary itself was noise. The shape stays JSON - it is a handful of
 /// integers, and readable - and only the payload goes packed.
 pub struct PackedTensor {
+    /// "f32" or "i32", as the graph declares dtypes.
+    pub dtype: String,
     pub shape: Vec<i32>,
     pub bytes: Vec<u8>,
 }
@@ -48,17 +76,25 @@ impl PackedTensor {
     fn to_tensor(&self, name: &str) -> Result<Tensor> {
         anyhow::ensure!(
             self.bytes.len() % 4 == 0,
-            "input {name:?}: {} bytes is not a whole number of f32 values",
+            "input {name:?}: {} bytes is not a whole number of 4-byte values",
             self.bytes.len()
         );
-        let data = self
-            .bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
-            .collect();
+        let words = self.bytes.chunks_exact(4).map(|b| [b[0], b[1], b[2], b[3]]);
+        let (dtype, values) = match self.dtype.as_str() {
+            "f32" => (
+                Dtype::Float32,
+                Values::F32(words.map(f32::from_ne_bytes).collect()),
+            ),
+            "i32" => (
+                Dtype::Int32,
+                Values::I32(words.map(i32::from_ne_bytes).collect()),
+            ),
+            other => anyhow::bail!("input {name:?}: dtype {other:?} does not cross the boundary"),
+        };
         Ok(Tensor {
+            dtype,
             shape: self.shape.clone(),
-            data,
+            values,
         })
     }
 }
@@ -77,10 +113,19 @@ pub fn unpack(packed: &PackedBatch) -> Result<Batch> {
         .collect()
 }
 
+/// One initial parameter as JSON carries it. Parameters are f32 (the
+/// engine differentiates them), so this needs no dtype; a batch does, and
+/// travels packed instead (see [`PackedTensor`]).
+#[derive(Deserialize)]
+struct InitialTensor {
+    shape: Vec<i32>,
+    data: Vec<f32>,
+}
+
 /// The initial parameters, by path.
 #[derive(Deserialize)]
 struct Weights {
-    params: BTreeMap<String, Tensor>,
+    params: BTreeMap<String, InitialTensor>,
 }
 
 /// One model as the session holds it: its graph, and where its parameters
@@ -167,7 +212,7 @@ impl Session {
                 if trained && spec.trainable {
                     argnums.push(params.len() as i32);
                 }
-                params.push(t.to_array());
+                params.push(Array::from_slice(&t.data, &t.shape));
                 paths.push(path);
             }
             let slice = start..params.len();
@@ -463,11 +508,19 @@ impl Session {
                         );
                     }
                 }
+                let declared = dtype_named(&spec.dtype)
+                    .with_context(|| format!("input {field:?}: unknown dtype in the graph"))?;
+                anyhow::ensure!(
+                    t.dtype == declared,
+                    "input {field:?}: given {:?}, declared {}",
+                    t.dtype,
+                    spec.dtype
+                );
                 let expected: usize = t.shape.iter().map(|d| *d as usize).product();
                 anyhow::ensure!(
-                    t.data.len() == expected,
+                    t.values.len() == expected,
                     "input {field:?}: {} values for shape {:?}",
-                    t.data.len(),
+                    t.values.len(),
                     t.shape
                 );
                 fields.insert(field.to_string(), t.to_array());
@@ -605,14 +658,33 @@ impl Session {
     }
 }
 
+/// The dtypes a graph may name, as MLX knows them.
+fn dtype_named(name: &str) -> Option<Dtype> {
+    match name {
+        "f32" => Some(Dtype::Float32),
+        "bf16" => Some(Dtype::Bfloat16),
+        "i32" => Some(Dtype::Int32),
+        "bool" => Some(Dtype::Bool),
+        _ => None,
+    }
+}
+
 /// A device array as a copy on the host. Contiguous first: a gradient can
 /// come back strided (through a transpose, say), and reading it out needs
 /// contiguous memory.
 fn to_tensor(array: &Array) -> Result<Tensor> {
     let array = array.contiguous()?;
     eval(std::iter::once(&array))?;
+    let dtype = array.dtype();
+    let values = match dtype {
+        Dtype::Int32 => Values::I32(array.as_slice::<i32>().to_vec()),
+        // Parameters and gradients are f32; anything else that reaches here
+        // is converted rather than reinterpreted.
+        _ => Values::F32(array.as_dtype(Dtype::Float32)?.as_slice::<f32>().to_vec()),
+    };
     Ok(Tensor {
+        dtype,
         shape: array.shape().to_vec(),
-        data: array.as_slice::<f32>().to_vec(),
+        values,
     })
 }

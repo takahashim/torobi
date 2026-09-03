@@ -206,6 +206,10 @@ Ruby がデータを所有し、かつ計算中に Ruby コードを呼ばない
 | (b) 事前投入キュー | Ruby が N batch を native キューへコピー → `run_steps(n)` が消費 | 長いスパンが可能。backpressure と prefetch の設計が要る |
 | (c) native BatchSource | データ供給を engine に持たせる(ファイル読み) | Ruby がデータを所有する目標に反する。採らない |
 
+**encoding は typed である。** batch は `{name => [dtype, shape, packed]}` で渡り、
+payload は native-endian の 4 byte 値。dtype が渡るのは、graph が i32 入力を宣言できる
+(embedding が読むもの)以上、f32 を仮定した境界ではそれを運べないため。
+
 **方針: (a) を基本、(b) を最適化として後から足す。** (a) は契約が単純で、Ruby のデータ層
 (ActiveRecord / pgvector / JSONL)がそのまま活き、可変長 batch も自然に扱える。(b) は
 実測で (a) の境界コストが問題になったときにだけ導入する。どちらでも
@@ -258,8 +262,10 @@ Ruby がデータを所有し、かつ計算中に Ruby コードを呼ばない
 - **`BatchRef`**: batch のフィールドを指す参照型 `{"batch": "teacher_logits"}`。
 - **model output の契約**: 名前・shape・dtype を model graph 側が宣言し、objective の
   shape 推論はそれを使う。不一致は構築時に拒否。
-- **`stop_gradient`**: op として IR に持つ。teacher の出力は既定で stop_gradient を通す
-  (オンライン teacher を student と同じ step で forward する場合に必須)。
+- **`stop_gradient`**: op として IR に持ち、**明示的に呼ぶ**(`g.stop_gradient(x)`)。
+  v3.1 は「teacher の出力は既定で通す」と書いていたが、暗黙の挿入は「どこで勾配が
+  止まったか」を graph から読めなくするので採らない。凍結 model のパラメータは
+  そもそも argnums に入らないため、既定にしなくても teacher は学習されない。
 - **parameter ownership**: パラメータは model graph に属し、path は
   `student.layers.0.wqkv.weight` のように **model 名で名前空間化**する。
 - **autodiff の対象**: `trainable == true` かつ freeze されていないパラメータのうち、
@@ -274,9 +280,12 @@ Ruby がデータを所有し、かつ計算中に Ruby コードを呼ばない
 
 §4.1 の実測に基づき、3 分類を仕様とする。
 
-1. **構築時エラー**(`ConfigError`): 構造・shape・dtype・所有権。Ruby、native に触れない。
-2. **実行時エラー**(`RuntimeError`): MLX が C エラーハンドラ経由で報告するもの。
-   例外に変換され、セッションは生存する(次の step を試せる)。
+1. **構築時エラー**(`ConfigError`): 構造・shape・dtype・所有権・objective 契約(§5A.3)。
+   Ruby で完結し、native に触れない。
+2. **実行時エラー**(`StepError`): MLX が C エラーハンドラ経由で報告するもの、および
+   engine が拒否したもの。例外に変換され、**セッションは生存する**(次の step を試せる)。
+   これを保証するため step は transaction である: 次の parameters / slots / RNG を作って
+   eval し、成功して初めて session がそれになる。
 3. **致命**(`EngineUnavailable` で予防、あるいはプロセス終了): 初期化・デバイス・
    ライブラリ不在。予見できるものは preflight で拒否し、できないものは
    **プロセスが死ぬことを仕様として認める**(supervisor 前提。§9.1 M1 の異常系テスト)。
@@ -616,6 +625,19 @@ M0 と M1 の一部(§9.1 の M1 のうち single-step とその境界の初期�
 
 配布は形も事実も成立した。残るのは方針の決定(§11.4)であり、
 それは利用者像が見えてからでよい。
+
+### 15.2.1 外部レビュー(2026-09-03)で見つかった穴と対処
+
+| 指摘 | 対処 |
+| --- | --- |
+| objective が parameter を持てた / 複数 output / loss 名でない / 非 scalar → engine が辞書順で選び、空 parameter slice を添字して **abort** | GraphConfig が契約を強制(§5A.3)。objective 無しの場合も「単一 model・単一 scalar loss」を要求 |
+| optimizer state を欠く checkpoint が restore に成功し、次の step で **panic** | restore は全て読み・検査・eval してから一括 commit。slot の有無は optimizer の要求と照合 |
+| step が optimizer → params → RNG を順に書き換えるため、失敗が部分更新を残す | step を transaction 化(§5A.4) |
+| checkpoint 置換が「削除 → rename」で、間に停止すると両方消える | 旧を退避 → rename → 旧を削除。書き込み後に全 tensor の読み戻し検証と fsync |
+| batch の dtype が境界で失われ、i32(embedding)が表現できない | typed encoding(§5A.2)。`take` op も実装し、embedding の end-to-end を検証 |
+| metallib があっても Metal device 不在で abort する環境がある | preflight が **subprocess で probe**(203 ms、プロセスあたり 1 回) |
+| journal の digest が `("ab","c") == ("a","bc")` | 長さ framing + canonical JSON。entry ごとに flush、deep freeze |
+| `build_info` が実態と違う("path dependency") | build.rs が Cargo.toml の rev を埋め込む |
 
 ### 15.3 M2 の進捗(2026-09-03)
 

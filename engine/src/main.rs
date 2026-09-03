@@ -9,14 +9,40 @@
 //! gives each step its own (docs/plan.md section 5A.2).
 
 use anyhow::{bail, Result};
-use torobi_engine::session::Batch;
+use torobi_engine::session::{Batch, Tensor, Values};
 use torobi_engine::Session;
 
+use mlx_rs::Dtype;
 use serde::Deserialize;
+
+/// The CLI's own JSON shape for a batch. The library's boundary carries a
+/// dtype and packed bytes (an embedding reads i32); this is the readable
+/// form a spike file is written in, and it is f32.
+#[derive(Deserialize)]
+struct JsonTensor {
+    shape: Vec<i32>,
+    data: Vec<f32>,
+}
 
 #[derive(Deserialize)]
 struct Bindings {
-    inputs: Batch,
+    inputs: std::collections::BTreeMap<String, JsonTensor>,
+}
+
+fn to_batch(inputs: std::collections::BTreeMap<String, JsonTensor>) -> Batch {
+    inputs
+        .into_iter()
+        .map(|(name, t)| {
+            (
+                name,
+                Tensor {
+                    dtype: Dtype::Float32,
+                    shape: t.shape,
+                    values: Values::F32(t.data),
+                },
+            )
+        })
+        .collect()
 }
 
 fn main() -> Result<()> {
@@ -38,7 +64,7 @@ fn open(graph_path: &str, bindings_path: &str) -> Result<(Session, Batch)> {
     let bindings_json = std::fs::read_to_string(bindings_path)?;
     let session = Session::open(&graph_json, &bindings_json)?;
     let bindings: Bindings = serde_json::from_str(&bindings_json)?;
-    Ok((session, bindings.inputs))
+    Ok((session, to_batch(bindings.inputs)))
 }
 
 fn grad(graph_path: &str, bindings_path: &str) -> Result<()> {
@@ -47,7 +73,13 @@ fn grad(graph_path: &str, bindings_path: &str) -> Result<()> {
     let grads = session
         .gradients(&batch)?
         .into_iter()
-        .map(|(path, t)| (path, serde_json::json!({ "shape": t.shape, "data": t.data })))
+        .map(|(path, t)| {
+            let data = match t.values {
+                Values::F32(v) => serde_json::json!(v),
+                Values::I32(v) => serde_json::json!(v),
+            };
+            (path, serde_json::json!({ "shape": t.shape, "data": data }))
+        })
         .collect::<serde_json::Map<_, _>>();
     println!(
         "{}",

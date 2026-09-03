@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use magnus::exception::ExceptionClass;
 use magnus::value::ReprValue;
 use magnus::{function, method, prelude::*, Error, RArray, RHash, RString, Ruby, Value};
-use torobi_engine::session::{unpack, Batch, PackedBatch, PackedTensor, Tensor};
+use torobi_engine::session::{unpack, Batch, PackedBatch, PackedTensor, Tensor, Values};
 use torobi_engine::Session as EngineSession;
 
 /// The engine's session, owned by one Ruby object.
@@ -161,34 +161,41 @@ impl Session {
     }
 }
 
-/// Reads {name => [shape, packed]} into the engine's batch. The bytes are
-/// copied out of the Ruby string here, while the GVL is still held; nothing
-/// borrowed from Ruby survives into the computation.
+/// Reads {name => [dtype, shape, packed]} into the engine's batch. The
+/// bytes are copied out of the Ruby string here, while the GVL is still
+/// held; nothing borrowed from Ruby survives into the computation.
+///
+/// The dtype travels because a graph may declare an i32 input, which is
+/// what an embedding reads (docs/plan.md section 5A.2).
 fn read_batch(ruby: &Ruby, batch: RHash) -> Result<Batch, Error> {
     let bad = |what: String| Error::new(ruby.exception_arg_error(), what);
     let mut packed = PackedBatch::new();
-    batch.foreach(|name: String, pair: RArray| {
-        let shape: Vec<i32> = pair
-            .entry::<Vec<i32>>(0)
+    batch.foreach(|name: String, triple: RArray| {
+        let dtype: String = triple
+            .entry::<String>(0)
+            .map_err(|e| bad(format!("input {name:?}: bad dtype ({e})")))?;
+        let shape: Vec<i32> = triple
+            .entry::<Vec<i32>>(1)
             .map_err(|e| bad(format!("input {name:?}: bad shape ({e})")))?;
-        let data: RString = pair
-            .entry::<RString>(1)
+        let data: RString = triple
+            .entry::<RString>(2)
             .map_err(|e| bad(format!("input {name:?}: data must be a packed String ({e})")))?;
         // Safety: the bytes are copied immediately, under the GVL, and the
         // string is not modified in between.
         let bytes = unsafe { data.as_slice() }.to_vec();
-        packed.insert(name, PackedTensor { shape, bytes });
+        packed.insert(name, PackedTensor { dtype, shape, bytes });
         Ok(magnus::r_hash::ForEach::Continue)
     })?;
     unpack(&packed).map_err(|e| bad(format!("{e:#}")))
 }
 
-/// A tensor leaves as two plain Ruby arrays: its shape and its flat data.
+/// A tensor leaves as its shape and its flat data, both plain Ruby arrays.
 fn tensor_to_ruby(ruby: &Ruby, tensor: Tensor) -> (RArray, RArray) {
-    (
-        ruby.ary_from_vec(tensor.shape),
-        ruby.ary_from_vec(tensor.data),
-    )
+    let data = match tensor.values {
+        Values::F32(values) => ruby.ary_from_vec(values),
+        Values::I32(values) => ruby.ary_from_vec(values),
+    };
+    (ruby.ary_from_vec(tensor.shape), data)
 }
 
 /// What the engine was built from, as a Ruby Hash. A journal records it,

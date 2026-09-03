@@ -25,8 +25,8 @@ pub fn build_info() -> serde_json::Value {
     })
 }
 
-/// mlx-rs is a path dependency for now (the ledger explains why), so the
-/// version is what its manifest declares.
+/// The mlx-rs revision this was built against, read from the dependency
+/// pin at build time (see build.rs and docs/vendoring.md).
 fn mlx_rs_revision() -> &'static str {
-    option_env!("TOROBI_MLX_RS_REV").unwrap_or("path dependency, see docs/vendoring.md")
+    option_env!("TOROBI_MLX_RS_REV").unwrap_or("unknown, see docs/vendoring.md")
 }

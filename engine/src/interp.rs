@@ -63,6 +63,9 @@ pub fn evaluate(
             "mul_scalar" => ins[0].multiply(Array::from_f32(number(node, "value")?))?,
             "div_scalar" => ins[0].divide(Array::from_f32(number(node, "value")?))?,
             "square" => ins[0].square()?,
+            // An embedding: rows of the table, selected by i32 ids. The
+            // gradient reaches only the rows that were read.
+            "take" => ins[0].take_axis(&ins[1], 0)?,
             "stop_gradient" => mlx_rs::stop_gradient(&ins[0])?,
             "dropout" => {
                 let p = number(node, "p")?;
