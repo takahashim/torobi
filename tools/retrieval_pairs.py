@@ -36,6 +36,7 @@ the passage a query should find.
 import argparse
 import glob
 import json
+import os
 
 QUERY_PREFIX = "検索クエリ: "
 TEXT_PREFIX = "検索文書: "
@@ -145,6 +146,9 @@ def main():
     parser.add_argument("--mteb", help="a directory of queries/corpus/qrels parquet")
     args = parser.parse_args()
 
+    # Before anything is read: tokenizing a hundred thousand rows and
+    # then finding there is nowhere to put them is minutes for nothing.
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     encode = encoder(args.tokenizer, args.seq)
     if args.pairs:
         pairs(args, encode)
