@@ -1895,6 +1895,38 @@ tech-ruri-data は 512 トークン・batch 8・negatives 2〜6 なので、**Gr
 
 この時点で Ruby 216 件 / Rust 114 + 33 件。
 
+### 15.36 損失を「渡されたもの」で微分する(2026-09-03)
+
+GradCache を Ruby と engine のどちらに置くかを検討し、**3 つに割った**。
+
+| 部分 | どちら | なぜ |
+| --- | --- | --- |
+| batch の分割と部分の重み付け | Ruby | データと判断は Ruby の側 (§5A.2 / §7.3)。どう割るかは損失次第 |
+| encoder の 2 回の pass | engine が実行、Ruby が駆動 | `evaluate` + tap と `accumulate` で既にある |
+| 埋め込みに対する損失と dL/de | **engine に口を足した** | GPU の計算であり、GradCache の定義そのもの |
+
+3 つ目は今日の時点でも書けた。埋め込みを「パラメータ」にしたモデルを作り、
+空の batch で `gradients` を呼べば dL/de が返る。**動くが、説明の要る形**である:
+入力の無いモデル、パラメータでないものがパラメータ、`put` が毎 step journal に
+digest を 2 行書き、`checkpoint!` すれば「先週の埋め込み」が 50MB のパラメータと
+して保存される。誰もやらないとしても、誤りを誘う形は口の方を直すべきである。
+
+    grads = loss_session.field_gradients(batch, of: %i[queries documents])
+
+`executor::differentiate_fields` は `value_and_grad_with_argnums` の argnums を
+パラメータではなく**指定された batch field** に向ける。パラメータは動かず、
+微分もされない。乱数も引かない (`evaluate` と同じ理由: これは値として読むもので、
+draw を入れるとその 1 標本になる)。
+
+**GradCache 以外にも使える**。入力への寄与の可視化、敵対的入力、「どこかで計算した
+値に対する損失」一般。名前を `input_gradients` ではなく `field_gradients` にしたのは、
+Torobi の入力が batch field だからで、モデルへの入力一般ではないことを言っている。
+
+境界の往復は理由にならない。sub-batch 32 テキストで埋め込み 98KB・cotangent 98KB、
+8,192 テキストの 1 更新でも往復 50MB に対し、その step の計算は 30 分規模である。
+
+この時点で Ruby 220 件 / Rust 116 + 35 件。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

@@ -239,6 +239,28 @@ impl SessionCore {
         Ok(loss.item::<f32>())
     }
 
+    /// Gradients with respect to named batch fields, by field name.
+    ///
+    /// The parameters do not move and are not differentiated. What this is
+    /// for is a loss over values computed elsewhere: a gradient cache
+    /// needs the loss differentiated by the representations it was given,
+    /// so the passes that produced them can be re-run with that as their
+    /// seed (docs/plan.md section 15.36).
+    pub(crate) fn field_gradients(
+        &self,
+        batch: &Batch,
+        of: &[String],
+    ) -> Result<Vec<(String, Tensor)>> {
+        let fields = self.plan.bind(batch)?;
+        let (_, grads) =
+            executor::differentiate_fields(&self.plan, self.state.pass().params, &fields, of)?;
+        of.iter()
+            .cloned()
+            .zip(grads)
+            .map(|(name, grad)| Ok((name, to_tensor(&grad)?)))
+            .collect()
+    }
+
     /// Gradients as copies, by qualified parameter path. Only differentiated
     /// parameters appear: a frozen model's have none.
     pub(crate) fn gradients(&self, batch: &Batch) -> Result<Vec<(String, Tensor)>> {
@@ -512,6 +534,17 @@ impl Session {
     pub fn evaluate(&mut self, batch: &Batch) -> Outcome<f32> {
         let core = self.core_mut()?;
         runtime().execute(|| core.evaluate(batch))
+    }
+
+    /// Gradients with respect to named batch fields, by field name. The
+    /// parameters do not move.
+    pub fn field_gradients(
+        &self,
+        batch: &Batch,
+        of: &[String],
+    ) -> Outcome<Vec<(String, Tensor)>> {
+        let core = self.core()?;
+        runtime().execute(|| core.field_gradients(batch, of))
     }
 
     /// Gradients as copies, by qualified parameter path. Only
@@ -798,6 +831,41 @@ mod tests {
         assert_eq!(session.discard().unwrap(), 1);
         assert_eq!(session.accumulated().unwrap(), 0);
         close(&values(&session.fetch("m.w").unwrap()), &before);
+    }
+
+    /// The loss differentiated by what it was given rather than by what
+    /// it holds. `scaled_mean` is mean(x * w) with w = [1, 2] over two
+    /// elements, so the answer is w / 2 and can be read off the page.
+    #[test]
+    fn a_loss_can_be_differentiated_by_a_batch_field() {
+        let session = session(fixtures::scaled_mean());
+        let before = values(&session.fetch("m.w").unwrap());
+        let batch = fixtures::batch_x(&[1.0, 2.0]);
+
+        let grads = session
+            .field_gradients(&batch, &["x".to_string()])
+            .unwrap();
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, "x");
+        close(&values(&grads[0].1), &[0.5, 1.0]);
+        // The parameters are not what was differentiated, and nothing moved.
+        close(&values(&session.fetch("m.w").unwrap()), &before);
+        assert_eq!(session.step().unwrap(), 0);
+    }
+
+    #[test]
+    fn differentiating_by_a_field_the_batch_does_not_have_is_refused() {
+        let session = session(fixtures::scaled_mean());
+        let batch = fixtures::batch_x(&[1.0, 2.0]);
+
+        let e = session
+            .field_gradients(&batch, &["elsewhere".to_string()])
+            .unwrap_err()
+            .to_string();
+
+        assert!(e.contains("elsewhere"), "{e}");
+        assert!(e.contains("\"x\""), "{e}");
     }
 
     #[test]

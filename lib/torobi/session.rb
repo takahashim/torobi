@@ -506,6 +506,26 @@ module Torobi
       TensorData.new(shape, bytes, dtype: dtype.to_sym)
     end
 
+    # The gradients of the loss with respect to named batch fields, by
+    # field name. Does not update anything and does not differentiate the
+    # parameters.
+    #
+    # What this is for is a loss over values computed elsewhere. A gradient
+    # cache encodes its parts without gradients, works out the loss over
+    # all of the representations at once, and needs that loss
+    # differentiated **by the representations** so each part can be re-run
+    # with the answer as its seed:
+    #
+    #   d = loss_session.field_gradients(batch, of: %i[queries documents])
+    #
+    # The fields must be in the batch, and the answer has their shapes.
+    def field_gradients(batch, of:)
+      names = Array(of).map(&:to_s)
+      @native.field_gradients(Batch.pack(batch), names).to_h do |name, dtype, shape, bytes|
+        [name, TensorData.new(shape, bytes, dtype: dtype.to_sym)]
+      end
+    end
+
     # The gradients for `batch`, by parameter path. Does not update anything.
     def gradients(batch)
       @native.gradients(Batch.pack(batch)).to_h do |path, dtype, shape, bytes|

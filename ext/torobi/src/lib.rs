@@ -691,6 +691,24 @@ impl Session {
         tensor_to_ruby(ruby, tensor)
     }
 
+    /// Gradients with respect to named batch fields: [name, dtype, shape,
+    /// bytes] each. The parameters do not move.
+    fn field_gradients(
+        ruby: &Ruby,
+        rb_self: &Self,
+        batch: RHash,
+        of: Vec<String>,
+    ) -> Result<RArray, Error> {
+        let batch = read_batch(ruby, batch)?;
+        let grads = rb_self.with_engine(ruby, |engine| engine.field_gradients(&batch, &of))?;
+        let out = ruby.ary_new_capa(grads.len());
+        for (name, tensor) in grads {
+            let (dtype, shape, bytes) = tensor_to_ruby(ruby, tensor)?;
+            out.push((name, dtype, shape, bytes))?;
+        }
+        Ok(out)
+    }
+
     fn gradients(ruby: &Ruby, rb_self: &Self, batch: RHash) -> Result<RArray, Error> {
         let batch = read_batch(ruby, batch)?;
         let grads = rb_self.with_engine(ruby, |engine| engine.gradients(&batch))?;
@@ -871,5 +889,6 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("input_names", method!(Session::input_names, 0))?;
     class.define_method("fetch", method!(Session::fetch, 1))?;
     class.define_method("gradients", method!(Session::gradients, 1))?;
+    class.define_method("field_gradients", method!(Session::field_gradients, 2))?;
     Ok(())
 }

@@ -162,6 +162,49 @@ pub fn differentiate(
     Ok((loss, grads, collected))
 }
 
+/// The loss and its gradients with respect to named batch fields, rather
+/// than to the parameters.
+///
+/// What a gradient cache is defined in terms of: the loss over
+/// representations that were computed elsewhere, differentiated with
+/// respect to those representations, so the parts that produced them can
+/// be re-run with the answer as their seed.
+///
+/// No randomness, for the same reason [`evaluate`] draws none: this is
+/// read as a value, and a draw would make it a sample of one. Taps are not
+/// collected either; a caller that wants to watch this pass evaluates it.
+pub fn differentiate_fields(
+    plan: &Plan,
+    params: &[Array],
+    fields: &BTreeMap<String, Array>,
+    of: &[String],
+) -> Result<(Array, Vec<Array>)> {
+    let mut missing = of.iter().filter(|name| !fields.contains_key(*name));
+    if let Some(name) = missing.next() {
+        anyhow::bail!(
+            "{name:?} is not in this batch, so there is nothing to differentiate by \
+             (this batch has {:?})",
+            fields.keys().collect::<Vec<_>>()
+        );
+    }
+
+    let given: Vec<Array> = of.iter().map(|name| fields[name].clone()).collect();
+    let fun = |xs: &[Array]| -> std::result::Result<Vec<Array>, Exception> {
+        let mut all = fields.clone();
+        for (name, x) in of.iter().zip(xs) {
+            all.insert(name.clone(), x.clone());
+        }
+        let mut inner = Tapped::new();
+        forward(plan, params, &all, None, &Taps::new(), &mut inner).map(|loss| vec![loss])
+    };
+    let argnums: Vec<i32> = (0..of.len() as i32).collect();
+    let mut vg = value_and_grad_with_argnums(fun, &argnums);
+    let (mut values, grads) = vg(&given)?;
+    let loss = values.remove(0);
+    eval(std::iter::once(&loss).chain(grads.iter()))?;
+    Ok((loss, grads))
+}
+
 /// The loss for one batch, without gradients and without randomness.
 ///
 /// What a validation set is read with. Running `differentiate` and throwing
