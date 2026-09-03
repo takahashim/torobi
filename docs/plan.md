@@ -1990,6 +1990,43 @@ GradCache は表現の幅も部分の行数も知らずに済む。graph 側は 
 `gvl.rs` は触っていない。unsafe が 1 ファイルに閉じ、`RB_NOGVL_INTR_FAIL` を選んだ
 理由も UBF を持たない理由も書いてあるので、読み直しても直すところが無かった。
 
+### 15.39 どの mlx-rs か。名前が 3 つある(2026-09-03)
+
+「mlx-rs が紛らわしい」という指摘を受けて調べた。**紛らわしいのは事実で、
+原因は crate のメタデータが嘘をついていること**だった。
+
+| | 何か | どこ |
+| --- | --- | --- |
+| mlx-rs (上流) | 非公式の Rust binding。crates.io の `mlx-rs`。**Torobi はこれを使っていない** | `oxiglade/mlx-rs` (旧 `oxideai/mlx-rs`。組織名の改称で旧 URL はリダイレクトする。混乱の一因) |
+| OminiX-MLX | その codebase を取り込んだ monorepo (gemma4 や flux など無関係な model crate と同居)。**Torobi が build するのはこれ**、1 コミットに固定 | `OminiX-ai/OminiX-MLX` の `mlx-rs/` |
+| mlx-c | MLX の C API。`mlx-sys` の submodule | `ml-explore/mlx-c` |
+| MLX | 本体。ここでは build せず、prebuilt を落としてくる | `ml-explore/mlx` |
+
+**メタデータが上流を指している。** OminiX の workspace は上流の
+`repository = "https://github.com/oxideai/mlx-rs"` をそのまま持っているので、
+`cargo tree` も docs.rs も**コンパイルされたものではない方**へ導く。真実は
+`engine/Cargo.toml` と `Cargo.lock` にしかない。両方に「どれなのか」を書いた。
+
+**ライセンスは全部 permissive で、今は何も同梱しなくてよい。**
+
+| | |
+| --- | --- |
+| Torobi | MIT |
+| OminiX-MLX (mlx-rs / mlx-sys) | MIT または Apache-2.0 |
+| mlx-c | MIT (ml-explore) |
+| MLX | MIT (ml-explore) |
+
+gem が持つのは `spec.files` の中身 (Ruby、engine の Rust、manifest 2 つ、docs)
+だけで、**MLX の行は 1 行も入っていない**。cargo が install 時に fork を、
+mlx-sys が prebuilt を、それぞれの配布元から取ってくる。Torobi は指しているだけで
+配ってはいない。
+
+**ただし 1 つの判断でそれが変わる。** 配布の形 (§11.4) が **platform gem**
+(コンパイル済み) になると、package の中に MLX のバイナリと 105MB の metallib が
+入るので、Torobi は再配布者になる。そのとき必要になるもの (MLX と mlx-c の MIT
+表示、OminiX-MLX の表示、README での明示) を `docs/vendoring.md` に列挙した。
+**後で気付くのではなく、判断のときに視野に入っているように**書いてある。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

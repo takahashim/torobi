@@ -106,4 +106,11 @@ The version is 0.0.1 and the API still moves.
 
 ## License
 
-MIT
+MIT.
+
+The engine builds against MLX (MIT, ml-explore) through OminiX-MLX's
+mlx-rs (MIT or Apache-2.0), which is a different repository from the
+mlx-rs on crates.io. The gem ships none of their code: cargo fetches them
+at install time from their own remotes. `docs/vendoring.md` names all
+three, with their licences and with what would have to be carried if
+Torobi were ever distributed as a compiled gem.

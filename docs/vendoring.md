@@ -2,11 +2,65 @@
 
 What the engine is built against, and how that was decided.
 
+## Which mlx-rs
+
+There are three repositories with a claim to the name, and the manifests
+do not make it obvious which one is built. In order, top to bottom:
+
+| | what it is | where |
+|---|---|---|
+| **mlx-rs (upstream)** | the unofficial Rust bindings, by Minghua Wu and David Chavez. crates.io's `mlx-rs`. **Not what Torobi builds** | `github.com/oxiglade/mlx-rs`, formerly `github.com/oxideai/mlx-rs` (the org was renamed; the old links redirect, which is one source of the confusion) |
+| **OminiX-MLX** | a monorepo whose `mlx-rs/` subtree is that codebase carried forward, beside a dozen unrelated model crates (gemma4, flux, glm4). **This is what Torobi builds**, pinned to one commit | `github.com/OminiX-ai/OminiX-MLX`, subtree `mlx-rs/` |
+| **mlx-c** | Apple's C API for MLX, a git submodule of `mlx-sys`. bindgen reads its headers | `github.com/ml-explore/mlx-c` |
+| **MLX** | the library itself. Not built here: a pre-built binary is downloaded at build time (below) | `github.com/ml-explore/mlx` |
+
+**The crate metadata points at the wrong one.** OminiX's workspace still
+carries upstream's `repository = "https://github.com/oxideai/mlx-rs"`, so
+`cargo tree`, docs.rs links and anything reading crate metadata lead to
+upstream rather than to what was compiled. Read `engine/Cargo.toml` and
+`Cargo.lock` for the truth; they name the fork and its commit.
+
+## The ledger
+
 | what | state |
 |---|---|
 | mlx-rs / mlx-sys / mlx-c | **git dependency on `https://github.com/OminiX-ai/OminiX-MLX.git`, pinned to `4988a3fcfa48b8cb5d0780a501b92c6a41401523`.** Cargo.lock records the same commit; cargo resolves the mlx-c submodule itself |
 | MLX core | **not built from source here**: mlx-sys finds no Metal compiler on this machine and downloads OminiX's pre-built binary `mlx-prebuilt-v0.1.0-macos-arm64.tar.gz`. The exact MLX revision is whatever that tarball pins, which is the one thing this ledger still cannot name |
 | mlx.metallib | 105 MB. MLX locates it through `dladdr`, i.e. **beside whichever library holds the MLX symbols**: `target/release/` for the CLI, the install directory for the extension. `ext/torobi/extconf.rb` appends a Makefile rule that installs it beside the bundle; `rake metallib` does the same for a checkout. Any distribution must ship it beside the bundle |
+
+## Licences
+
+| | licence | holder |
+|---|---|---|
+| Torobi | MIT | this project |
+| OminiX-MLX (mlx-rs, mlx-sys) | MIT **or** Apache-2.0, at the user's choice. `LICENSE-MIT` and `LICENSE-APACHE` sit at its root | its authors, upstream's included |
+| mlx-c | MIT | ml-explore |
+| MLX | MIT | ml-explore |
+
+Everything in the chain is permissive, and MIT and Apache-2.0 both ask the
+same thing of a redistributor: carry the notice.
+
+**Torobi carries none of it today, and does not have to.** What the gem
+holds is `spec.files`: Ruby, the engine's own Rust, two manifests and the
+docs. No line of MLX or mlx-rs is in it. Cargo fetches the fork at install
+time from its own remote, and `mlx-sys` downloads MLX's pre-built binary
+from OminiX's releases. Both arrive at the user's machine from their own
+authors, under their own licences; Torobi points, it does not ship.
+
+**One decision changes that.** If the distribution question
+(docs/plan.md section 11.4) lands on a **platform gem** (compiled, so that
+nothing is built at install), then the package contains MLX's compiled
+code and its 105 MB `mlx.metallib`, and Torobi becomes a redistributor.
+What that costs, exactly:
+
+- ship MLX's MIT notice and copyright (ml-explore)
+- ship mlx-c's MIT notice (ml-explore)
+- ship OminiX-MLX's notice under whichever of MIT or Apache-2.0 is chosen
+  (MIT is the simpler pairing with this project's own licence)
+- say in the README what is inside the binary and under what terms
+
+Not hard, and not something to discover afterwards: it is written here so
+that the platform-gem decision is made with it in view.
 
 ## Why a git dependency rather than a vendored copy
 

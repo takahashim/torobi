@@ -6,13 +6,19 @@ description = "Torobi's execution engine: interprets GraphConfig on MLX"
 license = "MIT"
 
 [dependencies]
-# MLX through OminiX's fork of mlx-rs, pinned to an exact revision.
+# MLX through OminiX-MLX, pinned to an exact revision.
+#
+# Which mlx-rs this is matters, and the crate metadata will not tell you:
+# it still carries upstream's `repository = github.com/oxideai/mlx-rs`
+# (renamed to oxiglade/mlx-rs), which is a different repository from the
+# one these two lines fetch. docs/vendoring.md puts the three of them side
+# by side, with their licences.
 #
 # A git dependency rather than the vendored copy the plan first imagined:
 # it costs no source tree of ours, cargo records the commit in Cargo.lock,
 # and it builds anywhere - which an absolute path to a local checkout did
-# not (docs/vendoring.md records what that cost us). The fork rather than
-# crates.io's mlx-rs 0.25 because it tracks MLX 0.32 and falls back to a
+# not (docs/vendoring.md records what that cost us). This one rather than
+# crates.io's mlx-rs because it tracks MLX 0.32 and falls back to a
 # pre-built MLX when no Metal compiler is present, which is what lets the
 # gem build on a machine without Xcode.
 mlx-rs = { git = "https://github.com/OminiX-ai/OminiX-MLX.git", rev = "4988a3fcfa48b8cb5d0780a501b92c6a41401523", features = ["safetensors"] }
