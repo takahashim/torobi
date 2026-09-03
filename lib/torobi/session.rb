@@ -347,41 +347,47 @@ module Torobi
       values
     end
 
-    # Writes one model's parameters to `dir` as an HF-compatible fp32
-    # safetensors checkpoint, plus the sentence-transformers metadata files
-    # that let it load without conversion (docs/plan.md section 14).
+    # Writes one model as a checkpoint somebody else can load: its
+    # parameters as fp32 safetensors, and the files that say what they are.
     #
-    # `model:` is the GraphConfig model name to export (defaults to the
-    # only model when there is just one). The GraphConfig model name is
-    # stripped from each parameter path, so a model declared with
-    # `encoder_prefix:` keeps that prefix and the file's keys match the
-    # published layout.
+    # `from:` is the published model this run started from. Everything
+    # except its weights is still true of the result (the tokenizer, the
+    # vocabulary, the sequence length, how the pooling was configured), so
+    # it is copied rather than reinvented. **Without it the export holds no
+    # tokenizer, and sentence-transformers cannot load a directory that has
+    # none**, whatever else is in it. Fine-tuning always has a source; a
+    # model trained from nothing does not, and has to be given a tokenizer
+    # by hand.
     #
-    # `pooling:` is :cls or :mean, and `pooling_dim:` is the model's hidden
-    # size (the pooling layer's word_embedding_dimension). `config_json:`
-    # is the underlying transformer's config.json text, copied as-is if
-    # given.
+    # `model:` is which model of the GraphConfig to write, needed only when
+    # the run has more than one. The model's own name is stripped from each
+    # parameter path, so a model declared with `encoder_prefix:` keeps that
+    # prefix and the keys match the published layout.
     #
-    #   s.export_model!("out/ruri-ft", model: "student",
-    #                   pooling: :cls, pooling_dim: 768,
-    #                   config_json: File.read("ruri/config.json"))
+    # `pooling:` (:cls or :mean) and `pooling_dim:` override what the
+    # source said, for an export that pools differently from what it
+    # started as. Left out, the source's own pooling configuration travels
+    # unchanged, including keys this code knows nothing about.
     #
-    # This is not a checkpoint: it has no optimizer state, no RNG, no
-    # counters. It is the shape a distillation produces for serving.
-    def export_model!(dir, model: nil, pooling: :cls, pooling_dim:, config_json: nil)
-      models = @provenance.dig("config", "models") || []
-      model ||= models.first if models.size == 1
-      raise ArgumentError, "model: is required (this run has #{models.inspect})" unless model
-
-      pairs = atomically do
+    #   s.export_model!("out/ruri-ft", from: "ruri-v3-130m")
+    #   s.export_model!("out/mean", from: "ruri-v3-130m", pooling: :mean)
+    #
+    # This is not a checkpoint: no optimizer state, no RNG, no counters.
+    # It is the shape a run produces for serving, and `checkpoint!` is the
+    # shape it produces for itself.
+    def export_model!(dir, from: nil, model: nil, pooling: nil, pooling_dim: nil)
+      model ||= sole_model
+      atomically do
         written = @native.export_model(model.to_s, dir.to_s)
+        carried = Export.carry(from, dir.to_s)
+        Export.write_metadata(dir.to_s, pooling:, pooling_dim:)
+        check_pooling_dim(dir.to_s, written)
+        # Last, so that a record of an export is a record of one that is
+        # on disk whole.
         @journal&.note(step: @native.step, event: "exported", model: model.to_s,
-                       paths: written.map { |_, new| new })
-        written
+                       paths: written.map(&:last), carried:)
+        written.to_h
       end
-      Export.write_metadata(dir, pooling:, pooling_dim:,
-                            config_json: config_json&.to_s)
-      pairs.to_h
     end
 
     # Writes the run's state to `dir`, atomically: parameters, optimizer
@@ -582,6 +588,37 @@ module Torobi
       { params: params.to_h { |path, t| [path, t.is_a?(TensorData) ? t.to_h : t] } }
     end
     private_class_method :inline
+
+    # Which model to export when the run holds only one.
+    #
+    # From the parameter paths, which the engine settled at open and
+    # answers without waiting for a step: a model name is the first
+    # segment of a qualified path.
+    def sole_model
+      names = @native.parameter_paths.map { |path| path.split(".").first }.uniq
+      return names.first if names.size == 1
+
+      raise ArgumentError, "model: is required (this run has #{names.inspect})"
+    end
+
+    # That the pooling dimension names a width the export actually has.
+    #
+    # A wrong one is not an error anywhere: it produces a pooling layer of
+    # the wrong shape, in a file that loads. The exported tensors know the
+    # answer, so this asks them.
+    def check_pooling_dim(dir, written)
+      config = Export.pooling_config(dir)
+      dim = config && config["word_embedding_dimension"]
+      return unless dim
+
+      widths = Export.widths(File.join(dir, "model.safetensors"))
+      return if widths.empty? || widths.include?(dim)
+
+      raise ArgumentError,
+            "word_embedding_dimension #{dim} is not a width this export holds " \
+            "(#{widths.to_a.sort.inspect}). The pooled vector is as wide as the " \
+            "model's hidden state; #{written.size} tensors were written"
+    end
 
     # Runs an engine change and the journal's record of it as one, so an
     # asynchronous interrupt cannot land between them.

@@ -453,12 +453,41 @@ impl TrainState {
             owned.push((new_path, array));
         }
         eval(owned.iter().map(|(_, a)| a))?;
+        // `{"format": "pt"}`, which is what a published checkpoint carries
+        // and what a loader looks for: transformers reads the metadata and
+        // refuses a file whose format it does not recognize. The bytes are
+        // plain little-endian f32 in reading order, which is what "pt"
+        // describes; the word names a layout, not a framework that wrote
+        // it.
+        let metadata = std::collections::HashMap::from([
+            ("format".to_string(), "pt".to_string()),
+        ]);
+        let file = dir.join("model.safetensors");
         Array::save_safetensors(
             owned.iter().map(|(path, array)| (path.as_str(), array)),
-            None,
-            dir.join("model.safetensors"),
+            &metadata,
+            &file,
         )
         .context("writing model.safetensors")?;
+
+        // Read back before saying it is written, for the reason a
+        // checkpoint does (docs/plan.md section 15.27): a file that does
+        // not load is worse than no file, and finding out here costs one
+        // read of what was just written.
+        let read = Array::load_safetensors(&file)
+            .context("the export just written does not read back")?;
+        for (path, _) in &owned {
+            anyhow::ensure!(
+                read.contains_key(path.as_str()),
+                "the export just written has no {path:?}"
+            );
+        }
+        anyhow::ensure!(
+            read.len() == owned.len(),
+            "the export just written holds {} tensors and {} were saved",
+            read.len(),
+            owned.len()
+        );
         Ok(renamed)
     }
 
@@ -878,6 +907,25 @@ mod tests {
         for (got, want) in exported.iter().zip(&held) {
             assert!((got - want).abs() < 1e-6, "{exported:?} against {held:?}");
         }
+    }
+
+    #[test]
+    fn an_export_says_what_format_it_is_in() {
+        // A loader reads this before the tensors, and refuses a file whose
+        // format it cannot name. A published checkpoint carries the same.
+        let (plan, state) = open(fixtures::teacher_and_student(), sgd(0.1));
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        state
+            .export_model(&plan, "student", &out.display().to_string())
+            .unwrap();
+
+        let bytes = std::fs::read(out.join("model.safetensors")).unwrap();
+        let length = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
+        let header: serde_json::Value =
+            serde_json::from_slice(&bytes[8..8 + length]).unwrap();
+
+        assert_eq!(header["__metadata__"]["format"], "pt");
     }
 
     #[test]
