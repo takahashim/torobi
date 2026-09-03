@@ -53,6 +53,49 @@ class RunnerTest < Minitest::Test
     assert_equal reported.sort, reported, "progress only goes forward"
   end
 
+  # Progress is asked for over and over, so what it reads is what has been
+  # appended since it last read: a poll costs a step's worth of journal
+  # rather than the whole of it. Written here rather than run, because the
+  # only way to see it is to write the journal by hand.
+  def test_progress_reads_what_was_appended_and_no_more
+    r = runner
+    path = r.journal_path
+    write = ->(step) { File.open(path, "a") { |f| f.puts JSON.generate(kind: "span", step:) } }
+
+    assert_nil r.progress, "an empty directory has no progress to report"
+    write.call(1)
+
+    assert_equal 1, r.progress.fetch(:step)
+    write.call(2)
+
+    assert_equal 2, r.progress.fetch(:step)
+
+    # A poll can land between an entry and its newline. The half-written
+    # line is held rather than skipped, so the entry is not lost.
+    File.open(path, "a") { |f| f.write(JSON.generate(kind: "span", step: 3)) }
+
+    assert_equal 2, r.progress.fetch(:step), "an unfinished line is not an entry yet"
+    File.open(path, "a") { |f| f.puts }
+
+    assert_equal 3, r.progress.fetch(:step)
+  end
+
+  # A journal is only ever appended to, so a file that got shorter is a
+  # different journal and the position kept from the last one means
+  # nothing. Reading it from the start is the only answer that is right.
+  def test_a_replaced_journal_is_read_again_rather_than_continued
+    r = runner
+    File.open(r.journal_path, "a") do |f|
+      3.times { |i| f.puts JSON.generate(kind: "span", step: 100 + i) }
+    end
+
+    assert_equal 102, r.progress.fetch(:step)
+
+    File.write(r.journal_path, "#{JSON.generate(kind: "span", step: 7)}\n")
+
+    assert_equal 7, r.progress.fetch(:step)
+  end
+
   # TERM asks; it does not insist. The child finishes the step it is in,
   # writes what it reached, and exits cleanly.
   def test_stopping_is_asked_for_and_leaves_a_usable_checkpoint

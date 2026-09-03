@@ -72,6 +72,7 @@ module Torobi
       @env[LIMIT_VARIABLE] = Integer(memory_limit).to_s if memory_limit
       @pid = nil
       @outcome = nil
+      @read = Reading.new(journal_path)
     end
 
     attr_reader :dir, :pid
@@ -117,7 +118,7 @@ module Torobi
     # child may be inside a step, or gone. A record on disk answers either
     # way (the journal flushes per entry for exactly this).
     def progress
-      last = last_entry { |e| e["kind"] == "span" }
+      last = last_entry("span")
       return nil unless last
 
       { step: last["step"], loss: last["loss"], at: last["at"] }
@@ -164,7 +165,7 @@ module Torobi
 
     # The child has ended; read what it said on the way out.
     def reap(status)
-      @outcome = Outcome.new(status:, note: last_entry { |e| e["kind"] == "note" })
+      @outcome = Outcome.new(status:, note: last_entry("note"))
     end
 
     def signal(name)
@@ -175,21 +176,82 @@ module Torobi
 
     def now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-    # The last journal entry a caller cares about. Written a line at a time
-    # and flushed, so the only line that can be incomplete is the last one;
-    # anything that does not parse is skipped rather than raised on.
-    def last_entry
-      return nil unless File.exist?(journal_path)
+    # The last journal entry of a kind, as of now.
+    def last_entry(kind) = @read.last(kind)
 
-      File.readlines(journal_path).reverse_each do |line|
-        entry = begin
-          JSON.parse(line)
-        rescue JSON::ParserError
-          next
-        end
-        return entry if yield(entry)
+    # The journal as the parent reads it: forwards, once.
+    #
+    # Progress is asked for over and over while a run goes, so what this
+    # has to be good at is being asked again. It keeps how far it has read
+    # and the last entry of each kind it saw, and a second call reads only
+    # what was appended since the first. A run that appends 180 bytes a
+    # step costs a poll 180 bytes, rather than the whole journal (which was
+    # 14 MB and 16 ms at a hundred thousand steps).
+    #
+    # Forwards rather than seeking to the end: a line can be half-written
+    # when a poll lands, and holding the incomplete tail until the rest
+    # arrives is one variable here and a special case in every backwards
+    # scheme. Reading from the start costs one pass, once.
+    class Reading
+      def initialize(path)
+        @path = path
+        @offset = 0
+        @partial = +""
+        @last = {}
       end
-      nil
+
+      # The last entry of `kind` the journal holds, or nil.
+      def last(kind)
+        catch_up
+        @last[kind]
+      end
+
+      private
+
+      def catch_up
+        size = File.size?(@path) or return
+        # A journal is only ever appended to. Anything else (a directory
+        # reused, a file replaced) is a different journal, so start over
+        # rather than read from a position that means nothing now.
+        reset if size < @offset
+        return if size == @offset
+
+        File.open(@path) do |io|
+          io.seek(@offset)
+          @partial << io.read(size - @offset).to_s
+          @offset = size
+        end
+        consume
+      end
+
+      def reset
+        @offset = 0
+        @partial = +""
+        @last = {}
+      end
+
+      # Whole lines only. The last one is kept when it has no newline yet:
+      # the journal flushes per entry, but a poll can still land between
+      # the write and the newline.
+      #
+      # Every line is parsed, which is the price of reading forwards: what
+      # the last entry of a kind is cannot be known until the ones after
+      # it have been looked at. It is paid once, over what was already
+      # there when this started reading, and a run whose parent started it
+      # has nothing there at all.
+      def consume
+        lines = @partial.split("\n", -1)
+        @partial = lines.pop || +""
+        lines.each do |line|
+          entry = begin
+            JSON.parse(line)
+          rescue JSON::ParserError
+            next
+          end
+          kind = entry["kind"]
+          @last[kind] = entry if kind
+        end
+      end
     end
 
     # How a run ended, and what it said on the way out.
