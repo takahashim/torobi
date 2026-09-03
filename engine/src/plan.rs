@@ -39,6 +39,15 @@ pub enum Weights<'a> {
     /// how a checkpoint names them, so a run can start from what another
     /// run reached.
     File(&'a Path),
+    /// One published checkpoint per model, by model name.
+    ///
+    /// A model published on its own does not know it will be called
+    /// "student" here, so its tensors are named without that: ruri-v3's
+    /// file holds `embeddings.tok_embeddings.weight`, not
+    /// `student.embeddings...`. Naming a file per model is what lets a
+    /// published checkpoint be imported with no renaming at all, and it is
+    /// the shape a distillation wants anyway, having two of them.
+    Pretrained(&'a BTreeMap<String, std::path::PathBuf>),
 }
 
 /// One model as the plan holds it: its program, and where its parameters
@@ -119,7 +128,7 @@ impl Plan {
                 if trained && spec.trainable {
                     candidates.push(params.len() as i32);
                 }
-                params.push(source.parameter(&path, spec)?);
+                params.push(source.parameter(&name, &path, spec)?);
                 paths.push(path);
             }
             let slice = start..params.len();
@@ -276,7 +285,10 @@ impl Plan {
 /// declared.
 enum Source {
     Inline(BTreeMap<String, InitialTensor>),
+    /// Keyed by qualified path.
     File(std::collections::HashMap<String, Array>),
+    /// Keyed by model, then by that model's own path.
+    Pretrained(BTreeMap<String, std::collections::HashMap<String, Array>>),
 }
 
 impl Source {
@@ -287,17 +299,19 @@ impl Source {
                     serde_json::from_str(json).context("parsing the initial parameters")?;
                 Source::Inline(parsed.params)
             }
-            Weights::File(path) => {
-                anyhow::ensure!(
-                    path.is_file(),
-                    "no parameters at {} (a safetensors file was expected)",
-                    path.display()
-                );
-                Source::File(
-                    Array::load_safetensors(path)
-                        .with_context(|| format!("reading {}", path.display()))?,
-                )
-            }
+            Weights::File(path) => Source::File(read_safetensors(path)?),
+            Weights::Pretrained(files) => Source::Pretrained(
+                files
+                    .iter()
+                    .map(|(model, path)| {
+                        Ok((
+                            model.clone(),
+                            read_safetensors(path)
+                                .with_context(|| format!("model {model:?}"))?,
+                        ))
+                    })
+                    .collect::<Result<_>>()?,
+            ),
         })
     }
 
@@ -309,7 +323,7 @@ impl Source {
     /// good place to start an f32 run, and refusing it would be refusing
     /// the point of the exercise. `TrainState::restore` is the other case
     /// and refuses, because a resumed run has to be the same run.
-    fn parameter(&self, path: &str, spec: &ParameterSpec) -> Result<Array> {
+    fn parameter(&self, model: &str, path: &str, spec: &ParameterSpec) -> Result<Array> {
         let declared = dtype_named(&spec.dtype)
             .with_context(|| format!("parameter {path:?}: unknown dtype {:?}", spec.dtype))?;
         let array = match self {
@@ -335,19 +349,26 @@ impl Source {
             Source::File(arrays) => {
                 let array = arrays.get(path).with_context(|| {
                     format!(
-                        "the file has no parameter {path:?}. Its tensors are named the \
-                         way the graph names them, which is how a checkpoint writes \
-                         them; a model published under other names has to be renamed \
-                         on the way in."
+                        "the file has no parameter {path:?}. One file holds every \
+                         model's parameters under their qualified paths, which is how \
+                         a checkpoint writes them; a published model, which does not \
+                         know what it will be called here, is named per model instead."
                     )
                 })?;
-                anyhow::ensure!(
-                    array.shape() == spec.shape,
-                    "parameter {path:?}: the file holds shape {:?}, the graph declares {:?}",
-                    array.shape(),
-                    spec.shape
-                );
-                array.clone()
+                shaped(array, path, spec)?
+            }
+            Source::Pretrained(files) => {
+                let arrays = files.get(model).with_context(|| {
+                    format!("no file was given for model {model:?}")
+                })?;
+                // The model's own path, without the name this run gives it.
+                let array = arrays.get(&spec.path).with_context(|| {
+                    format!(
+                        "model {model:?}'s file has no parameter {:?}",
+                        spec.path
+                    )
+                })?;
+                shaped(array, path, spec)?
             }
         };
         Ok(if array.dtype() == declared {
@@ -356,6 +377,26 @@ impl Source {
             array.as_dtype(declared)?
         })
     }
+}
+
+fn read_safetensors(path: &Path) -> Result<std::collections::HashMap<String, Array>> {
+    anyhow::ensure!(
+        path.is_file(),
+        "no parameters at {} (a safetensors file was expected)",
+        path.display()
+    );
+    Array::load_safetensors(path).with_context(|| format!("reading {}", path.display()))
+}
+
+/// The array, if its shape is the one the graph declared.
+fn shaped(array: &Array, path: &str, spec: &ParameterSpec) -> Result<Array> {
+    anyhow::ensure!(
+        array.shape() == spec.shape,
+        "parameter {path:?}: the file holds shape {:?}, the graph declares {:?}",
+        array.shape(),
+        spec.shape
+    );
+    Ok(array.clone())
 }
 
 /// A freeze pattern: a path, or a prefix ending in `*`.

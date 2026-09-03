@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "minitest/test_task"
+require "shellwords"
 require "rb_sys/extensiontask"
 
 GEMSPEC = Gem::Specification.load("torobi.gemspec")
@@ -50,6 +51,27 @@ namespace :rust_test do
     sh "cargo test -p torobi-engine --lib session::"
   end
 end
+
+# The versioned artifacts a parity test is held to (docs/plan.md section
+# 12). Committed, so the comparison runs on a machine that has never
+# downloaded the model; regenerated deliberately, and failing closed when
+# the checkpoint is not there rather than quietly writing an empty one.
+namespace :oracle do
+  RURI_V3_130M = File.expand_path(
+    "~/.cache/huggingface/hub/models--cl-nagoya--ruri-v3-130m/snapshots"
+  )
+
+  desc "record what cl-nagoya/ruri-v3-130m holds, for test/oracle"
+  task :ruri do
+    dir = ENV["RURI_V3_130M"] || Dir[File.join(RURI_V3_130M, "*")].max_by { File.mtime(_1) }
+    raise "no ruri-v3-130m checkpoint (set RURI_V3_130M)" unless dir && File.directory?(dir)
+
+    sh "ruby tools/inventory.rb #{dir.shellescape} test/oracle/ruri-v3-130m.json"
+  end
+end
+
+desc "regenerate every oracle artifact"
+task oracle: ["oracle:ruri"]
 
 Minitest::TestTask.create
 

@@ -1095,6 +1095,54 @@ tiny dataset の過学習、memory 予算の実測、そして forward / gradien
 
 この時点で Ruby 179 件 / Rust 109 件。
 
+### 15.17 M3b: ModernBERT が公開 checkpoint と一致し、動いた(2026-09-03)
+
+oracle は Python MLX ではなく **kohagi と公開 checkpoint そのもの**にした(§9.2 が
+encoder 系の oracle として kohagi を挙げている)。Python MLX はこの機械に入っておらず、
+入れずに済むならその方がよい。
+
+**`Torobi::Models::ModernBERT` を書いた。** 数値を埋め込まず、公開の `config.json` を
+読んで組み立てる。パラメータの path は **checkpoint 自身の名前**にした。
+
+cl-nagoya/ruri-v3-130m に対して、宣言と実物が**完全に一致**した:
+
+| | |
+| --- | --- |
+| 宣言したパラメータ | 116 |
+| checkpoint が持つテンソル | 116 |
+| 片方にしか無いもの | 0 |
+| 形の不一致 | 0 |
+
+これは forward を 1 度も走らせずに得られる構造 parity で、アーキテクチャの間違いの
+大半はここで落ちる。layer 0 に attn_norm が無いという reference 自身の非対称も含めて
+一致している。
+
+**版付き成果物にした。** `test/oracle/ruri-v3-130m.json` が config とテンソル一覧を
+記録し、テストはそれと比べる。checkpoint を持たない機械でも回り、再生成は
+`rake oracle` で、checkpoint が無ければ**空を書かずに落ちる**(§12)。
+
+**公開 checkpoint の import 経路を直した。** 公開モデルは「このモデルが student と
+呼ばれる」ことを知らないので、テンソルにモデル接頭辞が無い。1 ファイルに全モデルを
+qualified path で入れる形(run の checkpoint)とは別に、**モデルごとにファイルを指す**
+`pretrained: {model => path}` を足した。蒸留はもともとファイルが 2 つある形なので、
+これがその入口でもある。
+
+**実物が動いた**(19 層 / 130M パラメータ / 公開の重み、seq 16、batch 1):
+
+| | |
+| --- | --- |
+| open | 0.65s、active 529 MB(130M × f32 = 520 MB) |
+| forward(`evaluate`) | 0.67s |
+| step(forward + backward + 更新) | 0.84s |
+| peak / cache | 1904 MB / 1412 MB |
+
+M3b の「memory 予算の実測」はこれが最初の数字である。
+
+**残る M3b**: 数値 parity(kohagi の埋め込みと突き合わせる)と、tiny dataset の
+過学習。前者はトークン ID を両者で揃える必要があり、kohagi 側に入口が要るかを次に見る。
+
+この時点で Ruby 185 件 / Rust 109 件。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

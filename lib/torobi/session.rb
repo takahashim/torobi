@@ -33,12 +33,22 @@ module Torobi
     #   weights:       values, {params: {path => {shape:, data:}}}. For
     #                  spikes and tests. Not for a real model: 130M
     #                  parameters as JSON numbers is gigabytes of text.
-    #   weights_file:  a safetensors file, read by the engine. Its tensors
-    #                  are named the way the graph names them, which is
-    #                  also how a checkpoint writes them, so a run can
-    #                  start from what another run reached. A file in
-    #                  another precision is converted: importing is
-    #                  starting somewhere, not resuming.
+    #   weights_file:  one safetensors file holding every model's
+    #                  parameters under their qualified paths, which is how
+    #                  a checkpoint writes them, so a run can start from
+    #                  what another run reached.
+    #   pretrained:    {model_name => path}, one published checkpoint per
+    #                  model. A model published on its own does not know
+    #                  what this run will call it, so its tensors carry no
+    #                  model prefix; naming a file per model is what lets
+    #                  ruri-v3 or a reranker be imported with no renaming,
+    #                  and it is the shape a distillation wants anyway:
+    #
+    #                    pretrained: { student: "ruri-130m/model.safetensors",
+    #                                  teacher: "reranker-310m/model.safetensors" }
+    #
+    # A file in another precision is converted: importing is starting
+    # somewhere, not resuming.
     #
     # A third will follow: the GraphConfig already declares an initializer
     # per parameter, so a run that starts from those and a seed needs no
@@ -51,13 +61,16 @@ module Torobi
     # section 8.6. Pass a Journal, or `io:` to have one made against this
     # config's provenance; without either, nothing is recorded and the
     # session is exactly as fast.
-    def self.open(config, weights: nil, weights_file: nil, optimizer: DEFAULT_OPTIMIZER,
-                  journal: nil, io: nil, dataset: nil)
-      if weights.nil? == weights_file.nil?
+    def self.open(config, weights: nil, weights_file: nil, pretrained: nil,
+                  optimizer: DEFAULT_OPTIMIZER, journal: nil, io: nil, dataset: nil)
+      sources = { weights:, weights_file:, pretrained: }.compact
+      unless sources.size == 1
         raise ArgumentError,
               "a session needs its parameters, from exactly one place: " \
-              "weights: {params: {path => {shape:, data:}}}, or " \
-              "weights_file: a safetensors path"
+              "weights: {params: {path => {shape:, data:}}}, " \
+              "weights_file: a safetensors path, or " \
+              "pretrained: {model => path}" \
+              "#{" (given #{sources.keys.join(", ")})" unless sources.empty?}"
       end
 
       Preflight.check!
@@ -65,6 +78,10 @@ module Torobi
         if weights_file
           Native::Session.open_from_file(config.canonical_json, weights_file.to_s,
                                          JSON.generate(optimizer))
+        elsif pretrained
+          files = pretrained.to_h { |model, path| [model.to_s, path.to_s] }
+          Native::Session.open_pretrained(config.canonical_json, JSON.generate(files),
+                                          JSON.generate(optimizer))
         else
           Native::Session.open(config.canonical_json, JSON.generate(weights),
                                JSON.generate(optimizer))

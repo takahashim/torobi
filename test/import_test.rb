@@ -104,7 +104,8 @@ class ImportTest < Minitest::Test
       Torobi::Session.open(config, weights_file: partial)
     end
     assert_match(/m\.l\.weight/, e.message)
-    assert_match(/named the way the graph names them/, e.message)
+    assert_match(/qualified paths/, e.message)
+    assert_match(/named per model instead/, e.message)
   end
 
   # A model published in bf16 is a perfectly good place to start an f32

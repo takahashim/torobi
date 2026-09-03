@@ -9,6 +9,7 @@ require_relative "torobi/journal"
 require_relative "torobi/ops"
 require_relative "torobi/shape"
 require_relative "torobi/dsl"
+require_relative "torobi/models/modern_bert"
 
 # The engine, and the session that drives it. Optional: the pure-Ruby half
 # (the DSL and the IR) stands on its own, and its tests need no extension.
