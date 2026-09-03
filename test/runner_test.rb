@@ -22,6 +22,22 @@ class RunnerTest < Minitest::Test
     Torobi::Runner.new([RbConfig.ruby, SCRIPT], dir: @dir, env:)
   end
 
+  # Waits for the child to say something, and gives up.
+  #
+  # A test that waits forever cannot report anything: a child that dies
+  # before its first step leaves the parent spinning, which reads as a
+  # hung machine rather than as the failure it is. Ten seconds is long
+  # against a run that starts in tenths of one, and short against a CI
+  # job nobody is watching.
+  def moving(runner, within: 10)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + within
+    sleep(0.05) while runner.running? && runner.progress.nil? &&
+                      Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+    return runner if runner.progress
+
+    flunk "the run wrote no progress in #{within}s (#{runner.outcome&.to_s || "still going"})"
+  end
+
   def test_a_run_finishes_and_says_so
     r = runner("STEPS" => "20").start
     outcome = r.wait
@@ -39,7 +55,7 @@ class RunnerTest < Minitest::Test
     seen = []
     # The child has an engine to open first, so wait for the run to move
     # before sampling it.
-    sleep(0.05) while r.running? && r.progress.nil?
+    moving(r)
     30.times do
       break unless r.running?
 
@@ -101,7 +117,7 @@ class RunnerTest < Minitest::Test
   # writes what it reached, and exits cleanly.
   def test_stopping_is_asked_for_and_leaves_a_usable_checkpoint
     r = runner("STEPS" => "100000", "CHECKPOINT_EVERY" => "1000").start
-    sleep 0.05 until r.progress
+    moving(r)
     outcome = r.stop(grace: 20)
 
     assert_predicate outcome, :stopped?, outcome.to_s

@@ -12,11 +12,23 @@ on:
   pull_request:
   workflow_dispatch:
 
+# One run of this at a time per branch. Apple silicon runners are scarce
+# and a push here is usually one of several in a row: what matters is
+# whether the tip is green, and a queue of superseded runs answers that
+# more slowly than no queue at all.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     # Apple silicon, because MLX is Metal and there is no other kind of
     # machine this runs on.
     runs-on: macos-15
+    # A cold cargo build is minutes; the default is six hours, which is
+    # what a hang costs when nobody is watching. Long enough to build
+    # everything from nothing, short enough to be told.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
