@@ -163,8 +163,13 @@ impl Plan {
                 slice,
             });
         }
+        // A run that names no model differentiates nothing, and has said
+        // so: a graph opened to be read (a loss over representations from
+        // somewhere else) trains nothing by design. Naming models and
+        // then having no parameters among them is still the mistake it
+        // was, and is still refused here rather than at step one.
         anyhow::ensure!(
-            !candidates.is_empty(),
+            !candidates.is_empty() || config.train.is_empty(),
             "nothing to train: no model in {:?} has trainable parameters",
             config.train
         );
@@ -602,12 +607,28 @@ mod tests {
     }
 
     #[test]
-    fn a_run_with_nothing_to_train_is_refused() {
+    fn a_run_that_names_a_model_with_nothing_trainable_is_refused() {
         let (config, weights) = fixtures::teacher_and_student();
-        let frozen = config.replace(r#""train":["student"]"#, r#""train":[]"#);
-        assert_ne!(frozen, config, "the fixture's train list moved");
-        let e = refusal(&frozen, &weights);
+        let untrainable = config.replace(r#""trainable":true"#, r#""trainable":false"#);
+        assert_ne!(untrainable, config, "the fixture's parameters moved");
+        let e = refusal(&untrainable, &weights);
         assert!(e.contains("nothing to train"), "{e}");
+    }
+
+    /// The same emptiness, said on purpose. A graph opened to be read
+    /// (a loss over representations computed elsewhere) trains nothing and
+    /// has a use; what is refused is meaning to train and finding out at
+    /// step one that there was nothing to.
+    #[test]
+    fn a_run_that_names_no_model_to_train_opens() {
+        let (config, weights) = fixtures::teacher_and_student();
+        let read_only = config.replace(r#""train":["student"]"#, r#""train":[]"#);
+        assert_ne!(read_only, config, "the fixture's train list moved");
+
+        let (plan, params) = open(&read_only, &weights).unwrap();
+
+        assert!(plan.candidates.is_empty());
+        assert_eq!(params.len(), 2, "the parameters are still there to read");
     }
 
     #[test]

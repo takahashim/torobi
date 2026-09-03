@@ -52,6 +52,46 @@ class WiringTest < Minitest::Test
     assert_equal [0, 1, 2, 3], both.argnums
   end
 
+  # `train: []` is a graph opened to be read: it evaluates, and it reports
+  # gradients by its inputs, and it takes no steps. Saying so is what
+  # separates it from the mistake of declaring nothing trainable, which is
+  # still refused at open rather than at step one.
+  def test_a_session_that_trains_nothing_is_opened_by_saying_so
+    skip "extension not compiled" unless defined?(Torobi::Session)
+    graph = Torobi.graph do |g|
+      x = g.input :x, [nil, 2]
+      g.output :loss, g.mean(x.square)
+    end
+
+    Torobi::Session.open(Torobi::GraphConfig.new(models: { m: graph }, train: []),
+                         weights: { params: {} }) do |s|
+      batch = { x: Torobi::TensorData.nested([[3.0, 4.0]]) }
+
+      assert_in_delta 12.5, s.evaluate(batch), 1e-6
+      assert_empty s.trainable
+      grads = s.field_gradients(batch, of: [:x])
+      grads["x"].to_a.zip([3.0, 4.0]).each { |got, want| assert_in_delta want, got, 1e-6 }
+
+      e = assert_raises(Torobi::StepError) { s.step!(batch) }
+      assert_match(/trains nothing/, e.message)
+    end
+  end
+
+  def test_a_model_with_no_trainable_parameters_is_still_refused
+    skip "extension not compiled" unless defined?(Torobi::Session)
+    graph = Torobi.graph do |g|
+      x = g.input :x, [nil, 2]
+      g.output :loss, g.mean(x.square)
+    end
+
+    e = assert_raises(Torobi::StepError) do
+      Torobi::Session.open(Torobi::GraphConfig.new(models: { m: graph }),
+                           weights: { params: {} })
+    end
+
+    assert_match(/nothing to train/, e.message)
+  end
+
   def test_a_frozen_model_never_moves
     skip "extension not compiled" unless defined?(Torobi::Session)
     config = distillation

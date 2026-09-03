@@ -188,8 +188,25 @@ impl SessionCore {
     /// running and free of any Ruby, so the extension calls it with the GVL
     /// released.
     pub(crate) fn run_step(&mut self, batch: &Batch) -> Result<f32> {
+        self.trains()?;
         let fields = self.plan.bind(batch)?;
         self.update(&fields)
+    }
+
+    /// That there is something to differentiate at all.
+    ///
+    /// A session opened with `train: []` is for reading: it evaluates and
+    /// it differentiates by its inputs, and a step through it would be a
+    /// step over no parameters. Said here rather than left to MLX, which
+    /// would answer with something about empty argnums.
+    fn trains(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.state.pass().argnums.is_empty(),
+            "this session trains nothing (it was opened with no model to train), \
+             so there is no step to take. It can evaluate and it can report \
+             gradients by its inputs"
+        );
+        Ok(())
     }
 
     /// Adds one batch's gradients to what is waiting, without stepping.
@@ -198,6 +215,7 @@ impl SessionCore {
     /// (docs/plan.md section 15.35). The taps report this pass like any
     /// other, so the parts of a batch can be watched as they go.
     pub(crate) fn accumulate(&mut self, batch: &Batch) -> Result<f32> {
+        self.trains()?;
         let fields = self.plan.bind(batch)?;
         let (loss, grads, tapped) =
             executor::differentiate(&self.plan, self.state.pass(), &fields, &self.taps)?;

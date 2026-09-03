@@ -113,6 +113,11 @@ module Torobi
     # Which models are trained. Default: all of them, which is right for a
     # single model and wrong for nothing, since a teacher is named
     # explicitly the moment there is one.
+    # Which models a run differentiates. Omitted means all of them, which
+    # is what training is; `train: []` means none, which is a graph opened
+    # to be read rather than trained (a loss over representations computed
+    # elsewhere, say). Saying it is what separates that from the mistake
+    # of declaring nothing trainable by accident, which is still refused.
     def check_train(train, models)
       return models.keys.sort if train.nil?
 
