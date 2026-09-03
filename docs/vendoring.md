@@ -49,12 +49,19 @@ gather_mm and Float64 pattern after upstream rebase`. The Rust API is
 upstream's, which is what makes the exit below realistic.
 
 **Not the same code**: twelve commits by OminiX-era authors touch
-`mlx-rs/` and upstream does not have them. The one Torobi depends on is
-`100f155 feat: Auto-download pre-built MLX when Xcode is unavailable`,
-which is the reason this fork is here at all. Others are a contiguity
-check in `try_as_slice` / `contiguous` (the engine calls `contiguous`),
-Float64 in safetensors, a deployment-target override, IO extensions, and
-`d145d5b`, which requires MLX 0.32.0.
+`mlx-rs/` and upstream does not have them. Sorted by what they are, and
+by whether Torobi is standing on them:
+
+| | commits | reaches Torobi |
+|---|---|---|
+| build machinery | `100f155` auto-download pre-built MLX when Xcode is unavailable, `b024efa` deployment-target override | **`100f155` yes, and it is the whole reason this fork is here.** Without it `gem install` needs Xcode |
+| the library | `e53aa1b` contiguity check in `try_as_slice` / `contiguous` (a breaking change: a non-contiguous array is an error now rather than the wrong bytes), `c13ee0e` Float64 in safetensors, `284916e` IO extensions, `d145d5b` requires MLX 0.32.0 | `e53aa1b` is in a function the engine calls (`tensor.rs` copies through `contiguous()`), but the engine calls it *to make* the array contiguous, so it stands on its own rather than on the check. The other three it does not use |
+| structure | `753d289` the move into a subdirectory, `e5aed65` the version renumbering, `b6c36f3` cleanup after an upstream rebase | no |
+| fixes elsewhere | `6d11748` RoPE reshape that broke multi-head attention, `d8495fd` and `e4beb9b` async pipelining | no: the engine implements RoPE itself (`interp.rs`, host-built angles and a rotation), so `nn::Rope` is never called |
+
+So the answer to "could we build against upstream instead" is: the Rust
+side, yes, checked function by function; the build without Xcode, no.
+That is the exit below, and this is the evidence for how narrow it is.
 
 **The version numbers do not compare.** The fork renumbered to 1.0.0 in
 `e5aed65 feat: v1.0.0 - version alignment with OminiX-API` and is 1.2.0
@@ -68,6 +75,20 @@ carries upstream's `repository = "https://github.com/oxideai/mlx-rs"`, so
 `cargo tree`, docs.rs links and anything reading crate metadata lead to
 upstream rather than to what was compiled. Read `engine/Cargo.toml` and
 `Cargo.lock` for the truth; they name the fork and its commit.
+
+## Which one to point at
+
+Three different questions, three different answers, and they are not in
+conflict:
+
+| asking | look at |
+|---|---|
+| what does this API do | **upstream**, `oxiglade.github.io/mlx-rs`. The API is upstream's and OminiX publishes no documentation of its own for it |
+| what is actually compiled | **the pinned commit**, through `engine/Cargo.toml` and `Cargo.lock`, or the checkout under `~/.cargo/git/checkouts/`. Neither GitHub page will tell you |
+| what may be redistributed, and on whose terms | **OminiX-MLX's tree**, which carries upstream's dual licence and the fork's own work under it |
+
+The dependency itself stays where it is. OminiX-MLX is the only one of
+the two that installs without Xcode, and that is not a preference.
 
 ## The ledger
 
