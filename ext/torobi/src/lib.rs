@@ -99,11 +99,22 @@ struct Names {
 
 impl Names {
     /// Taken from an open session; the caller has one in hand.
+    ///
+    /// These cannot refuse: a session that has just opened is not closed,
+    /// and none of the three reaches MLX. A default would be worse than a
+    /// panic here, because an empty parameter list is a sentence about the
+    /// run rather than a missing answer.
     fn of(engine: &EngineSession) -> Self {
         Self {
-            parameters: engine.parameter_paths().unwrap_or_default(),
-            inputs: engine.input_names().unwrap_or_default(),
-            nodes: engine.node_names().unwrap_or_default(),
+            parameters: engine
+                .parameter_paths()
+                .expect("an open session answers parameter_paths"),
+            inputs: engine
+                .input_names()
+                .expect("an open session answers input_names"),
+            nodes: engine
+                .node_names()
+                .expect("an open session answers node_names"),
         }
     }
 }
@@ -127,12 +138,16 @@ struct Snapshot {
 
 impl Snapshot {
     /// Taken from an open session; the caller has one in hand.
+    ///
+    /// None of the four can refuse (they read state and reach no MLX), and
+    /// a default would be a lie a watcher could not tell from an answer:
+    /// step 0 is where a run starts.
     fn of(engine: &EngineSession) -> Self {
         Self {
-            step: engine.step().unwrap_or(0),
-            loss: engine.loss().unwrap_or(f32::NAN),
-            lr: engine.lr().unwrap_or(f32::NAN),
-            seed: engine.seed().unwrap_or(0),
+            step: engine.step().expect("an open session answers step"),
+            loss: engine.loss().expect("an open session answers loss"),
+            lr: engine.lr().expect("an open session answers lr"),
+            seed: engine.seed().expect("an open session answers seed"),
         }
     }
 }
@@ -441,10 +456,32 @@ impl Session {
 
     /// Takes the engine out of the slot, leaving `Running` behind.
     fn take(&self) -> Result<Box<EngineSession>, Refusal> {
+        self.take_leaving(Slot::Running)
+    }
+
+    /// Takes the engine out for good, leaving `Closed` behind.
+    ///
+    /// A session already closed answers `None` rather than refusing, so a
+    /// second `close` is a no-op; anything else (running, poisoned) is a
+    /// refusal like any other. Here rather than in `close` so that every
+    /// transition of `Slot` is in this one pair of methods: a variant
+    /// added later is a match this compiler checks, not a fourth place to
+    /// remember.
+    fn take_to_close(&self) -> Result<Option<Box<EngineSession>>, Refusal> {
+        match self.take_leaving(Slot::Closed) {
+            Ok(engine) => Ok(Some(engine)),
+            Err(Refusal::Closed) => Ok(None),
+            Err(refusal) => Err(refusal),
+        }
+    }
+
+    /// The engine, if the slot is ready to give it up, leaving `next`
+    /// behind. A slot that is not ready keeps what it holds and says why.
+    fn take_leaving(&self, next: Slot) -> Result<Box<EngineSession>, Refusal> {
         let Ok(mut guard) = self.slot.try_lock() else {
             return Err(Refusal::Busy);
         };
-        match std::mem::replace(&mut *guard, Slot::Running) {
+        match std::mem::replace(&mut *guard, next) {
             Slot::Ready(engine) => Ok(engine),
             other => {
                 let refusal = Refusal::of(&other);
@@ -499,9 +536,9 @@ impl Session {
         rb_self.with_engine(ruby, |engine| engine.run_step(&batch))
     }
 
-    /// The loss for one batch without taking a step: no gradients, no
-    /// randomness, nothing moved. What a validation set is read with.
-    /// One batch's gradients added to what is waiting, with no step.
+    /// One batch's gradients added to what is waiting, with no step: the
+    /// parameters do not move until `apply`. What a batch too large to
+    /// hold is trained as several of.
     fn accumulate(ruby: &Ruby, rb_self: &Self, batch: RHash) -> Result<f32, Error> {
         let batch = read_batch(ruby, batch)?;
         rb_self.with_engine(ruby, |engine| engine.accumulate(&batch))
@@ -522,6 +559,8 @@ impl Session {
         rb_self.with_engine(ruby, |engine| engine.discard())
     }
 
+    /// The loss for one batch without taking a step: no gradients, no
+    /// randomness, nothing moved. What a validation set is read with.
     fn evaluate(ruby: &Ruby, rb_self: &Self, batch: RHash) -> Result<f32, Error> {
         let batch = read_batch(ruby, batch)?;
         rb_self.with_engine(ruby, |engine| engine.evaluate(&batch))
@@ -549,19 +588,13 @@ impl Session {
     /// `ensure`, where raising would replace the exception being handled,
     /// so a refusal comes back as `false` rather than as an error.
     fn close(ruby: &Ruby, rb_self: &Self) -> Result<bool, Error> {
-        let engine = {
-            let mut guard = rb_self.slot.try_lock().map_err(|_| busy(ruby))?;
-            // A running session is not closed out from under its own step:
-            // the caller closes it at a step boundary (the spec, section 8).
-            if matches!(*guard, Slot::Running) {
-                return Err(busy(ruby));
-            }
-            match std::mem::replace(&mut *guard, Slot::Closed) {
-                Slot::Ready(engine) => Some(engine),
-                _ => None,
-            }
-        };
-        let Some(mut engine) = engine else {
+        // A running session is not closed out from under its own step: the
+        // caller closes it at a step boundary (the spec, section 8), and
+        // the slot answers "busy" for one that is.
+        let Some(mut engine) = rb_self
+            .take_to_close()
+            .map_err(|refusal| refusal.into_error(ruby))?
+        else {
             return Ok(false);
         };
         match gvl::released(move || engine.close(), OnRefusal::PressOn)? {
@@ -638,12 +671,7 @@ impl Session {
 
     /// Writes one parameter from a copy: [dtype, shape, packed].
     fn put(ruby: &Ruby, rb_self: &Self, path: String, tensor: RArray) -> Result<(), Error> {
-        let one = ruby.hash_new();
-        one.aset(path.clone(), tensor)?;
-        let mut batch = read_batch(ruby, one)?;
-        let tensor = batch
-            .remove(&path)
-            .ok_or_else(|| Error::new(ruby.exception_arg_error(), "no tensor given"))?;
+        let tensor = read_tensor(ruby, &path, tensor)?;
         rb_self.with_engine(ruby, |engine| engine.put(&path, &tensor))
     }
 
@@ -670,12 +698,7 @@ impl Session {
     /// What the last step's taps saw: [name, dtype, shape, bytes] each.
     fn tapped(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
         let seen = rb_self.with_engine(ruby, |engine| engine.tapped())?;
-        let out = ruby.ary_new_capa(seen.len());
-        for (name, tensor) in seen {
-            let (dtype, shape, bytes) = tensor_to_ruby(ruby, tensor)?;
-            out.push((name, dtype, shape, bytes))?;
-        }
-        Ok(out)
+        tensors_to_ruby(ruby, seen)
     }
 
     fn parameter_paths(ruby: &Ruby, rb_self: &Self) -> RArray {
@@ -701,23 +724,13 @@ impl Session {
     ) -> Result<RArray, Error> {
         let batch = read_batch(ruby, batch)?;
         let grads = rb_self.with_engine(ruby, |engine| engine.field_gradients(&batch, &of))?;
-        let out = ruby.ary_new_capa(grads.len());
-        for (name, tensor) in grads {
-            let (dtype, shape, bytes) = tensor_to_ruby(ruby, tensor)?;
-            out.push((name, dtype, shape, bytes))?;
-        }
-        Ok(out)
+        tensors_to_ruby(ruby, grads)
     }
 
     fn gradients(ruby: &Ruby, rb_self: &Self, batch: RHash) -> Result<RArray, Error> {
         let batch = read_batch(ruby, batch)?;
         let grads = rb_self.with_engine(ruby, |engine| engine.gradients(&batch))?;
-        let out = ruby.ary_new_capa(grads.len());
-        for (path, tensor) in grads {
-            let (dtype, shape, bytes) = tensor_to_ruby(ruby, tensor)?;
-            out.push((path, dtype, shape, bytes))?;
-        }
-        Ok(out)
+        tensors_to_ruby(ruby, grads)
     }
 }
 
@@ -728,32 +741,40 @@ impl Session {
 /// The dtype travels because a graph may declare an i32 input, which is
 /// what an embedding reads (docs/plan.md section 5A.2).
 fn read_batch(ruby: &Ruby, batch: RHash) -> Result<Batch, Error> {
-    let bad = |what: String| Error::new(ruby.exception_arg_error(), what);
     let mut read = Batch::new();
     batch.foreach(|name: String, triple: RArray| {
-        let dtype: String = triple
-            .entry::<String>(0)
-            .map_err(|e| bad(format!("input {name:?}: bad dtype ({e})")))?;
-        let shape: Vec<i32> = triple
-            .entry::<Vec<i32>>(1)
-            .map_err(|e| bad(format!("input {name:?}: bad shape ({e})")))?;
-        let data: RString = triple
-            .entry::<RString>(2)
-            .map_err(|e| bad(format!("input {name:?}: data must be a packed String ({e})")))?;
-        // Safety: the bytes are read while the GVL is held and copied
-        // before it is released. Borrowing them across that would be
-        // unsound rather than merely fast: another thread can trigger a
-        // compacting GC, and Ruby is free to move the string's buffer.
-        let bytes = unsafe { data.as_slice() };
-        let tensor = Tensor::from_bytes(&dtype, shape, bytes, &name)
-            .map_err(|e| bad(format!("{e:#}")))?;
+        let tensor = read_tensor(ruby, &name, triple)?;
         read.insert(name, tensor);
         Ok(magnus::r_hash::ForEach::Continue)
     })?;
     Ok(read)
 }
 
-/// A tensor leaves as its shape and its flat data, both plain Ruby arrays.
+/// One [dtype, shape, packed] as the engine's tensor, `name` being what to
+/// call it if it is wrong.
+///
+/// Separate from [`read_batch`] because a batch is not the only thing made
+/// of these: `put` writes one parameter, and reading it should not mean
+/// building a Ruby Hash to hand to a reader of batches.
+fn read_tensor(ruby: &Ruby, name: &str, triple: RArray) -> Result<Tensor, Error> {
+    let bad = |what: String| Error::new(ruby.exception_arg_error(), what);
+    let dtype: String = triple
+        .entry::<String>(0)
+        .map_err(|e| bad(format!("input {name:?}: bad dtype ({e})")))?;
+    let shape: Vec<i32> = triple
+        .entry::<Vec<i32>>(1)
+        .map_err(|e| bad(format!("input {name:?}: bad shape ({e})")))?;
+    let data: RString = triple
+        .entry::<RString>(2)
+        .map_err(|e| bad(format!("input {name:?}: data must be a packed String ({e})")))?;
+    // Safety: the bytes are read while the GVL is held and copied before it
+    // is released. Borrowing them across that would be unsound rather than
+    // merely fast: another thread can trigger a compacting GC, and Ruby is
+    // free to move the string's buffer.
+    let bytes = unsafe { data.as_slice() };
+    Tensor::from_bytes(&dtype, shape, bytes, name).map_err(|e| bad(format!("{e:#}")))
+}
+
 /// A tensor on its way out: dtype, shape, and the bytes.
 ///
 /// The same three the boundary carries inward, and bytes rather than
@@ -764,6 +785,20 @@ fn tensor_to_ruby(ruby: &Ruby, tensor: Tensor) -> Result<(String, RArray, RStrin
     let shape = ruby.ary_from_vec(tensor.shape.clone());
     let (dtype, bytes) = tensor.as_bytes().map_err(|e| to_error(ruby, e))?;
     Ok((dtype.to_string(), shape, ruby.str_from_slice(bytes)))
+}
+
+/// Named tensors on their way out: [name, dtype, shape, bytes] each.
+///
+/// Three things leave this way (what the taps saw, gradients by parameter,
+/// gradients by field), and they leave the same way on purpose: a caller
+/// reads all three into `Torobi::TensorData` with one piece of code.
+fn tensors_to_ruby(ruby: &Ruby, tensors: Vec<(String, Tensor)>) -> Result<RArray, Error> {
+    let out = ruby.ary_new_capa(tensors.len());
+    for (name, tensor) in tensors {
+        let (dtype, shape, bytes) = tensor_to_ruby(ruby, tensor)?;
+        out.push((name, dtype, shape, bytes))?;
+    }
+    Ok(out)
 }
 
 /// Runs one of the engine's process-global calls with the GVL released.

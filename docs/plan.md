@@ -1964,6 +1964,32 @@ GradCache は表現の幅も部分の行数も知らずに済む。graph 側は 
 
 この時点で Ruby 225 件 / Rust 117 + 35 件。
 
+### 15.38 ext/ のレビュー。傷 2 つと歪み 3 つ(2026-09-03)
+
+拡張を通しで読み直した。
+
+**今日の編集が残した傷 2 つ。** `accumulate` の doc が `evaluate` のものを取り込み、
+**「勾配を計算せず、何も動かさない」と書かれた関数が勾配を計算して状態を動かして
+いた**(本来の持ち主の `evaluate` は doc が空になっていた)。`tensor_to_ruby` の
+1 行目は PackedTensor を消す前の説明のままだった。どちらも挿入と削除の巻き添えで、
+このファイルの価値は「どの口が何を足すか」が書いてあることなので、他所より害が
+大きい。
+
+**歪み 3 つ。**
+
+| | 直し方 |
+| --- | --- |
+| `put` が 1 つのテンソルを読むために Ruby の Hash を作って `read_batch` に通していた | `read_tensor(ruby, name, triple)` を抽出。`read_batch` も `put` もこれを呼ぶ |
+| 「名前つきテンソルの列を Ruby へ」が 3 箇所 (`tapped` / `gradients` / `field_gradients`) | `tensors_to_ruby` に畳んだ。出口の形を変えるとき 1 箇所 |
+| `close` だけが `Slot` を直接操作していた (`try_lock` → `matches!` → `mem::replace` の再実装) | `take_leaving(next)` に集め、`take` と `take_to_close` がその上に乗る。**変種が増えたときコンパイラが見る場所が 1 つ** |
+
+**黙る既定値をやめた。** `Names::of` と `Snapshot::of` は `unwrap_or_default` /
+`unwrap_or(0)` を使っていた。open 直後なので失敗しえないのだが、**起こりえないものが
+静かに空配列や step 0 になる**のは、答えと区別のつかない嘘である。`expect` にした。
+
+`gvl.rs` は触っていない。unsafe が 1 ファイルに閉じ、`RB_NOGVL_INTR_FAIL` を選んだ
+理由も UBF を持たない理由も書いてあるので、読み直しても直すところが無かった。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。
