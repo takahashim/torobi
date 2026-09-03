@@ -28,19 +28,21 @@ module MlxPrebuilt
   # Where the binary comes from. One constant per thing that would change
   # if it came from somewhere else, so moving to another build is an edit
   # here and nowhere else.
-  REPO = "OminiX-ai/OminiX-MLX"
-  RELEASE = "mlx-prebuilt-v0.1.0"
-  ASSET = "#{RELEASE}-macos-arm64.tar.gz"
+  REPO = "takahashim/mlx-prebuilt"
+  RELEASE = "v0.4.1.0"
+  ASSET = "mlx-v0.30.1-mlxc-v0.4.1-macos-arm64.tar.gz"
   URL = "https://github.com/#{REPO}/releases/download/#{RELEASE}/#{ASSET}"
 
   # SHA-256 of that asset, checked against the bytes rather than taken
   # from the release page.
-  DIGEST = "8be50f294fee2ee55400ec802bfb7bcd1d1d95c74bc2c84a45d94e685c77aed5"
+  DIGEST = "ee7af2c6d511f82af67502017d55019abb4fa2252105dd7aa2f10156f933851a"
 
-  # Which MLX is inside, read from the version string in its `libmlx.a`.
-  # The release itself does not say. Recorded because a run should be able
-  # to name what it linked (docs/plan.md section 11.2).
+  # What is inside, which the archive states rather than leaving to be
+  # read out of a binary with `strings`. mlx-c v0.4.1 is the version whose
+  # headers these bindings were generated from, and MLX v0.30.1 is what
+  # that mlx-c pins: the pair as upstream tagged it.
   MLX_VERSION = "0.30.1"
+  MLX_C_VERSION = "0.4.1"
 
   # What `mlx-sys` expects to find in a prebuilt directory.
   FILES = %w[libmlx.a libmlxc.a libgguflib.a mlx.metallib].freeze
@@ -63,7 +65,7 @@ module MlxPrebuilt
 
     return into if ready?(into)
 
-    io.puts "torobi: fetching MLX (#{MLX_VERSION}) from #{URL}"
+    io.puts "torobi: fetching MLX #{MLX_VERSION} (mlx-c #{MLX_C_VERSION}) from #{URL}"
     archive = download(io:)
     verify(archive)
     unpack(archive, into)

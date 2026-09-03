@@ -2082,10 +2082,9 @@ GitHub が公表している値と一致することを確かめた
 (build.rs が第 1 分岐を取った証拠)。installed-gem smoke も 31 秒で通った。
 
 **B: `~/git/mlx-prebuilt/` に用意した** (作成と push は未実施)。`build.sh` +
-GitHub Actions + README + `NOTICE.md` (MLX と mlx-c の MIT 全文)。版は自由に
-選べるものではない: **mlx-c 0.4.1 が `FetchContent` で MLX を `v0.32.0` に固定
-している**ので、その組でなければヘッダと実体が別物になる。**今まさにそれが
-起きている** (ヘッダは v0.32.0 前提、リンクしているのは 0.30.1)。
+GitHub Actions + README + ライセンス表示。版は自由に選べるものではない:
+mlx-c が `FetchContent` で MLX を固定しているので、その組でなければ実体が
+別物になる。**どの組が正しいかはこの時点で読み違えていた** (§15.41)。
 
 B の runner には Metal toolchain が要る (§ 直前の調査)。CI で 1 度も走らせて
 いないので、README にそう書いた。

@@ -137,7 +137,7 @@ the two that installs without Xcode, and that is not a preference.
 | what | state |
 |---|---|
 | mlx-rs / mlx-sys / mlx-c | **git dependency on `https://github.com/OminiX-ai/OminiX-MLX.git`, pinned to `4988a3fcfa48b8cb5d0780a501b92c6a41401523`.** Cargo.lock records the same commit; cargo resolves the mlx-c submodule itself |
-| MLX core | **not built from source here**: mlx-sys finds no Metal compiler on this machine and downloads OminiX's pre-built binary `mlx-prebuilt-v0.1.0-macos-arm64.tar.gz`. **It is MLX 0.30.1**, from the version string in its `libmlx.a`; the release says nothing, so this is read off the bytes. Note that the pinned mlx-rs carries `d145d5b feat(qwen3-asr): batched decode, and require MLX 0.32.0` from six months after that tarball was built, and nothing checks the two against each other |
+| MLX core | **not built from source here**: there is no Metal compiler on this machine, so a pre-built archive is used instead. `ext/torobi/mlx_prebuilt.rb` names it, and it states its own contents: **MLX v0.30.1 with mlx-c v0.4.1**, which is the pair upstream tagged together |
 | mlx.metallib | 105 MB. MLX locates it through `dladdr`, i.e. **beside whichever library holds the MLX symbols**: `target/release/` for the CLI, the install directory for the extension. `ext/torobi/extconf.rb` appends a Makefile rule that installs it beside the bundle; `rake metallib` does the same for a checkout. Any distribution must ship it beside the bundle |
 
 ## Licences
@@ -235,10 +235,28 @@ machine, and a replaced release asset breaks against the digest instead of
 being linked. That digest was computed from the bytes here and agrees with
 the one GitHub publishes for the asset.
 
-What that does not fix is where the archive comes from: it is still
-OminiX's release of an MLX (0.30.1) two minor versions behind the headers
-it is linked against. Moving to a build whose inputs are stated means
-changing three constants in that file and nothing else.
+## Which mlx-c, and which MLX under it
+
+`mlx-sys` generates its bindings from mlx-c's headers, so what the archive
+has to match is mlx-c, not MLX. OminiX's copy of mlx-c differs from
+upstream's `v0.4.1` by exactly one line, and it is not a header:
+
+```diff
+-    GIT_TAG v0.30.1)
++    GIT_TAG v0.32.0)
+```
+
+That line decides which MLX the from-source path compiles; `mlx/c/ops.h`
+and the rest of the headers are identical to the tag. So the bindings are
+mlx-c v0.4.1's either way, and an archive of **mlx-c v0.4.1 with MLX
+v0.30.1** is the pairing upstream tagged and the one those headers were
+written against. OminiX's from-source path is the asymmetric one: mlx-c
+0.4.1 over an MLX two minor versions newer than it was written for.
+
+This was worth checking rather than assuming, and the assumption made
+first here was wrong: an earlier note in this ledger said the headers
+expected 0.32.0 and the binary was behind them. The headers expect mlx-c,
+and mlx-c is what they got.
 
 Two things follow.
 
