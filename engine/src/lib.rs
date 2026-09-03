@@ -7,6 +7,7 @@
 
 pub mod graph;
 pub mod interp;
+pub mod optimizer;
 pub mod session;
 
 pub use session::Session;

@@ -15,6 +15,7 @@ use serde::Deserialize;
 
 use crate::graph::{Graph, GraphConfig};
 use crate::interp;
+use crate::optimizer::{Config as OptimizerConfig, Optimizer};
 
 /// A tensor as it crosses the boundary: flat data plus its shape. The only
 /// tensor shape that travels, in either direction, and always as a copy.
@@ -102,9 +103,10 @@ pub struct Session {
     paths: Vec<String>,
     /// Positions in `params` that autodiff differentiates.
     argnums: Vec<i32>,
+    /// The update rule and its slots. Half of what a checkpoint restores.
+    optimizer: Optimizer,
     step: usize,
     last_loss: f32,
-    lr: f32,
 }
 
 impl Session {
@@ -112,6 +114,15 @@ impl Session {
     /// by qualified path ("student.head.weight"), which is also the order
     /// the engine keeps them in. Data comes later, one batch per step.
     pub fn open(graph_json: &str, weights_json: &str) -> Result<Self> {
+        Self::open_with(graph_json, weights_json, OptimizerConfig::Sgd { lr: 0.1 })
+    }
+
+    /// The same, with the update rule named.
+    pub fn open_with(
+        graph_json: &str,
+        weights_json: &str,
+        optimizer: OptimizerConfig,
+    ) -> Result<Self> {
         let config: GraphConfig = serde_json::from_str(graph_json).context("parsing the graph")?;
         anyhow::ensure!(!config.models.is_empty(), "the graph has no models");
         let weights: Weights =
@@ -152,15 +163,16 @@ impl Session {
             config.train
         );
 
+        let optimizer = Optimizer::new(optimizer, &params, &argnums)?;
         Ok(Self {
             models,
             objective: config.objective,
             params,
             paths,
             argnums,
+            optimizer,
             step: 0,
             last_loss: f32::NAN,
-            lr: 0.1,
         })
     }
 
@@ -173,12 +185,17 @@ impl Session {
     }
 
     pub fn lr(&self) -> f32 {
-        self.lr
+        self.optimizer.config().lr()
     }
 
-    /// One knob, for now. Effect begins with the next step.
+    /// A knob: effect begins with the next step.
     pub fn set_lr(&mut self, lr: f32) {
-        self.lr = lr;
+        self.optimizer.config_mut().set_lr(lr);
+    }
+
+    /// What update rule this session runs, as data.
+    pub fn optimizer_config(&self) -> &OptimizerConfig {
+        self.optimizer.config()
     }
 
     /// Qualified parameter paths, in the order the engine keeps them.
@@ -390,16 +407,11 @@ impl Session {
         Ok((loss, grads))
     }
 
-    /// SGD on the differentiated parameters. A frozen model's are left
-    /// exactly as they were.
+    /// One optimizer step on the differentiated parameters. A frozen
+    /// model's are left exactly as they were.
     fn update(&mut self, fields: &BTreeMap<String, Array>) -> Result<f32> {
         let (loss, grads) = self.differentiate(fields)?;
-        let lr = Array::from_f32(self.lr);
-        for (&i, grad) in self.argnums.iter().zip(&grads) {
-            let i = i as usize;
-            self.params[i] = self.params[i].subtract(grad.multiply(&lr)?)?;
-        }
-        eval(self.params.iter())?;
+        self.optimizer.apply(&mut self.params, &self.argnums, &grads)?;
         self.last_loss = loss.item::<f32>();
         self.step += 1;
         Ok(self.last_loss)

@@ -38,8 +38,18 @@ fn to_error(ruby: &Ruby, error: anyhow::Error) -> Error {
 }
 
 impl Session {
-    fn open(ruby: &Ruby, graph_json: String, weights_json: String) -> Result<Self, Error> {
-        EngineSession::open(&graph_json, &weights_json)
+    /// `optimizer_json` names the update rule, e.g.
+    /// {"kind":"adamw","lr":0.001}. Data, so a journal can record it.
+    fn open(
+        ruby: &Ruby,
+        graph_json: String,
+        weights_json: String,
+        optimizer_json: String,
+    ) -> Result<Self, Error> {
+        let optimizer = serde_json::from_str(&optimizer_json).map_err(|e| {
+            Error::new(ruby.exception_arg_error(), format!("bad optimizer: {e}"))
+        })?;
+        EngineSession::open_with(&graph_json, &weights_json, optimizer)
             .map(|session| Self(RefCell::new(session)))
             .map_err(|e| to_error(ruby, e))
     }
@@ -172,7 +182,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let native = torobi.define_module("Native")?;
     native.define_singleton_method("build_info", function!(build_info, 0))?;
     let class = native.define_class("Session", ruby.class_object())?;
-    class.define_singleton_method("open", function!(Session::open, 2))?;
+    class.define_singleton_method("open", function!(Session::open, 3))?;
     class.define_method("run_step", method!(Session::run_step, 1))?;
     class.define_method("run_steps", method!(Session::run_steps, 1))?;
     class.define_method("step", method!(Session::step, 0))?;

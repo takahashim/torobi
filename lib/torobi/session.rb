@@ -21,11 +21,20 @@ module Torobi
   # and Torobi::EngineUnavailable before opening if the engine cannot run
   # at all (docs/plan.md section 5A.4).
   class Session
+    # The update rule a session takes when none is named: plain SGD, which
+    # has no state to restore and is the right default for a spike.
+    DEFAULT_OPTIMIZER = { kind: :sgd, lr: 0.1 }.freeze
+
     # Opens a session over `config` (a GraphConfig) with initial `weights`,
     # shaped {params: {path => {shape:, data:}}}.
-    def self.open(config, weights)
+    #
+    # `optimizer` is data, so that a journal and a checkpoint can record
+    # exactly what ran: {kind: :adamw, lr: 1e-3, weight_decay: 0.01}.
+    def self.open(config, weights, optimizer: DEFAULT_OPTIMIZER)
       Preflight.check!
-      session = new(Native::Session.open(config.canonical_json, JSON.generate(weights)))
+      native = Native::Session.open(config.canonical_json, JSON.generate(weights),
+                                    JSON.generate(optimizer))
+      session = new(native)
       return session unless block_given?
 
       yield session
