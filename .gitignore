@@ -3,8 +3,10 @@
 *.gem
 /notes/
 
-/target/
+# Not anchored: cargo builds a target directory beside every manifest, and
+# an unanchored rule is the only one that covers the next one. engine/target
+# reached the history once, with a 100 MB metallib inside it.
+target/
 engine/spike/*.json
 lib/torobi/torobi.bundle
-/ext/torobi/target/
 lib/torobi/mlx.metallib
