@@ -3,6 +3,7 @@
 $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
 require "torobi"
 require "minitest/autorun"
+require "tmpdir"
 
 module Torobi
   # Builders for the tests: a tiny linear model (x @ w + b) and an mse

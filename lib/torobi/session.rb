@@ -17,6 +17,7 @@ module Torobi
     # Opens a session over `config` (a GraphConfig) with `bindings`, whose
     # shape is {inputs: {name => {shape:, data:}}, params: {path => ...}}.
     def self.open(config, bindings)
+      Preflight.check!
       session = new(Native::Session.open(config.canonical_json, JSON.generate(bindings)))
       return session unless block_given?
 

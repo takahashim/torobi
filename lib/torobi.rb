@@ -13,6 +13,7 @@ require_relative "torobi/dsl"
 # (the DSL and the IR) stands on its own, and its tests need no extension.
 begin
   require_relative "torobi/torobi"
+  require_relative "torobi/preflight"
   require_relative "torobi/session"
 rescue LoadError
   # Not compiled yet (rake compile); Torobi::Session is simply absent.
