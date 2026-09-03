@@ -122,12 +122,16 @@ impl Session {
         self.plan.node_names()
     }
 
-    /// What the last step's taps saw, by name.
-    pub fn tapped(&self) -> Result<Vec<(String, Tensor)>> {
+    /// What the most recent pass's taps saw, by name.
+    ///
+    /// A copy of a copy: these already live on the host, and the caller
+    /// gets its own. A `full` tap therefore costs the tensor again here,
+    /// which is the other half of why a standing tap should reduce.
+    pub fn tapped(&self) -> Vec<(String, Tensor)> {
         self.tapped
             .iter()
             .map(|(name, tensor)| {
-                Ok((
+                (
                     name.clone(),
                     Tensor {
                         dtype: tensor.dtype,
@@ -137,7 +141,7 @@ impl Session {
                             Values::I32(v) => Values::I32(v.clone()),
                         },
                     },
-                ))
+                )
             })
             .collect()
     }
@@ -173,17 +177,6 @@ impl Session {
         self.update(&fields)
     }
 
-    /// One step per batch. The batches are given up front, so the engine
-    /// never asks anyone for data mid-span.
-    pub fn run_steps(&mut self, batches: &[Batch]) -> Result<f32> {
-        anyhow::ensure!(!batches.is_empty(), "a span needs at least one batch");
-        for batch in batches {
-            let fields = self.plan.bind(batch)?;
-            self.update(&fields)?;
-        }
-        Ok(self.loss())
-    }
-
     /// The loss for `batch`, without taking a step.
     ///
     /// What a validation set is read with. No gradients, so it costs a
@@ -197,10 +190,7 @@ impl Session {
         let fields = self.plan.bind(batch)?;
         let (loss, tapped) =
             executor::evaluate(&self.plan, &self.state.params, &fields, &self.taps)?;
-        self.tapped = tapped
-            .iter()
-            .map(|(name, value)| Ok((name.clone(), to_tensor(value)?)))
-            .collect::<Result<_>>()?;
+        self.record(tapped)?;
         Ok(loss.item::<f32>())
     }
 
@@ -277,13 +267,25 @@ impl Session {
             &self.state.rng,
             &self.taps,
         )?;
-        let tapped: BTreeMap<String, Tensor> = tapped
-            .iter()
-            .map(|(name, value)| Ok((name.clone(), to_tensor(value)?)))
-            .collect::<Result<_>>()?;
+        // Brought back before the state moves, so a step either happens
+        // whole or not at all.
+        let tapped = Self::to_host(tapped)?;
         let loss = self.state.advance(&loss, &grads)?;
         self.tapped = tapped;
         Ok(loss)
+    }
+
+    /// Keeps what the taps saw, as host-side copies.
+    fn record(&mut self, tapped: executor::Tapped) -> Result<()> {
+        self.tapped = Self::to_host(tapped)?;
+        Ok(())
+    }
+
+    fn to_host(tapped: executor::Tapped) -> Result<BTreeMap<String, Tensor>> {
+        tapped
+            .iter()
+            .map(|(name, value)| Ok((name.clone(), to_tensor(value)?)))
+            .collect()
     }
 }
 
@@ -377,36 +379,16 @@ mod tests {
     }
 
     #[test]
-    fn a_span_needs_at_least_one_batch() {
-        let mut session = session(fixtures::scaled_mean());
-        let e = session.run_steps(&[]).unwrap_err().to_string();
-        assert!(e.contains("at least one batch"), "{e}");
-        assert_eq!(session.step(), 0);
-    }
-
-    #[test]
-    fn a_span_takes_one_step_per_batch() {
-        let mut session = session(fixtures::scaled_mean());
-        let batches = vec![
-            fixtures::batch_x(&[1.0, 1.0]),
-            fixtures::batch_x(&[2.0, 2.0, 3.0, 3.0]),
-        ];
-        let loss = session.run_steps(&batches).unwrap();
-        assert_eq!(session.step(), 2);
-        assert_eq!(loss, session.loss());
-    }
-
-    #[test]
     fn a_tap_reports_what_the_step_computed() {
         let mut session = session(fixtures::scaled_mean());
         assert_eq!(session.node_names(), vec!["scaled"]);
-        assert!(session.tapped().unwrap().is_empty());
+        assert!(session.tapped().is_empty());
 
         session.tap("scaled", "mean").unwrap();
         assert_eq!(session.taps(), vec!["scaled"]);
         // x * w with x = [[1, 1]] and w = [1, 2] is [[1, 2]], mean 1.5.
         session.run_step(&fixtures::batch_x(&[1.0, 1.0])).unwrap();
-        let seen = session.tapped().unwrap();
+        let seen = session.tapped();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].0, "scaled");
         close(&values(&seen[0].1), &[1.5]);
@@ -421,7 +403,7 @@ mod tests {
         let mut session = session(fixtures::scaled_mean());
         session.tap("scaled", "full").unwrap();
         session.run_step(&fixtures::batch_x(&[1.0, 1.0])).unwrap();
-        let seen = session.tapped().unwrap();
+        let seen = session.tapped();
         assert_eq!(seen[0].1.shape, vec![1, 2]);
         close(&values(&seen[0].1), &[1.0, 2.0]);
     }
@@ -626,7 +608,7 @@ mod evaluation_tests {
         session.tap("scaled", "mean").unwrap();
         session.evaluate(&fixtures::batch_x(&[1.0, 3.0])).unwrap();
 
-        let seen = session.tapped().unwrap();
+        let seen = session.tapped();
         assert_eq!(seen.len(), 1);
         close(&values(&seen[0].1), &[2.0]);
     }

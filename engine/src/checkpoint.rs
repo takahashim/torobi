@@ -254,8 +254,6 @@ pub fn read_manifest(dir: impl AsRef<Path>) -> Result<Manifest> {
 /// What a checkpoint holds, read back.
 pub struct Loaded {
     pub manifest: Manifest,
-    /// The description this state belongs to, as it was written.
-    pub graph_json: String,
     pub parameters: HashMap<String, Array>,
     /// (m, v) by parameter path. Empty when the optimizer has no slots.
     pub slots: HashMap<String, (Array, Array)>,
@@ -265,6 +263,9 @@ pub struct Loaded {
 pub fn read(dir: impl AsRef<Path>) -> Result<Loaded> {
     let dir = dir.as_ref();
     let manifest = read_manifest(dir)?;
+    // Read to be checked against the manifest, not to be handed on: what
+    // the description says is the graph's business, and a caller that
+    // wants it reads the file (Torobi::Checkpoint.graph_json).
     let graph_json = std::fs::read_to_string(dir.join(GRAPH_FILE))
         .with_context(|| format!("reading {}", dir.join(GRAPH_FILE).display()))?;
     {
@@ -320,7 +321,6 @@ pub fn read(dir: impl AsRef<Path>) -> Result<Loaded> {
         .remove("key");
     Ok(Loaded {
         manifest,
-        graph_json,
         parameters,
         slots,
         rng,

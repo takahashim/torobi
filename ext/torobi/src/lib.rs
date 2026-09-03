@@ -692,7 +692,7 @@ impl Session {
 
     /// What the last step's taps saw: [name, shape, data] each.
     fn tapped(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
-        let seen = rb_self.on_cpu(ruby, |engine| engine.tapped())?;
+        let seen = rb_self.on_cpu(ruby, |engine| Ok(engine.tapped()))?;
         let out = ruby.ary_new_capa(seen.len());
         for (name, tensor) in seen {
             let (shape, data) = tensor_to_ruby(ruby, tensor);
