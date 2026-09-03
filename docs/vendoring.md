@@ -276,10 +276,27 @@ without Xcode. That is replaceable:
 1. obtain the official `mlx-metal` wheel (pip download, unpack), and
 2. point `MLX_PREBUILT_PATH` at it.
 
-Then upstream mlx-rs from crates.io would do, at the cost of matching the
-wheel's MLX version to what that release's C API expects, which is exactly
-the work OminiX is doing for us. `patch_metal_version` matters only on the
-build-from-source path, so it does not follow us out.
+**That exit is narrower than it was written.** Upstream's `mlx-sys` has no
+prebuilt branch at all: `build_and_link_mlx_c` runs cmake on its mlx-c
+submodule every time, with `MLX_BUILD_METAL=ON` under the `metal` feature,
+and MLX refuses to configure that without the Metal toolchain. The
+`MLX_RS_METAL_PATH` it does read only chooses where the metallib it builds
+is cached; there is nowhere to hand it one.
+
+So `MLX_PREBUILT_PATH` is OminiX's, and it is the whole of what Torobi
+cannot get upstream:
+
+| | upstream mlx-rs | OminiX-MLX |
+|---|---|---|
+| with the Metal toolchain | works, building MLX itself | works |
+| without it (this machine, and most installs) | **cannot build** | works |
+
+Two things would change that. Upstream could gain the branch, and
+OminiX's `100f155` is fifty lines that show what it looks like; a patch
+sent up, with a digest check this project can now speak for, would leave
+Torobi on the published crate. Or the distribution decision could land on
+a platform gem, in which case nothing is built at install time and the
+question dissolves.
 
 When to take the exit: if OminiX stops tracking MLX, if a patch of our own
 becomes necessary (fork instead), or if the distribution decision
