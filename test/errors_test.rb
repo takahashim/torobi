@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
-require "benchmark"
 
 # The error contract of docs/plan.md section 5A.4: three classes, three
 # moments, three things that survive. This holds the implementation to it.
@@ -122,9 +121,20 @@ class ErrorsTest < Minitest::Test
 
     assert Torobi::Preflight.probe!, "MLX should start on this machine"
 
-    first = Benchmark.realtime { Torobi::Preflight.check! }
-    second = Benchmark.realtime { Torobi::Preflight.check! }
+    first = elapsed { Torobi::Preflight.check! }
+    second = elapsed { Torobi::Preflight.check! }
 
     assert_operator second, :<, first, "the probe should be asked once, not per session"
+  end
+
+  private
+
+  # How long a block took, on the clock that only goes forwards. Written
+  # out rather than taken from `benchmark`, which stopped being a default
+  # gem in Ruby 4.0: this is the whole of what was being used.
+  def elapsed
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    yield
+    Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
   end
 end

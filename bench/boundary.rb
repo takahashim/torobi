@@ -16,7 +16,15 @@
 
 $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
 require "torobi"
-require "benchmark"
+
+# How long a block took, on the clock that only goes forwards. `benchmark`
+# stopped being a default gem in Ruby 4.0, and this is all that was used
+# of it.
+def elapsed
+  started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  yield
+  Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+end
 
 DIM = 128
 STEPS = 50
@@ -52,19 +60,19 @@ puts "    rows       json       pack       step       span"
 [1, 8, 64, 512].each do |rows|
   batches = Array.new(STEPS) { batch(rows, DIM, rng) }
 
-  json = Benchmark.realtime { batches.each { |b| JSON.generate(b) } } / STEPS
-  pack = Benchmark.realtime { batches.each { |b| Torobi::Batch.pack(b) } } / STEPS
+  json = elapsed { batches.each { |b| JSON.generate(b) } } / STEPS
+  pack = elapsed { batches.each { |b| Torobi::Batch.pack(b) } } / STEPS
 
   per_step = Torobi::Session.open(config, weights(DIM)) do |s|
     s.adjust(lr: 0.01)
     s.step!(batches.first)
-    Benchmark.realtime { batches.each { |b| s.step!(b) } } / STEPS
+    elapsed { batches.each { |b| s.step!(b) } } / STEPS
   end
 
   per_span = Torobi::Session.open(config, weights(DIM)) do |s|
     s.adjust(lr: 0.01)
     s.step!(batches.first)
-    Benchmark.realtime { s.run(batches) } / STEPS
+    elapsed { s.run(batches) } / STEPS
   end
 
   puts format("%8d %9.3fms %9.3fms %9.3fms %9.3fms   pack is %.0f%% of a step",
