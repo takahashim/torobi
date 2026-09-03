@@ -456,13 +456,13 @@ memory も検証できないまま M4 の蒸留に入る構造だった。分割
 | | 内容 | 出口条件 |
 | --- | --- | --- |
 | M0 ✅ | 純 Ruby の IR と Graph DSL | 同一定義 → 同一 digest、構造検証、shape エラーの構築時報告。native 不要 |
-| **G0** | **実行契約(§5A)** | batch 経路の決定、`ModelOutputRef` / `BatchRef` / `stop_gradient` / 名前つき output / parameter 名前空間 / argnums 規則を型として実装、エラー 3 分類の実装 |
-| M1 | single-step とその境界 | (1) **異なる batch** で forward / grad / update が回る。(2) FFI 異常系: MLX の報告エラーが例外になる、Rust panic が C を貫通しない、致命は preflight で拒否されるか死ぬことをテストで固定、close / 二重 close / 部分初期化失敗。(3) GVL 解放中に別スレッドが進む。(4) **境界コストの実測**(batch サイズ × 系列長ごと。比率の主張はこの数値に置き換える)。(5) **配布 smoke**: 隔離環境へ gem install → require → 1 step |
-| M2 | stateful core | AdamW(oracle の最初の数 step と一致)、RNG state、checkpoint / resume(resume = 連続実行) |
-| M2.5 | 窓 | ノブ、フック、journal、**2 種の replay**(§8.6)、freeze の構造変更としての扱い |
-| M3a | model import | safetensors ロード、**1 ブロックの forward と gradient の parity** |
-| M3b | ModernBERT | 全体の forward / gradient parity、tiny dataset の過学習、memory 予算の実測 |
-| M4 | 蒸留実験 | 固定 dataset / metric / seed での実験が**完走し、記録が残る**こと |
+| G0 ✅ | 実行契約(§5A) | batch 経路の決定、`ModelOutputRef` / `BatchRef` / `stop_gradient` / 名前つき output / parameter 名前空間 / argnums 規則を型として実装、エラー 3 分類の実装 |
+| M1 ✅ | single-step とその境界 | (1) **異なる batch** で forward / grad / update が回る。(2) FFI 異常系: MLX の報告エラーが例外になる、Rust panic が C を貫通しない、致命は preflight で拒否されるか死ぬことをテストで固定、close / 二重 close / 部分初期化失敗。(3) GVL 解放中に別スレッドが進む。(4) **境界コストの実測**(batch サイズ × 系列長ごと。比率の主張はこの数値に置き換える)。(5) **配布 smoke**: 隔離環境へ gem install → require → 1 step |
+| M2 ✅ | stateful core | AdamW(oracle の最初の数 step と一致)、RNG state、checkpoint / resume(resume = 連続実行) |
+| M2.5 ✅ | 窓 | ノブ、フック、journal、**2 種の replay**(§8.6)、freeze の構造変更としての扱い |
+| M3a ✅ | model import | safetensors ロード、**1 ブロックの forward と gradient の parity** |
+| M3b ✅ | ModernBERT | 全体の forward / gradient parity、tiny dataset の過学習、memory 予算の実測 |
+| **M4** | **蒸留実験** | 固定 dataset / metric / seed での実験が**完走し、記録が残る**こと |
 
 **M4 の出口条件を訂正した。** v3.1 は「素の base-v2 と同等以上」としていたが、それは
 データとハイパーパラメータに依存する**研究成果**であり、フレームワークの完成条件ではない。
@@ -1516,6 +1516,31 @@ note として報告した**のは、この仕組みが意図どおり動いた�
 | memory 予算の実測 | §15.17 / §15.21 / ここ(peak 3892 MB) |
 
 この時点で Ruby 203 件 / Rust 109 + 28 件。
+
+### 15.26 配布 smoke を手作業から `rake smoke` にした(2026-09-03)
+
+§15.2 が「済」と書いた installed-gem smoke は、その時に手で 1 回通したものだった。
+M3b までに gemspec も extconf も metallib の置き場所も動いているので、**繰り返せる形**
+に直した。
+
+    rake smoke   # gem build -> 専用ディレクトリへ install -> require -> 1 step
+
+`tools/smoke.rb` が中身で、テストしているのは packaging であってライブラリではない。
+`spec.files` が `require "torobi"` の行き先を全部並べているか、拡張が `target/` に
+残っているものではなく**同梱ソースから**建つか、105MB の metallib が bundle の隣に
+入るか(MLX は `dladdr` で探すので隣以外は無い。外すとプロセスが落ちる)。
+
+**bundler は「別を指す」ではなく「環境から外す」必要がある**。RUBYOPT・RUBYLIB・
+BUNDLE_* の複数から子に届くので、1 つ残ると checkout が load path に戻る。
+`Bundler.with_unbundled_env` で外し、`tools/smoke.rb` 自身も**読み込み元が checkout
+なら中止する**。Rake の `sh` に env の Hash を先頭で渡す形は効かない(`sh` は末尾の
+Hash を自分のオプションとして取る)ことも、途中で分かった。
+
+通った(`torobi 0.0.1`、metallib 105,160,566 バイトが bundle の隣、1 step で
+10.625000 → 1.449985)。ただし**このマシンの cargo キャッシュは温かい**ので、
+これが言えるのは packaging についてであって、白紙の環境での MLX ビルド時間ではない。
+
+あわせて §9.1 の表の印を現状に合わせた(G0 から M3b まで ✅、M4 が現在地)。
 
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 

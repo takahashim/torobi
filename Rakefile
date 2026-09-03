@@ -108,6 +108,35 @@ end
 desc "regenerate every oracle artifact"
 task oracle: ["oracle:ruri", "oracle:reranker", "oracle:forward"]
 
+# M1's last exit condition (docs/plan.md section 9.1): the gem installs
+# somewhere clean and takes a step there.
+#
+# Not part of `rake default`, because it builds the extension a second
+# time from what `spec.files` ships rather than from `target/`, which is
+# the point of it and also a few minutes. It is what to run before
+# releasing, and after touching the gemspec, extconf.rb or the metallib's
+# path.
+desc "build the gem, install it into a directory of its own, and take a step there"
+task :smoke do
+  require "tmpdir"
+  Dir.mktmpdir("torobi-smoke") do |dir|
+    package = File.join(dir, "torobi.gem")
+    home = File.join(dir, "gems")
+    sh "gem build torobi.gemspec -o #{package.shellescape}"
+    # Bundler is taken out of the environment rather than pointed
+    # elsewhere. It reaches a child through several variables at once
+    # (RUBYOPT, RUBYLIB, BUNDLE_*), and any one of them left behind puts
+    # this checkout back on the load path, leaving the install untested.
+    # tools/smoke.rb refuses that outright rather than passing quietly.
+    require "bundler"
+    Bundler.with_unbundled_env do
+      ENV["GEM_HOME"] = ENV["GEM_PATH"] = home
+      sh "gem", "install", package, "--no-document"
+      sh RbConfig.ruby, "tools/smoke.rb"
+    end
+  end
+end
+
 Minitest::TestTask.create
 
 task compile: [] # defined by RbSys::ExtensionTask above
