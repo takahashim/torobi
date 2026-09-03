@@ -21,10 +21,10 @@ jobs:
       fail-fast: false
       matrix:
         # The floor the gemspec claims, and what development happens on.
-        ruby: ["3.2", "3.4"]
+        ruby: ["3.2", "3.4", "4.0"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: ruby/setup-ruby@v1
         with:
@@ -36,7 +36,7 @@ jobs:
       # prebuilt MLX (ext/torobi/mlx_prebuilt.rb); a run that needed the
       # toolchain would be testing a path installs do not take.
       - name: Cache the prebuilt MLX
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/torobi/mlx-prebuilt
           # The pin file holds the digest, so moving the pin misses the
@@ -44,7 +44,7 @@ jobs:
           key: mlx-${{ hashFiles('ext/torobi/mlx_prebuilt.json') }}
 
       - name: Cache what cargo builds
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
