@@ -61,6 +61,28 @@ namespace :oracle do
     "~/.cache/huggingface/hub/models--cl-nagoya--ruri-v3-130m/snapshots"
   )
 
+  # kohagi is the second implementation Torobi's forward is held to
+  # (docs/plan.md 9.2): candle on the CPU, the same published weights, an
+  # encoder whose output people already rely on. Its `tools/reference`
+  # emitter reads kohagi's public API and changes nothing about it.
+  KOHAGI = File.expand_path("../kohagi", __dir__)
+
+  desc "record kohagi's forward pass on ruri-v3-130m, for test/oracle"
+  task :forward do
+    dir = ENV["RURI_V3_130M"] || Dir[File.join(RURI_V3_130M, "*")].max_by { File.mtime(_1) }
+    raise "no ruri-v3-130m checkpoint (set RURI_V3_130M)" unless dir && File.directory?(dir)
+
+    manifest = File.join(ENV.fetch("KOHAGI", KOHAGI), "tools/reference/Cargo.toml")
+    raise "no kohagi at #{File.dirname(File.dirname(manifest))} (set KOHAGI)" unless File.exist?(manifest)
+
+    long = "駅前の駐輪場が不足しているため、増設を要望します。" * 30
+    sh "cargo run --release --manifest-path #{manifest.shellescape} -- " \
+       "--model-path #{File.join(dir, "model.safetensors").shellescape} " \
+       "--tokenizer-path #{File.join(dir, "tokenizer.json").shellescape} " \
+       "--out test/oracle/ruri-v3-130m.forward.json " \
+       "#{"瑠璃も玻璃も照らせば光る".shellescape} #{"犬も歩けば棒に当たる".shellescape} #{long.shellescape}"
+  end
+
   desc "record what cl-nagoya/ruri-v3-130m holds, for test/oracle"
   task :ruri do
     dir = ENV["RURI_V3_130M"] || Dir[File.join(RURI_V3_130M, "*")].max_by { File.mtime(_1) }
@@ -71,7 +93,7 @@ namespace :oracle do
 end
 
 desc "regenerate every oracle artifact"
-task oracle: ["oracle:ruri"]
+task oracle: ["oracle:ruri", "oracle:forward"]
 
 Minitest::TestTask.create
 

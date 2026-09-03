@@ -95,9 +95,8 @@ class ModernBertTest < Minitest::Test
   def batch(seq)
     vocab = config.vocab_size
     ids = Array.new(seq) { |i| ((i * 137) + 11) % vocab }
-    { input_ids: { shape: [1, seq], data: ids, dtype: :i32 },
-      # Nothing masked: every position may attend to every other.
-      mask: { shape: [1, 1, seq, seq], data: Array.new(seq * seq, 0.0) } }
+    { input_ids: { shape: [1, seq], data: ids, dtype: :i32 } }
+      .merge(Torobi::Models::ModernBERT.masks(config, seq:, lengths: [seq]))
   end
 
   # With an objective, so the run has something to differentiate.
@@ -140,6 +139,76 @@ class ModernBertTest < Minitest::Test
       assert_equal 1, s.step
       refute_equal before, s.fetch("m.layers.0.attn.Wqkv.weight")[:data].first(4),
                    "a step should have moved the weights"
+    end
+  end
+
+  # The numbers, against a second implementation of the same architecture.
+  #
+  # kohagi runs ModernBERT on candle, on the CPU, from the same published
+  # weights, and its output is what people already rely on. Comparing
+  # against it answers the question central differences cannot: whether the
+  # forward is the right function, not merely one the backward agrees with
+  # (docs/plan.md 9.2, and section 12's third layer).
+  #
+  # The artifact records the token ids as well as the vectors, so no
+  # tokenizer is needed here; `rake oracle:forward` regenerates it and
+  # fails closed when kohagi or the checkpoint is missing.
+  FORWARD = File.expand_path("oracle/ruri-v3-130m.forward.json", __dir__)
+
+  def forward_oracle = @forward_oracle ||= JSON.parse(File.read(FORWARD))
+
+  def test_the_forward_matches_kohagi_on_the_published_weights
+    dir = checkpoint
+    skip "cl-nagoya/ruri-v3-130m is not in the cache (set RURI_V3_130M)" unless dir
+
+    reference = forward_oracle
+    assert_equal "mean", reference.dig("settings", "pooling")
+    assert reference.dig("settings", "normalized")
+
+    reference.fetch("cases").each do |example|
+      ids = example.fetch("input_ids")
+      mine = embed(dir, ids, reference.fetch("dim"))
+      theirs = example.fetch("embedding")
+      cosine = mine.zip(theirs).sum { |a, b| a * b }
+
+      # Two f32 implementations this close saturate f32 arithmetic at
+      # about 1e-7 (kohagi's own parity_check.py says so); 1e-5 leaves two
+      # orders of magnitude and still catches a wrong op.
+      assert_in_delta 1.0, cosine, 1e-5,
+                      "#{example.fetch("text")[0, 16]}: #{ids.size} tokens"
+    end
+  end
+
+  # The long case is the one that matters for the sliding window: at 302
+  # tokens the local layers see less than the global ones, so a mask built
+  # wrongly shows up here and nowhere else.
+  def test_the_oracle_reaches_past_the_local_attention_window
+    lengths = forward_oracle.fetch("cases").map { |c| c.fetch("input_ids").size }
+
+    assert_operator lengths.max, :>, config.local_attention,
+                    "a case longer than the local window is what tests the local mask"
+  end
+
+  # Mean pooling over the sequence, then L2, which is what ruri-v3's
+  # 1_Pooling config asks for and what kohagi did.
+  def embed(dir, ids, dim)
+    seq = ids.size
+    encoder = graph(seq:)
+    session_config = Torobi::GraphConfig.new(
+      models: { m: encoder },
+      objective: Torobi.objective(m: encoder) { |g|
+        g.output :loss, g.mean(g.from_model(:m, :hidden))
+      }
+    )
+    Torobi::Session.open(session_config,
+                         pretrained: { m: File.join(dir, "model.safetensors") }) do |s|
+      s.tap("hidden", stat: :full)
+      s.evaluate({ input_ids: { shape: [1, seq], data: ids, dtype: :i32 } }
+                   .merge(Torobi::Models::ModernBERT.masks(config, seq:, lengths: [seq])))
+      rows = s.tapped.fetch("hidden")[:data].each_slice(dim).to_a
+      pooled = Array.new(dim) { |j| rows.sum { |row| row[j] } / rows.size }
+      length = Math.sqrt(pooled.sum { |v| v * v })
+      pooled.map { |v| v / length }
     end
   end
 

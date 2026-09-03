@@ -74,26 +74,34 @@ module Torobi
       # dimension to reshape into; the batch stays symbolic, which is the
       # one that varies between steps.
       #
-      # `mask:` names a batch field holding the additive attention mask,
-      # [batch, 1, seq, seq], zero where a position may be attended to and
-      # a large negative where it may not. Padding and the sliding window
-      # are both expressed there, by whoever owns the data: the graph says
-      # attention, not which positions this batch happens to have.
-      def graph(config, seq:, mask: "mask")
+      # Two additive attention masks arrive from the batch, each
+      # [batch, 1, seq, seq]: zero where a position may be attended to and
+      # a large negative where it may not. Global layers read `mask`, local
+      # ones read `local_mask`, which is the same padding with the sliding
+      # window added. Two rather than one because they genuinely differ
+      # (`Config#local_attention`), and building them is the caller's:
+      # the graph says attention, not which positions this batch has.
+      # `ModernBERT.masks` builds both.
+      def graph(config, seq:)
         config.check!
         Torobi.graph do |g|
           ids = g.input(:input_ids, [nil, seq], dtype: :i32)
-          attention = g.input(mask.to_sym, [nil, 1, seq, seq])
+          global = g.input(:mask, [nil, 1, seq, seq])
+          local = g.input(:local_mask, [nil, 1, seq, seq])
 
           x = g.embedding(ids, vocab: config.vocab_size, dim: config.hidden_size,
                           name: "embeddings.tok_embeddings")
           x = norm(g, x, config, name: "embeddings.norm")
 
           config.num_hidden_layers.times do |i|
-            x = g.scope("layers.#{i}") { layer(g, x, config, i, attention, seq:) }
+            mask = config.global?(i) ? global : local
+            x = g.scope("layers.#{i}") { layer(g, x, config, i, mask, seq:) }
           end
 
-          g.output :hidden, norm(g, x, config, name: "final_norm")
+          # Named as well as declared an output, so a tap can read it: an
+          # output is what the objective consumes, and a tap is how a
+          # caller sees a value without a second graph to see it with.
+          g.output :hidden, g.name("hidden", norm(g, x, config, name: "final_norm"))
         end
       end
 
@@ -141,6 +149,35 @@ module Torobi
       # what `norm_bias: false` in the published configs means.
       def norm(g, x, config, name:)
         g.layer_norm(x, name:, bias: false, eps: config.norm_eps)
+      end
+
+      # The two masks a batch must carry, as {mask:, local_mask:} ready to
+      # go in.
+      #
+      # `lengths` is how many real tokens each row has; the rest is
+      # padding, which nothing may attend to. The local mask is the same,
+      # plus the sliding window: a position sees no further than
+      # `local_attention / 2` in either direction, which is the reference's
+      # own reading of that number.
+      #
+      # A large negative rather than -Infinity: a row that can attend to
+      # nothing would otherwise softmax to NaN, and a finite floor keeps a
+      # padded row's arithmetic finite even though its output is discarded.
+      NEGATIVE = -1.0e9
+
+      def masks(config, seq:, lengths:)
+        half = config.local_attention / 2
+        rows = lengths.map do |length|
+          padding = Array.new(seq) { |j| j < length ? 0.0 : NEGATIVE }
+          global = Array.new(seq) { padding }.flatten
+          local = (0...seq).flat_map do |i|
+            (0...seq).map { |j| (i - j).abs > half ? NEGATIVE : padding[j] }
+          end
+          [global, local]
+        end
+        shape = [lengths.size, 1, seq, seq]
+        { mask: { shape:, data: rows.flat_map(&:first) },
+          local_mask: { shape:, data: rows.flat_map(&:last) } }
       end
     end
   end
