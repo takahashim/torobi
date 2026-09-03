@@ -158,8 +158,15 @@ task oracle: ["oracle:ruri", "oracle:reranker", "oracle:qwen2", "oracle:sarashin
 # One decoder's numbers, from the implementation everyone else is held to.
 # Needs the weights and a Python environment, so the dependencies are
 # named on the command line rather than installed here.
+#
+# sentencepiece and protobuf are there for the tokenizer rather than the
+# model: a checkpoint whose vocabulary is a `tokenizer.model` (sarashina2.2)
+# is converted through them, where one with a `tokenizer.json` (Qwen2) is
+# not. Torobi never tokenizes; this is only how the ids in the artifact
+# are produced.
 def reference(repo, out)
   sh "uv", "run", "--with", "transformers", "--with", "torch",
+     "--with", "sentencepiece", "--with", "protobuf",
      "python", "tools/qwen2_reference.py", "--model", repo, "--out", out
 end
 

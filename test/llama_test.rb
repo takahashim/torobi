@@ -23,9 +23,9 @@ require "json"
 #
 # **Numeric**, against the implementation everyone else is held to: the
 # hidden states and the tokens it thinks come next, from transformers on
-# the CPU in f32 (`rake oracle:qwen2_forward`). This one needs the
-# weights, so it says so and skips where they are not; the other two run
-# anywhere.
+# the CPU in f32 (`rake oracle:qwen2_forward`, `oracle:sarashina_forward`).
+# This one needs the weights, so it compares whichever of the family this
+# machine has and skips when it has none; the other two run anywhere.
 class LlamaTest < Minitest::Test
   # What this description is held to: the two published models it says
   # it is one description of.
@@ -41,13 +41,16 @@ class LlamaTest < Minitest::Test
 
   def published = Torobi::Models::Llama.from_hash(oracle.fetch("config"))
 
-  FORWARD = File.expand_path("oracle/qwen2.5-0.5b.forward.json", __dir__)
-  SNAPSHOTS = File.expand_path("~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B/snapshots")
-
-  # The weights, if this machine has them. Unlike the inventory above,
-  # numbers cannot be compared without them.
-  def checkpoint
-    dir = ENV["QWEN2_5_0_5B"] || Dir[File.join(SNAPSHOTS, "*")].max_by { |d| File.mtime(d) }
+  # The weights, if this machine has them, in the layout the Hub's cache
+  # uses. Unlike the inventories above, numbers cannot be compared
+  # without them, and they are a gigabyte each.
+  def weights_for(source)
+    # "Qwen/Qwen2.5-0.5B" is QWEN2_5_0_5B to say by hand, and
+    # models--Qwen--Qwen2.5-0.5B in the Hub's cache.
+    named = File.basename(source).upcase.gsub(/[^A-Z0-9]/, "_")
+    cached = File.expand_path("~/.cache/huggingface/hub/" \
+                              "models--#{source.gsub("/", "--")}/snapshots/*")
+    dir = ENV.fetch(named, nil) || Dir[cached].max_by { |d| File.mtime(d) }
     dir if dir && File.file?(File.join(dir.to_s, "model.safetensors"))
   end
 
@@ -58,21 +61,37 @@ class LlamaTest < Minitest::Test
   # zero, a norm on the wrong side of a residual, a head tied the wrong
   # way round. All of those differentiate perfectly and declare exactly
   # the right parameters.
+  #
+  # Whichever of the family this machine has. One is enough to hold the
+  # description to something; a machine with both holds it to both, and
+  # they exercise different halves of it (biases and a tie against
+  # neither). What a machine with neither is missing is the weights and
+  # a recorded reference: `rake oracle:qwen2_forward`, or
+  # `rake oracle:sarashina_forward`.
   def test_the_numbers_agree_with_the_reference_implementation
-    skip "no reference recorded (rake oracle:qwen2_forward)" unless File.exist?(FORWARD)
-    dir = checkpoint
-    skip "Qwen/Qwen2.5-0.5B is not in the cache (set QWEN2_5_0_5B)" unless dir
+    compared = PUBLISHED.filter_map { |source, name| against_reference(source, name) }
 
-    reference = JSON.parse(File.read(FORWARD))
+    skip("no reference and no weights for #{PUBLISHED.keys.join(", ")}") if compared.empty?
+  end
 
-    assert_equal published.hidden_size, reference.fetch("hidden_size")
-    check_weights(reference, dir)
+  def against_reference(source, name)
+    forward = File.expand_path("oracle/#{name}.forward.json", __dir__)
+    return nil unless File.exist?(forward)
 
+    dir = weights_for(source)
+    return nil unless dir
+
+    config = Torobi::Models::Llama.from_hash(inventory(name).fetch("config"))
+    reference = JSON.parse(File.read(forward))
+
+    assert_equal config.hidden_size, reference.fetch("hidden_size"), source
+    check_weights(inventory(name), reference, dir, source)
     reference.fetch("cases").each_with_index do |c, i|
-      hidden, logits = run_case(dir, c.fetch("input_ids"))
-      compare_hidden(hidden, c.fetch("hidden"), "case #{i}")
-      compare_logits(logits, c.fetch("top_logits"), "case #{i}")
+      hidden, logits = run_case(config, dir, c.fetch("input_ids"))
+      compare_hidden(hidden, c.fetch("hidden"), "#{source} case #{i}")
+      compare_logits(logits, c.fetch("top_logits"), "#{source} case #{i}")
     end
+    source
   end
 
   # That all three are about the same copy of the model.
@@ -84,30 +103,30 @@ class LlamaTest < Minitest::Test
   # this is here to name. Checked where it can be: an artifact recorded
   # before this was written carries no revision, and a directory named
   # by hand is not a commit.
-  def check_weights(reference, dir)
-    pinned = oracle.fetch("revision")
+  def check_weights(inventory, reference, dir, source)
+    pinned = inventory.fetch("revision")
     recorded = reference["revision"]
     if recorded
       assert_equal pinned, recorded,
-                   "the reference ran against another copy of the model"
+                   "#{source}: the reference ran against another copy of the model"
     end
     return unless File.basename(dir).match?(/\A[0-9a-f]{40}\z/)
 
     assert_equal pinned, File.basename(dir),
-                 "these are not the weights the inventory was taken from"
+                 "#{source}: these are not the weights the inventory was taken from"
   end
 
   # One case through Torobi: the hidden state at every position, and the
   # scores at the last one, which is the position a decoder is asked
   # about.
-  def run_case(dir, ids)
-    graph = Torobi::Models::Llama.causal_lm(published, seq: ids.size)
-    config = Torobi::GraphConfig.new(models: { m: graph }, train: [])
-    Torobi::Session.open(config, pretrained: { m: File.join(dir, "model.safetensors") }) do |s|
+  def run_case(config, dir, ids)
+    graph = Torobi::Models::Llama.causal_lm(config, seq: ids.size)
+    run = Torobi::GraphConfig.new(models: { m: graph }, train: [])
+    Torobi::Session.open(run, pretrained: { m: File.join(dir, "model.safetensors") }) do |s|
       s.tap("m.hidden", stat: :full)
-      produced = s.forward(Torobi::Models::Llama.batch(published, [ids], seq: ids.size))
-      [s.tapped.fetch("m.hidden").to_a.each_slice(published.hidden_size).to_a,
-       produced.fetch("m.logits").to_a.last(published.vocab_size)]
+      produced = s.forward(Torobi::Models::Llama.batch(config, [ids], seq: ids.size))
+      [s.tapped.fetch("m.hidden").to_a.each_slice(config.hidden_size).to_a,
+       produced.fetch("m.logits").to_a.last(config.vocab_size)]
     end
   end
 
