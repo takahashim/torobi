@@ -2791,6 +2791,45 @@ sleep 0.05 until r.progress   # 子が最初の step を書かなければ永久
 しているか、という静的な検査である。実行時のテストにしても、**既に time を読み込んだ
 プロセスでは気づけない** — それが 1 時間の CI を使った理由そのものだからである。
 
+### 15.56 検索器の fine-tune を 1 本、道具ごと(2026-09-04)
+
+「使ってみて足りないものを見つける」段。§15.45 で組み合わせが噛み合うことは小さい
+モデルで確かめたが、**実データで 1 本回す**のはこれが初めてになる。
+
+道具は 2 つ。
+
+**`tools/retrieval_pairs.py`**: データセットを ids にする。既存の作法どおり、
+tokenize はここで 1 度だけ行い、**学習ループはテキストに触らない** (§15.19)。
+kohagi の `tools/dataset` と同じ分担だが、teacher が要らないので Rust の道具を
+もう 1 つ作るのではなく uv で走る script にした。入力は 2 形 (平らな (query, text)
+の parquet = 学習用、queries/corpus/qrels = 評価用)。
+
+**prefix を入れるのが要点**である。ruri-v3 は「検索クエリ: 」「検索文書: 」を
+本文に書き込んだ状態で学習されており、pooling 設定も prefix を平均に含めると
+言っている。落とすと別のモデルになる。
+
+**`experiments/embed_retrieval.rb`**: ModernBERT の embedder (masked mean + 正規化)、
+MNRL、GradCache、nDCG@10。ノブは環境変数から取り、記録に残す。
+
+手元 (16GB M2、ruri-v3-30m) で通した:
+
+```
+step     0  nDCG@10 0.6974  peak 1.3 GiB
+step     2  nDCG@10 0.7057  peak 1.6 GiB
+```
+
+**0.6974 が ruri-v3-30m の素の値**である (NLPJournalTitleIntroRetrieval.V2、510 クエリ /
+637 文書)。動いた後の数値には意味が無い — smoke では benchmark 自体を学習させたので、
+これは「機構が動く」以上のことを言っていない。**学習集合と評価集合が重なった数値を
+報告しないこと**は script の冒頭にも書いた。
+
+残したもの: checkpoint (optimizer と RNG つき)、sentence-transformers 形式の export
+(tokenizer も `include_prompt` も引き継がれている)、journal、record.json。
+**`Session#forward` がここで効いた**: 評価は seed を要らないので、学習用 objective が
+持つ batch フィールドを渡さずに埋め込みだけ取れる (§15.47 の `bind_models`)。
+
+本番は 32GB 機で。auto-wiki-qa で学習し、NLPJournal で測る。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

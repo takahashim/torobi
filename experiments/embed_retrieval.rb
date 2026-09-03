@@ -1,0 +1,217 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Fine-tuning a retriever: the four pieces, on a real dataset, measured.
+#
+# The encoder is a published ruri-v3 (a ModernBERT), pooled over the
+# tokens each row actually has and normalized. The loss is multiple
+# negatives ranking: every other document in the batch is a negative for
+# this query, and the only supervision is which pairs were put in
+# together. The batch is larger than the machine holds, so it goes
+# through a gradient cache. And the metric is nDCG@10 on a benchmark the
+# training set does not overlap.
+#
+#   ruby experiments/embed_retrieval.rb <encoder-dir> <train.jsonl> \
+#     <eval.json> <run-dir> [steps]
+#
+# Both inputs are token ids and nothing else: `tools/retrieval_pairs.py`
+# made them, which is where the tokenizer lives (docs/plan.md 15.19).
+#
+# **Do not train on the benchmark.** The eval bundle is what the number
+# is reported against; if the pairs came from it, the number means
+# nothing. auto-wiki-qa trains, NLPJournal measures.
+#
+# What it is not is a framework. Section 7.3 says experiments stay plain
+# Ruby until dogfooding says what the shape should be, so this is a
+# script: the graphs, the loop, and the metric, written out.
+
+$LOAD_PATH.unshift File.expand_path("../lib", __dir__)
+require "torobi"
+require "json"
+
+# The knobs, from the environment so that a run can be turned without
+# editing the description of it, and recorded so that it can be said
+# afterwards what was turned.
+SEED = Integer(ENV.fetch("SEED", 20_260_904))
+# What the pairs were tokenized to. A graph is built for one length, and
+# a row longer than it is refused rather than truncated here.
+SEQ = Integer(ENV.fetch("SEQ", 192))
+# How many pairs a step learns from. The contrastive signal is the other
+# rows, so this is the number that matters most for quality, and the
+# gradient cache is what makes it affordable.
+PAIRS = Integer(ENV.fetch("PAIRS", 32))
+# How many rows are held at once. Memory is set by this; the loss is set
+# by PAIRS.
+PART = Integer(ENV.fetch("PART", 8))
+LEARNING_RATE = Float(ENV.fetch("LR", 2e-5))
+# sentence-transformers' default temperature of 0.05, as its reciprocal.
+SCALE = Float(ENV.fetch("SCALE", 20.0))
+EVALUATION_BATCH = Integer(ENV.fetch("EVALUATION_BATCH", 16))
+EVERY = Integer(ENV.fetch("EVERY", 100))
+CAP = Integer(ENV.fetch("CAP_GIB", 12)) * 1024 * 1024 * 1024
+
+def rows_of(path)
+  File.readlines(path).reject { |line| line.strip.empty? }.map { |line| JSON.parse(line) }
+end
+
+# The encoder, as a graph that answers with one vector per row.
+def embedder(config, rows: nil)
+  Torobi::Models::ModernBERT.embedder(config, seq: SEQ, pooling: :mean,
+                                      encoder_prefix: "", rows:)
+end
+
+# What a gradient cache asks of the model it back-propagates: a loss that
+# is the product of the representations with a seed the caller supplies
+# (docs/plan.md 15.37).
+def seeded(model)
+  Torobi::GraphConfig.new(
+    models: { m: model },
+    objective: Torobi.objective(m: model) do |g|
+      g.output :loss, g.sum(g.from_model(:m, :embedding) * g.from_batch(:seed, [nil, nil]))
+    end
+  )
+end
+
+# Multiple negatives ranking, over representations computed elsewhere.
+# Queries first, then the document each one matches, which is the order
+# the parts arrive in.
+def contrastive(width)
+  rows = 2 * PAIRS
+  graph = Torobi.graph do |g|
+    v = g.input :vectors, [rows, width]
+    pair = v.reshape(shape: [2, -1, width])
+    half = ->(i) { pair.slice(axis: 0, start: i, length: 1).reshape(shape: [-1, width]) }
+    q = half.call(0)
+    d = half.call(1)
+    matched = g.sum(q * d, axes: [-1]) * SCALE
+    all = g.matmul(q, d.transpose(axes: [1, 0])) * SCALE
+    g.output :loss, g.mean(g.sum(all.exp, axes: [-1]).log - matched)
+  end
+  Torobi::GraphConfig.new(models: { m: graph }, train: [])
+end
+
+# One step's rows, queries first and then their documents, cut into parts
+# small enough to hold.
+def parts_of(config, pairs)
+  rows = pairs.map { |row| row.fetch("query_ids") } +
+         pairs.map { |row| row.fetch("text_ids") }
+  rows.each_slice(PART).map do |slice|
+    Torobi::Models::ModernBERT.batch(config, slice, seq: SEQ, pooling: :mean)
+  end
+end
+
+# Every row of `ids`, as vectors, through the model as it stands.
+#
+# `forward` rather than a tap on an evaluation: what is wanted is an
+# output, and the batch it needs is what the model reads and no more, so
+# the seed the training objective wants is not in it.
+def embed(session, config, ids, width)
+  ids.each_slice(EVALUATION_BATCH).flat_map do |slice|
+    batch = Torobi::Models::ModernBERT.batch(config, slice, seq: SEQ, pooling: :mean)
+    session.forward(batch).fetch("m.embedding").to_a.each_slice(width).to_a
+  end
+end
+
+# nDCG@10 over the bundle: what the model would rank first, against what
+# the dataset says is relevant.
+#
+# The vectors are already of length one, so a dot product is a cosine and
+# ranking by it is ranking by similarity.
+def ndcg(session, config, bundle, width, at: 10)
+  documents = embed(session, config, bundle.fetch("corpus").map { |d| d.fetch("ids") }, width)
+  ids = bundle.fetch("corpus").map { |d| d.fetch("id") }
+  queries = embed(session, config, bundle.fetch("queries").map { |q| q.fetch("ids") }, width)
+
+  scores = bundle.fetch("queries").each_with_index.map do |query, i|
+    relevant = bundle.fetch("qrels").fetch(query.fetch("id"), {})
+    ranked = documents.each_with_index
+                      .max_by(at) { |vector, _| dot(queries[i], vector) }
+                      .map { |_, j| ids[j] }
+    gained = ranked.each_with_index.sum do |id, rank|
+      relevant.fetch(id, 0).to_f / Math.log2(rank + 2)
+    end
+    ideal = relevant.values.sort.reverse.first(at).each_with_index
+                    .sum { |score, rank| score.to_f / Math.log2(rank + 2) }
+    ideal.zero? ? 0.0 : gained / ideal
+  end
+  scores.sum / scores.size
+end
+
+def dot(a, b)
+  total = 0.0
+  a.each_index { |i| total += a[i] * b[i] }
+  total
+end
+
+def main
+  encoder, train_path, eval_path, dir, steps = ARGV
+  unless encoder && train_path && eval_path && dir
+    abort "usage: embed_retrieval.rb <encoder-dir> <train.jsonl> <eval.json> <run-dir> [steps]"
+  end
+
+  config = Torobi::Models::ModernBERT.from_config_file(File.join(encoder, "config.json"))
+  width = config.hidden_size
+  pairs = rows_of(train_path).shuffle(random: Random.new(SEED))
+  bundle = JSON.parse(File.read(eval_path))
+  steps = (steps || (pairs.size / PAIRS)).to_i
+  FileUtils.mkdir_p(dir)
+
+  Torobi::Memory.limit = CAP
+  # Held open for the length of the run, so the block form is not what
+  # this wants; it goes when the process does.
+  journal = File.open(File.join(dir, "journal.jsonl"), "a") # rubocop:disable Style/FileOpen
+                .tap { |io| io.sync = true }
+  record = { started_at: Time.now.utc.iso8601, encoder:, train: train_path, eval: eval_path,
+             seed: SEED, seq: SEQ, pairs: PAIRS, part: PART, lr: LEARNING_RATE,
+             scale: SCALE, steps:, measurements: [] }
+
+  Torobi::Session.open(
+    seeded(embedder(config)),
+    pretrained: { m: File.join(encoder, "model.safetensors") },
+    optimizer: { kind: :adamw, lr: LEARNING_RATE }, seed: SEED, io: journal,
+    dataset: { name: File.basename(train_path), pairs: pairs.size,
+               tokenizer: File.basename(encoder), max_seq_length: SEQ }
+  ) do |session|
+    Torobi::Session.open(contrastive(width), weights: { params: {} }) do |loss|
+      cache = Torobi::GradCache.new(session, loss:, tap: "m.embedding",
+                                    into: :vectors, seed: :seed)
+
+      measure = lambda do |step|
+        score = ndcg(session, config, bundle, width)
+        record[:measurements] << { step:, ndcg: score.round(4),
+                                   memory: Torobi::Memory.peak }
+        session.observe(ndcg: score)
+        puts format("step %5d  nDCG@10 %.4f  peak %.1f GiB",
+                    step, score, Torobi::Memory.peak / (1024.0**3))
+        score
+      end
+
+      record[:before] = measure.call(0)
+      at = 0
+      steps.times do |i|
+        batch = pairs[(at % pairs.size), PAIRS]
+        at += PAIRS
+        # The last rows of the file are fewer than a batch: start again
+        # rather than train on a short one, which would change what the
+        # loss is a mean of.
+        next if batch.nil? || batch.size < PAIRS
+
+        value = cache.step(parts_of(config, batch))
+        puts format("step %5d  loss %.4f", i + 1, value) if ((i + 1) % 10).zero?
+        next unless ((i + 1) % EVERY).zero?
+
+        measure.call(i + 1)
+        session.checkpoint!(File.join(dir, "checkpoint"))
+      end
+      record[:after] = measure.call(steps)
+    end
+
+    session.export_model!(File.join(dir, "export"), from: encoder)
+  end
+
+  record[:finished_at] = Time.now.utc.iso8601
+  File.write(File.join(dir, "record.json"), "#{JSON.pretty_generate(record)}\n")
+  puts "nDCG@10 #{record[:before]} -> #{record[:after]}, written to #{dir}"
+end
+
+main if $PROGRAM_NAME == __FILE__
