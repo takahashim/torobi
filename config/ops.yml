@@ -76,6 +76,14 @@
   inputs: 1
   shape_rule: same_as_input
   handle: true
+# The tanh approximation, which is a different function from the one
+# above and not a faster spelling of it. Gemma is trained with it
+# (`hidden_activation: gelu_pytorch_tanh`), so a graph that used the
+# exact form would be a model that runs and is not the published one.
+- name: gelu_tanh
+  inputs: 1
+  shape_rule: same_as_input
+  handle: true
 - name: relu
   inputs: 1
   shape_rule: same_as_input

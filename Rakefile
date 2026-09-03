@@ -141,6 +141,19 @@ namespace :oracle do
     reference "sbintuitions/sarashina2.2-0.5b", "test/oracle/sarashina2.2-0.5b.forward.json"
   end
 
+  # Behind a licence: the inventory sends the token `hf auth login`
+  # leaves, and the reference needs one too.
+  desc "record what google/gemma-3-270m holds, for test/oracle"
+  task :gemma3 do
+    sh RbConfig.ruby, "tools/inventory.rb", "google/gemma-3-270m",
+       "test/oracle/gemma-3-270m.json"
+  end
+
+  desc "record what transformers answers for gemma-3-270m, for test/oracle"
+  task :gemma3_forward do
+    reference "google/gemma-3-270m", "test/oracle/gemma-3-270m.forward.json"
+  end
+
   desc "record what cl-nagoya/ruri-v3-reranker-310m holds, for test/oracle"
   task :reranker do
     dir = ENV["RURI_V3_RERANKER_310M"] ||
@@ -153,7 +166,7 @@ end
 
 desc "regenerate every oracle artifact"
 task oracle: ["oracle:ruri", "oracle:reranker", "oracle:qwen2", "oracle:sarashina",
-              "oracle:forward"]
+              "oracle:gemma3", "oracle:forward"]
 
 # One decoder's numbers, from the implementation everyone else is held to.
 # Needs the weights and a Python environment, so the dependencies are

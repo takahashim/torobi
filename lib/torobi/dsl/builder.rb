@@ -259,9 +259,17 @@ module Torobi
         emit("layer_norm", inputs:, attrs: { eps: })
       end
 
-      def rms_norm(x, name:, eps: 1.0e-5)
+      # `offset:` is added to the learned weight before it scales.
+      #
+      # Gemma stores its norms as `w` and applies `(1 + w)`, so its
+      # weights sit around zero where everyone else's sit around one.
+      # The op is the same op; what differs is what is handed to it, and
+      # that is a fact about the checkpoint rather than about norms.
+      def rms_norm(x, name:, eps: 1.0e-5, offset: 0.0)
         d = concrete_last_dim!(x, "rms_norm #{scoped(name).inspect}")
-        w = param("#{name}.weight", [d], dtype: x.dtype, init: { "type" => "ones" })
+        w = param("#{name}.weight", [d], dtype: x.dtype,
+                                         init: { "type" => offset.zero? ? "ones" : "zeros" })
+        w += offset unless offset.zero?
         emit("rms_norm", inputs: [x, w], attrs: { eps: })
       end
 

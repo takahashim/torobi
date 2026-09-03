@@ -11,6 +11,7 @@ require_relative "torobi/shape"
 require_relative "torobi/dsl"
 require_relative "torobi/lora"
 require_relative "torobi/models/modern_bert"
+require_relative "torobi/models/gemma3"
 require_relative "torobi/models/llama"
 
 # The engine, and the session that drives it. Optional: the pure-Ruby half

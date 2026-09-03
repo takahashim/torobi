@@ -189,6 +189,11 @@ sarashina2.2-0.5b holds, its gradients agree with its forward, and both
 of their numbers agree with transformers to about a millionth. What it does not implement it refuses
 to build (scaled rotary embeddings, sliding window attention).
 
+`Models::Gemma3` is the other shape: four norms a layer, head-wise
+norms on q and k, `1 + w` scaling, a tanh GELU, and most layers seeing
+only a window of the recent past. It declares exactly what gemma-3-270m
+holds.
+
 What is deliberately absent is generation: no KV cache, no sampling
 loop. What Torobi does with a decoder is fine-tune it, in bf16 or behind
 a LoRA adapter, and something else serves the result. Quantized ops and

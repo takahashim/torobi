@@ -170,6 +170,11 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
             let inner = ins[0].divide(scalar(std::f32::consts::SQRT_2))?;
             half.multiply(mlx_rs::ops::erf(&inner)?.add(scalar(1.0))?)?
         }
+        // And the tanh approximation, which is a different function:
+        // 0.5x(1 + tanh(sqrt(2/pi)(x + 0.044715x^3))). Gemma is trained
+        // with it, so a graph that reached for the exact one above would
+        // be a model that runs and is not the published one.
+        Op::GeluTanh => mlx_rs::nn::gelu_approximate(&ins[0])?,
 
         Op::Dropout(p) => {
             // No key means this is not a training pass. Inverted dropout
