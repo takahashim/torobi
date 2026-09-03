@@ -1,0 +1,56 @@
+name: ci
+
+# What `rake` does on a machine that is not the author's.
+#
+# The whole of it: rubocop, the Ruby tests (which build the extension),
+# the engine's Rust tests, and the engine's closed-form check. Not
+# `rake smoke`, which builds the gem a second time and installs it, and
+# not the oracle tasks, which need published checkpoints on disk.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # Apple silicon, because MLX is Metal and there is no other kind of
+    # machine this runs on.
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor the gemspec claims, and what development happens on.
+        ruby: ["3.2", "3.4"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+
+      # No Metal toolchain is installed here on purpose. MLX's kernels
+      # cannot be compiled without it, which is why this project takes a
+      # prebuilt MLX (ext/torobi/mlx_prebuilt.rb); a run that needed the
+      # toolchain would be testing a path installs do not take.
+      - name: Cache the prebuilt MLX
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/torobi/mlx-prebuilt
+          # The pin file holds the digest, so moving the pin misses the
+          # cache rather than reusing the archive it no longer names.
+          key: mlx-${{ hashFiles('ext/torobi/mlx_prebuilt.json') }}
+
+      - name: Cache what cargo builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ matrix.ruby }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.ruby }}-
+
+      - run: bundle exec rake
