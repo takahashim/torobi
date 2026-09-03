@@ -185,8 +185,8 @@ leaves a record.
 
 `Models::Llama` is the Llama-shaped decoder, which is most of them: it
 declares exactly what Qwen2.5-0.5B holds and exactly what
-sarashina2.2-0.5b holds, its gradients agree with its forward, and its
-numbers agree with transformers. What it does not implement it refuses
+sarashina2.2-0.5b holds, its gradients agree with its forward, and both
+of their numbers agree with transformers to about a millionth. What it does not implement it refuses
 to build (scaled rotary embeddings, sliding window attention).
 
 What is deliberately absent is generation: no KV cache, no sampling
