@@ -76,15 +76,18 @@ module MlxPrebuilt
     FileUtils.rm_f(archive.to_s) if archive
   end
 
-  # Which directory of the unpacked archive holds the four, since an
-  # archive may be a bag of files or an install prefix. Looked for rather
-  # than assumed, so one of these can be replaced by the other without
-  # this having to be told.
+  # Which directory of the unpacked archive holds the four.
+  #
+  # Searched rather than named, because the shape is the archive's
+  # business: four files at the root, or an install prefix whose `lib` is
+  # cmake's (`mlx/lib`). Whoever builds the archive should be able to
+  # change that without this having to be told, so the only thing said
+  # here is what is being looked for.
   def libraries(dir)
-    found = [dir, File.join(dir, "lib")].find do |candidate|
-      FILES.all? { |name| File.size?(File.join(candidate, name)) }
-    end
-    raise Refused, "#{dir} holds no #{FILES.join(", ")}" unless found
+    found = Dir.glob(File.join(dir, "**", FILES.first))
+               .map { |path| File.dirname(path) }
+               .find { |place| FILES.all? { |name| File.size?(File.join(place, name)) } }
+    raise Refused, "#{dir} holds no directory with #{FILES.join(", ")}" unless found
 
     found
   end

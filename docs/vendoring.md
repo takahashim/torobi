@@ -325,10 +325,13 @@ carry also changes: an install tree (lib, include, `share/cmake/MLX`)
 rather than four loose files.
 
 `mlx-prebuilt` now installs a prefix rather than gathering four files, so
-one archive serves both ways in: `lib/` is a `MLX_PREBUILT_PATH`, and the
-tree is a `CMAKE_PREFIX_PATH` for `find_package(MLX)`. Torobi looks for
-the four in the root and then in `lib/`, so the archive it is pointed at
-can change shape without this having to be told.
+one archive serves both ways in: `mlx/lib` is a `MLX_PREBUILT_PATH`, and
+`mlx/` is a `CMAKE_PREFIX_PATH` for `find_package(MLX)`. It is nested
+under a name because `lib` is cmake's word for that directory and a bare
+`lib/` reads like a gem's; renaming it is not available, since the
+exported package records paths relative to the prefix. Torobi searches
+the unpacked archive for the four rather than knowing where they are, so
+the shape stays the archive's business.
 
 The exit is therefore real, and its cost is a number rather than a
 question. It falls to nothing when upstream releases against a newer
