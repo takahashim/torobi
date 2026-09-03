@@ -11,6 +11,13 @@
 //! step is computed in [`crate::executor`]; this file is the vocabulary
 //! those three are reachable through, and the one place a step's parts are
 //! put in order.
+//!
+//! It comes in two halves. [`SessionCore`] holds the MLX state and does
+//! the work; it is crate-private, so nothing outside can reach MLX past
+//! the runtime. [`Session`] is the public face, and every one of its
+//! methods that touches MLX goes through [`crate::runtime`]. Which methods
+//! those are is decided here, where MLX is owned, and never by the caller
+//! (notes/ENGINE_RUNTIME_BOUNDARY_PLAN.md section 4).
 
 use std::collections::BTreeMap;
 
@@ -20,10 +27,22 @@ use crate::executor::{self, Taps};
 use crate::interp::Stat;
 use crate::optimizer::Config as OptimizerConfig;
 use crate::plan::Plan;
+use crate::runtime::{runtime, RuntimeError};
 use crate::state::TrainState;
 use crate::tensor::{to_tensor, Batch, Tensor, Values};
 
+/// What a caller gets back: either the value, or which layer refused.
+pub type Outcome<T> = std::result::Result<T, RuntimeError>;
+
+/// A loaded run. The public face; the state is behind it.
 pub struct Session {
+    /// Taken out by `close`, and by `Drop` if `close` never came.
+    core: Option<SessionCore>,
+}
+
+/// The MLX state, and the work on it. Crate-private on purpose: reaching
+/// this without the runtime is the bug the runtime exists to prevent.
+pub(crate) struct SessionCore {
     /// What this run does, settled when it opened.
     plan: Plan,
     /// What it has accumulated since.
@@ -32,20 +51,12 @@ pub struct Session {
     /// back. Read-only; changing the set changes what a step evaluates,
     /// so it takes effect from the next one.
     taps: Taps,
-    /// The last step's tapped values, as copies.
+    /// The last pass's tapped values, as copies.
     tapped: BTreeMap<String, Tensor>,
 }
 
-impl Session {
-    /// Loads a GraphConfig and its initial parameters. Parameters are given
-    /// by qualified path ("student.head.weight"), which is also the order
-    /// the engine keeps them in. Data comes later, one batch per step.
-    pub fn open(graph_json: &str, weights_json: &str) -> Result<Self> {
-        Self::open_with(graph_json, weights_json, OptimizerConfig::Sgd { lr: 0.1 })
-    }
-
-    /// The same, with the update rule named.
-    pub fn open_with(
+impl SessionCore {
+    fn open_with(
         graph_json: &str,
         weights_json: &str,
         optimizer: OptimizerConfig,
@@ -60,42 +71,42 @@ impl Session {
         })
     }
 
-    pub fn step(&self) -> usize {
+    pub(crate) fn step(&self) -> usize {
         self.state.step()
     }
 
-    pub fn loss(&self) -> f32 {
+    pub(crate) fn loss(&self) -> f32 {
         self.state.loss()
     }
 
-    pub fn lr(&self) -> f32 {
+    pub(crate) fn lr(&self) -> f32 {
         self.state.lr()
     }
 
     /// A knob: effect begins with the next step.
-    pub fn set_lr(&mut self, lr: f32) {
+    pub(crate) fn set_lr(&mut self, lr: f32) {
         self.state.set_lr(lr);
     }
 
     /// What update rule this session runs, as data.
-    pub fn optimizer_config(&self) -> &OptimizerConfig {
+    pub(crate) fn optimizer_config(&self) -> &OptimizerConfig {
         self.state.optimizer_config()
     }
 
-    pub fn seed(&self) -> u64 {
+    pub(crate) fn seed(&self) -> u64 {
         self.state.seed()
     }
 
     /// Restarts the RNG. A knob like any other: after this the draws are a
     /// function of the new seed alone.
-    pub fn set_seed(&mut self, seed: u64) -> Result<()> {
+    pub(crate) fn set_seed(&mut self, seed: u64) -> Result<()> {
         self.state.set_seed(seed)
     }
 
     /// Watches a named node. `stat` is "full", "mean", "norm" or "extent";
     /// a reduction costs a scalar per step where "full" costs the tensor,
     /// which is why a standing tap should reduce.
-    pub fn tap(&mut self, name: &str, stat: &str) -> Result<()> {
+    pub(crate) fn tap(&mut self, name: &str, stat: &str) -> Result<()> {
         let stat = Stat::parse(stat)
             .with_context(|| format!("{stat:?} is not a statistic (full, mean, norm, extent)"))?;
         anyhow::ensure!(
@@ -108,17 +119,17 @@ impl Session {
     }
 
     /// Stops watching. Returns whether it was being watched.
-    pub fn untap(&mut self, name: &str) -> bool {
+    pub(crate) fn untap(&mut self, name: &str) -> bool {
         self.taps.remove(name).is_some()
     }
 
     /// What is being watched.
-    pub fn taps(&self) -> Vec<String> {
+    pub(crate) fn taps(&self) -> Vec<String> {
         self.taps.keys().cloned().collect()
     }
 
     /// Every name a tap could ask for.
-    pub fn node_names(&self) -> Vec<String> {
+    pub(crate) fn node_names(&self) -> Vec<String> {
         self.plan.node_names()
     }
 
@@ -127,7 +138,7 @@ impl Session {
     /// A copy of a copy: these already live on the host, and the caller
     /// gets its own. A `full` tap therefore costs the tensor again here,
     /// which is the other half of why a standing tap should reduce.
-    pub fn tapped(&self) -> Vec<(String, Tensor)> {
+    pub(crate) fn tapped(&self) -> Vec<(String, Tensor)> {
         self.tapped
             .iter()
             .map(|(name, tensor)| {
@@ -147,32 +158,32 @@ impl Session {
     }
 
     /// Which parameters are currently differentiated, by qualified path.
-    pub fn trainable(&self) -> Vec<String> {
+    pub(crate) fn trainable(&self) -> Vec<String> {
         self.plan.paths_of(&self.state.argnums)
     }
 
     /// Every parameter a model declared trainable, whether or not it is
     /// frozen right now: the set `freeze` and `unfreeze` move within.
-    pub fn trainable_candidates(&self) -> Vec<String> {
+    pub(crate) fn trainable_candidates(&self) -> Vec<String> {
         self.plan.candidate_paths()
     }
 
     /// Freezes or unfreezes parameters whose path matches `pattern`, and
     /// returns those that moved.
-    pub fn set_frozen(&mut self, pattern: &str, frozen: bool) -> Result<Vec<String>> {
+    pub(crate) fn set_frozen(&mut self, pattern: &str, frozen: bool) -> Result<Vec<String>> {
         self.state.set_frozen(&self.plan, pattern, frozen)
     }
 
     /// Writes one parameter, by qualified path, from a copy. The window's
     /// B capability (docs/plan.md section 8.3).
-    pub fn put(&mut self, path: &str, tensor: &Tensor) -> Result<()> {
+    pub(crate) fn put(&mut self, path: &str, tensor: &Tensor) -> Result<()> {
         self.state.put(&self.plan, path, tensor)
     }
 
     /// One step on `batch`: forward, backward, optimizer update. Long-
     /// running and free of any Ruby, so the extension calls it with the GVL
     /// released.
-    pub fn run_step(&mut self, batch: &Batch) -> Result<f32> {
+    pub(crate) fn run_step(&mut self, batch: &Batch) -> Result<f32> {
         let fields = self.plan.bind(batch)?;
         self.update(&fields)
     }
@@ -186,7 +197,7 @@ impl Session {
     /// the counters, not the RNG, and not the loss a watcher reads.
     ///
     /// The taps report this pass, as they report any pass.
-    pub fn evaluate(&mut self, batch: &Batch) -> Result<f32> {
+    pub(crate) fn evaluate(&mut self, batch: &Batch) -> Result<f32> {
         let fields = self.plan.bind(batch)?;
         let (loss, tapped) =
             executor::evaluate(&self.plan, &self.state.params, &fields, &self.taps)?;
@@ -194,11 +205,11 @@ impl Session {
         Ok(loss.item::<f32>())
     }
 
-    /// The loss and one gradient per differentiated parameter for `batch`,
-    /// without updating anything.
-    pub fn loss_and_grads(&self, batch: &Batch) -> Result<(mlx_rs::Array, Vec<mlx_rs::Array>)> {
+    /// Gradients as copies, by qualified parameter path. Only differentiated
+    /// parameters appear: a frozen model's have none.
+    pub(crate) fn gradients(&self, batch: &Batch) -> Result<Vec<(String, Tensor)>> {
         let fields = self.plan.bind(batch)?;
-        let (loss, grads, _) = executor::differentiate(
+        let (_, grads, _) = executor::differentiate(
             &self.plan,
             &self.state.params,
             &self.state.argnums,
@@ -206,13 +217,6 @@ impl Session {
             &self.state.rng,
             &Taps::new(),
         )?;
-        Ok((loss, grads))
-    }
-
-    /// Gradients as copies, by qualified parameter path. Only differentiated
-    /// parameters appear: a frozen model's have none.
-    pub fn gradients(&self, batch: &Batch) -> Result<Vec<(String, Tensor)>> {
-        let (_, grads) = self.loss_and_grads(batch)?;
         self.trainable()
             .into_iter()
             .zip(grads)
@@ -222,37 +226,31 @@ impl Session {
 
     /// A copy of one parameter, by qualified path. Copies, not handles:
     /// nothing that lives on the device escapes this crate.
-    pub fn fetch(&self, path: &str) -> Result<Tensor> {
+    pub(crate) fn fetch(&self, path: &str) -> Result<Tensor> {
         self.state.fetch(&self.plan, path)
     }
 
     /// Qualified parameter paths, in the order the engine keeps them.
-    pub fn parameter_paths(&self) -> Vec<String> {
+    pub(crate) fn parameter_paths(&self) -> Vec<String> {
         self.plan.paths.clone()
     }
 
     /// Every batch field the run reads, across the models and the objective.
-    pub fn input_names(&self) -> Vec<String> {
+    pub(crate) fn input_names(&self) -> Vec<String> {
         self.plan.input_names()
     }
 
     /// Writes the run's state and the description it belongs to. Atomic
     /// (docs/plan.md section 11.2). `run` is the caller's own record
     /// (epoch, batch position, sampler state), written verbatim.
-    pub fn save(&self, dir: &str, run: &str) -> Result<String> {
+    pub(crate) fn save(&self, dir: &str, run: &str) -> Result<String> {
         self.state.save(&self.plan, dir, run)
     }
 
     /// Restores state written by [`Session::save`], refusing anything that
     /// does not belong to this session. Returns the caller's record.
-    pub fn restore(&mut self, dir: &str) -> Result<String> {
+    pub(crate) fn restore(&mut self, dir: &str) -> Result<String> {
         self.state.restore(&self.plan, dir)
-    }
-
-    /// What a checkpoint says about itself, without opening it into a
-    /// session: for a caller deciding which one to resume from.
-    pub fn read_manifest(dir: &str) -> Result<String> {
-        Ok(serde_json::to_string(&crate::checkpoint::read_manifest(dir)?)?)
     }
 
     /// One step over already-bound inputs: differentiate, read the taps,
@@ -289,6 +287,232 @@ impl Session {
     }
 }
 
+/// The public face. Every method that touches MLX goes through the
+/// runtime; which ones those are is settled here rather than by whoever
+/// is calling (notes/ENGINE_RUNTIME_BOUNDARY_PLAN.md section 4.3).
+///
+/// The line is exact. A method belongs on the plain side only if it makes
+/// no `Array`, evaluates none, copies nothing off the device, frees none,
+/// and touches neither the allocator nor the stream. Everything else waits
+/// its turn.
+impl Session {
+    /// Loads a GraphConfig and its initial parameters. Parameters are given
+    /// by qualified path ("student.head.weight"), which is also the order
+    /// the engine keeps them in. Data comes later, one batch per step.
+    pub fn open(graph_json: &str, weights_json: &str) -> Outcome<Self> {
+        Self::open_with(graph_json, weights_json, OptimizerConfig::Sgd { lr: 0.1 })
+    }
+
+    /// The same, with the update rule named.
+    pub fn open_with(
+        graph_json: &str,
+        weights_json: &str,
+        optimizer: OptimizerConfig,
+    ) -> Outcome<Self> {
+        // Opening builds every parameter, an RNG key and the optimizer's
+        // slots, so it waits its turn like any other MLX work.
+        let core = runtime().execute(|| SessionCore::open_with(graph_json, weights_json, optimizer))?;
+        Ok(Self { core: Some(core) })
+    }
+
+    /// Releases the run's device memory. Idempotent, and afterwards every
+    /// method refuses rather than pretending. Returns whether this call was
+    /// the one that closed it.
+    ///
+    /// In a forked child the memory is leaked rather than freed, and the
+    /// refusal says so; the device those handles name did not come along.
+    pub fn close(&mut self) -> Outcome<bool> {
+        let Some(core) = self.core.take() else {
+            return Ok(false);
+        };
+        runtime().release(core)?;
+        Ok(true)
+    }
+
+    pub fn closed(&self) -> bool {
+        self.core.is_none()
+    }
+
+    // --- plain: no Array is made, evaluated, copied or freed ---
+
+    pub fn step(&self) -> Outcome<usize> {
+        Ok(self.core()?.step())
+    }
+
+    pub fn loss(&self) -> Outcome<f32> {
+        Ok(self.core()?.loss())
+    }
+
+    pub fn lr(&self) -> Outcome<f32> {
+        Ok(self.core()?.lr())
+    }
+
+    /// A knob: effect begins with the next step.
+    pub fn set_lr(&mut self, lr: f32) -> Outcome<()> {
+        self.core_mut()?.set_lr(lr);
+        Ok(())
+    }
+
+    /// What update rule this session runs, as data.
+    pub fn optimizer_config(&self) -> Outcome<OptimizerConfig> {
+        Ok(self.core()?.optimizer_config().clone())
+    }
+
+    pub fn seed(&self) -> Outcome<u64> {
+        Ok(self.core()?.seed())
+    }
+
+    /// Watches a named node. `stat` is "full", "mean", "norm" or "extent";
+    /// a reduction costs a scalar per step where "full" costs the tensor,
+    /// which is why a standing tap should reduce.
+    pub fn tap(&mut self, name: &str, stat: &str) -> Outcome<()> {
+        Ok(self.core_mut()?.tap(name, stat)?)
+    }
+
+    /// Stops watching. Returns whether it was being watched.
+    pub fn untap(&mut self, name: &str) -> Outcome<bool> {
+        Ok(self.core_mut()?.untap(name))
+    }
+
+    /// What is being watched.
+    pub fn taps(&self) -> Outcome<Vec<String>> {
+        Ok(self.core()?.taps())
+    }
+
+    /// Every name a tap could ask for.
+    pub fn node_names(&self) -> Outcome<Vec<String>> {
+        Ok(self.core()?.node_names())
+    }
+
+    /// What the most recent pass's taps saw. Already on the host, so this
+    /// copies rather than reads a device.
+    pub fn tapped(&self) -> Outcome<Vec<(String, Tensor)>> {
+        Ok(self.core()?.tapped())
+    }
+
+    /// Which parameters are currently differentiated, by qualified path.
+    pub fn trainable(&self) -> Outcome<Vec<String>> {
+        Ok(self.core()?.trainable())
+    }
+
+    /// Every parameter a model declared trainable, whether or not it is
+    /// frozen right now.
+    pub fn trainable_candidates(&self) -> Outcome<Vec<String>> {
+        Ok(self.core()?.trainable_candidates())
+    }
+
+    /// Qualified parameter paths, in the order the engine keeps them.
+    pub fn parameter_paths(&self) -> Outcome<Vec<String>> {
+        Ok(self.core()?.parameter_paths())
+    }
+
+    /// Every batch field the run reads.
+    pub fn input_names(&self) -> Outcome<Vec<String>> {
+        Ok(self.core()?.input_names())
+    }
+
+    // --- MLX: through the runtime ---
+
+    /// Restarts the RNG. A knob like any other, but it builds a key.
+    pub fn set_seed(&mut self, seed: u64) -> Outcome<()> {
+        let core = self.core_mut()?;
+        runtime().execute(|| core.set_seed(seed))
+    }
+
+    /// Freezes or unfreezes parameters whose path matches `pattern`, and
+    /// returns those that moved. Not a scalar knob: the optimizer's slots
+    /// follow, which means allocating and dropping them.
+    pub fn set_frozen(&mut self, pattern: &str, frozen: bool) -> Outcome<Vec<String>> {
+        let core = self.core_mut()?;
+        runtime().execute(|| core.set_frozen(pattern, frozen))
+    }
+
+    /// Writes one parameter, by qualified path, from a copy.
+    pub fn put(&mut self, path: &str, tensor: &Tensor) -> Outcome<()> {
+        let core = self.core_mut()?;
+        runtime().execute(|| core.put(path, tensor))
+    }
+
+    /// One step on `batch`: forward, backward, optimizer update.
+    pub fn run_step(&mut self, batch: &Batch) -> Outcome<f32> {
+        let core = self.core_mut()?;
+        runtime().execute(|| core.run_step(batch))
+    }
+
+    /// The loss for `batch` without taking a step: no gradients, no
+    /// randomness, nothing moved. What a validation set is read with.
+    pub fn evaluate(&mut self, batch: &Batch) -> Outcome<f32> {
+        let core = self.core_mut()?;
+        runtime().execute(|| core.evaluate(batch))
+    }
+
+    /// Gradients as copies, by qualified parameter path. Only
+    /// differentiated parameters appear.
+    pub fn gradients(&self, batch: &Batch) -> Outcome<Vec<(String, Tensor)>> {
+        let core = self.core()?;
+        runtime().execute(|| core.gradients(batch))
+    }
+
+    /// A copy of one parameter, by qualified path. Copies, not handles:
+    /// nothing that lives on the device escapes this crate.
+    pub fn fetch(&self, path: &str) -> Outcome<Tensor> {
+        let core = self.core()?;
+        runtime().execute(|| core.fetch(path))
+    }
+
+    /// Writes the run's state and the description it belongs to. Atomic.
+    /// `run` is the caller's own record, written verbatim.
+    pub fn save(&self, dir: &str, run: &str) -> Outcome<String> {
+        let core = self.core()?;
+        runtime().execute(|| core.save(dir, run))
+    }
+
+    /// Restores state written by [`Session::save`], refusing anything that
+    /// does not belong to this session. Returns the caller's record.
+    pub fn restore(&mut self, dir: &str) -> Outcome<String> {
+        let core = self.core_mut()?;
+        runtime().execute(|| core.restore(dir))
+    }
+
+    /// The RNG key, for the tests that watch it move. Test-only: a key is
+    /// state, and nothing outside has a use for it.
+    #[cfg(test)]
+    pub(crate) fn rng_for_test(&self) -> &mlx_rs::Array {
+        &self.core.as_ref().expect("open").state.rng
+    }
+
+    fn core(&self) -> Outcome<&SessionCore> {
+        self.core.as_ref().ok_or_else(closed)
+    }
+
+    fn core_mut(&mut self) -> Outcome<&mut SessionCore> {
+        self.core.as_mut().ok_or_else(closed)
+    }
+}
+
+/// The GC frees device memory as surely as `close` does, so both go the
+/// same way. A session dropped without being closed still releases under
+/// the gate, and still leaks rather than frees in a forked child.
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let Some(core) = self.core.take() {
+            let _ = runtime().release(core);
+        }
+    }
+}
+
+fn closed() -> RuntimeError {
+    RuntimeError::Engine(anyhow::anyhow!("this session is closed"))
+}
+
+/// What a checkpoint says about itself, without opening it into a session:
+/// for a caller deciding which one to resume from. Reads a directory and
+/// touches no device.
+pub fn read_manifest(dir: &str) -> Result<String> {
+    Ok(serde_json::to_string(&crate::checkpoint::read_manifest(dir)?)?)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,16 +546,16 @@ mod tests {
     fn the_gradient_is_the_one_the_arithmetic_says() {
         // loss = mean(x * w) over four values, so d(loss)/dw_j is the sum
         // of column j divided by four.
-        let session = session(fixtures::scaled_mean());
+        let mut session = session(fixtures::scaled_mean());
         let batch = fixtures::batch_x(&[1.0, 2.0, 3.0, 4.0]);
         let grads = session.gradients(&batch).unwrap();
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, "m.w");
         close(&values(&grads[0].1), &[(1.0 + 3.0) / 4.0, (2.0 + 4.0) / 4.0]);
 
-        let (loss, _) = session.loss_and_grads(&batch).unwrap();
         // w = [1, 2], so x * w is [[1, 4], [3, 8]] and the mean is 4.
-        assert!((loss.item::<f32>() - 4.0).abs() < 1e-6);
+        let loss = session.evaluate(&batch).unwrap();
+        assert!((loss - 4.0).abs() < 1e-6, "{loss}");
     }
 
     #[test]
@@ -343,10 +567,10 @@ mod tests {
             vec!["student.scale"]
         );
         assert_eq!(
-            session.parameter_paths(),
+            session.parameter_paths().unwrap(),
             vec!["student.scale", "teacher.scale"]
         );
-        assert_eq!(session.trainable(), vec!["student.scale"]);
+        assert_eq!(session.trainable().unwrap(), vec!["student.scale"]);
     }
 
     #[test]
@@ -363,14 +587,14 @@ mod tests {
     #[test]
     fn training_moves_the_loss_toward_the_teacher() {
         let mut session = session(fixtures::teacher_and_student());
-        session.set_lr(0.05);
+        session.set_lr(0.05).unwrap();
         let batch = fixtures::batch_x(&[1.0, 1.0, 2.0, 2.0]);
         let first = session.run_step(&batch).unwrap();
         for _ in 0..50 {
             session.run_step(&batch).unwrap();
         }
-        assert_eq!(session.step(), 51);
-        assert!(session.loss() < first * 0.1, "{} -> {}", first, session.loss());
+        assert_eq!(session.step().unwrap(), 51);
+        assert!(session.loss().unwrap() < first * 0.1, "{} -> {}", first, session.loss().unwrap());
         // It converged on the teacher's scale, which is what the objective
         // asks for. Fifty steps of plain SGD get three digits, not six.
         within(&values(&session.fetch("student.scale").unwrap()), &[3.0, 4.0], 1e-2);
@@ -381,21 +605,21 @@ mod tests {
     #[test]
     fn a_tap_reports_what_the_step_computed() {
         let mut session = session(fixtures::scaled_mean());
-        assert_eq!(session.node_names(), vec!["scaled"]);
-        assert!(session.tapped().is_empty());
+        assert_eq!(session.node_names().unwrap(), vec!["scaled"]);
+        assert!(session.tapped().unwrap().is_empty());
 
         session.tap("scaled", "mean").unwrap();
-        assert_eq!(session.taps(), vec!["scaled"]);
+        assert_eq!(session.taps().unwrap(), vec!["scaled"]);
         // x * w with x = [[1, 1]] and w = [1, 2] is [[1, 2]], mean 1.5.
         session.run_step(&fixtures::batch_x(&[1.0, 1.0])).unwrap();
-        let seen = session.tapped();
+        let seen = session.tapped().unwrap();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].0, "scaled");
         close(&values(&seen[0].1), &[1.5]);
 
-        assert!(session.untap("scaled"));
-        assert!(!session.untap("scaled"));
-        assert!(session.taps().is_empty());
+        assert!(session.untap("scaled").unwrap());
+        assert!(!session.untap("scaled").unwrap());
+        assert!(session.taps().unwrap().is_empty());
     }
 
     #[test]
@@ -403,7 +627,7 @@ mod tests {
         let mut session = session(fixtures::scaled_mean());
         session.tap("scaled", "full").unwrap();
         session.run_step(&fixtures::batch_x(&[1.0, 1.0])).unwrap();
-        let seen = session.tapped();
+        let seen = session.tapped().unwrap();
         assert_eq!(seen[0].1.shape, vec![1, 2]);
         close(&values(&seen[0].1), &[1.0, 2.0]);
     }
@@ -415,7 +639,7 @@ mod tests {
         assert!(e.contains("no value is named"), "{e}");
         let e = session.tap("scaled", "median").unwrap_err().to_string();
         assert!(e.contains("is not a statistic"), "{e}");
-        assert!(session.taps().is_empty());
+        assert!(session.taps().unwrap().is_empty());
     }
 
     #[test]
@@ -428,7 +652,7 @@ mod tests {
             quiet.run_step(&batch).unwrap();
             watched.run_step(&batch).unwrap();
         }
-        assert_eq!(quiet.loss(), watched.loss());
+        assert_eq!(quiet.loss().unwrap(), watched.loss().unwrap());
         close(
             &values(&watched.fetch("m.w").unwrap()),
             &values(&quiet.fetch("m.w").unwrap()),
@@ -438,11 +662,11 @@ mod tests {
     #[test]
     fn the_session_reports_what_it_reads_and_what_it_holds() {
         let session = session(fixtures::teacher_and_student());
-        assert_eq!(session.input_names(), vec!["x"]);
-        assert_eq!(session.trainable_candidates(), vec!["student.scale"]);
-        assert_eq!(session.optimizer_config().name(), "sgd");
-        assert_eq!(session.seed(), 0);
-        assert!(session.loss().is_nan());
+        assert_eq!(session.input_names().unwrap(), vec!["x"]);
+        assert_eq!(session.trainable_candidates().unwrap(), vec!["student.scale"]);
+        assert_eq!(session.optimizer_config().unwrap().name(), "sgd");
+        assert_eq!(session.seed().unwrap(), 0);
+        assert!(session.loss().unwrap().is_nan());
     }
 
     #[test]
@@ -452,19 +676,19 @@ mod tests {
         let both = config.replace(r#""train":["student"]"#, r#""train":["student","teacher"]"#);
         let mut session = Session::open(&both, &weights).unwrap();
         assert_eq!(
-            session.trainable(),
+            session.trainable().unwrap(),
             vec!["student.scale", "teacher.scale"]
         );
         let moved = session.set_frozen("teacher.*", true).unwrap();
         assert_eq!(moved, vec!["teacher.scale"]);
-        assert_eq!(session.trainable(), vec!["student.scale"]);
+        assert_eq!(session.trainable().unwrap(), vec!["student.scale"]);
 
         let grads = session.gradients(&fixtures::batch_x(&[1.0, 1.0])).unwrap();
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, "student.scale");
 
         assert_eq!(session.set_frozen("teacher.*", false).unwrap(), vec!["teacher.scale"]);
-        assert_eq!(session.trainable(), vec!["student.scale", "teacher.scale"]);
+        assert_eq!(session.trainable().unwrap(), vec!["student.scale", "teacher.scale"]);
     }
 
     #[test]
@@ -481,7 +705,7 @@ mod tests {
 
         let mut fresh = self::session(fixtures::scaled_mean());
         fresh.restore(&path).unwrap();
-        assert_eq!(fresh.step(), 1);
+        assert_eq!(fresh.step().unwrap(), 1);
         close(&values(&fresh.fetch("m.w").unwrap()), &want);
     }
 }
@@ -502,11 +726,11 @@ mod evaluation_tests {
         assert!(!loss.is_finite(), "the fixture should divide by zero");
 
         // Reported, so a policy sees it. Not applied, so nothing is lost.
-        assert!(session.loss().is_nan() || session.loss().is_infinite());
+        assert!(session.loss().unwrap().is_nan() || session.loss().unwrap().is_infinite());
         close(&values(&session.fetch("m.w").unwrap()), &[0.0, 0.0]);
         // The counter still moves: a step was attempted and its batch
         // consumed, and a hook that fires every N steps must keep firing.
-        assert_eq!(session.step(), 1);
+        assert_eq!(session.step().unwrap(), 1);
     }
 
     #[test]
@@ -530,7 +754,7 @@ mod evaluation_tests {
             .unwrap();
         let loss = session.run_step(&batch).unwrap();
         assert!(loss.is_finite(), "{loss}");
-        assert_eq!(session.step(), 2);
+        assert_eq!(session.step().unwrap(), 2);
     }
 
     #[test]
@@ -539,9 +763,9 @@ mod evaluation_tests {
         // count exactly as it would have. A resumed run has to agree.
         let (config, weights) = fixtures::divides_by_zero();
         let mut session = Session::open(&config, &weights).unwrap();
-        let before = crate::tensor::to_tensor(&session.state.rng).unwrap();
+        let before = crate::tensor::to_tensor(&session.rng_for_test()).unwrap();
         session.run_step(&fixtures::batch_x(&[1.0, 2.0])).unwrap();
-        let after = crate::tensor::to_tensor(&session.state.rng).unwrap();
+        let after = crate::tensor::to_tensor(&session.rng_for_test()).unwrap();
 
         assert_ne!(values(&before), values(&after));
     }
@@ -552,17 +776,17 @@ mod evaluation_tests {
         let mut session = Session::open(&config, &weights).unwrap();
         let batch = fixtures::batch_x(&[1.0, 2.0, 3.0, 4.0]);
         session.run_step(&batch).unwrap();
-        let (step, loss) = (session.step(), session.loss());
+        let (step, loss) = (session.step().unwrap(), session.loss().unwrap());
         let w = values(&session.fetch("m.w").unwrap());
-        let rng = values(&crate::tensor::to_tensor(&session.state.rng).unwrap());
+        let rng = values(&crate::tensor::to_tensor(&session.rng_for_test()).unwrap());
 
         let seen = session.evaluate(&batch).unwrap();
         assert!(seen.is_finite());
-        assert_eq!(session.step(), step);
-        assert_eq!(session.loss(), loss, "the training loss is not an evaluation");
+        assert_eq!(session.step().unwrap(), step);
+        assert_eq!(session.loss().unwrap(), loss, "the training loss is not an evaluation");
         close(&values(&session.fetch("m.w").unwrap()), &w);
         assert_eq!(
-            values(&crate::tensor::to_tensor(&session.state.rng).unwrap()),
+            values(&crate::tensor::to_tensor(&session.rng_for_test()).unwrap()),
             rng
         );
     }
@@ -608,7 +832,7 @@ mod evaluation_tests {
         session.tap("scaled", "mean").unwrap();
         session.evaluate(&fixtures::batch_x(&[1.0, 3.0])).unwrap();
 
-        let seen = session.tapped();
+        let seen = session.tapped().unwrap();
         assert_eq!(seen.len(), 1);
         close(&values(&seen[0].1), &[2.0]);
     }
@@ -631,7 +855,7 @@ mod checkpoint_tests {
     }
 
     fn manifest(path: &str) -> serde_json::Value {
-        serde_json::from_str(&Session::read_manifest(path).unwrap()).unwrap()
+        serde_json::from_str(&read_manifest(path).unwrap()).unwrap()
     }
 
     #[test]
@@ -722,7 +946,7 @@ mod checkpoint_tests {
         assert_eq!(back["epoch"], 3);
         assert_eq!(back["batch"], 1200);
         assert_eq!(back["sampler"]["seed"], 9);
-        assert_eq!(fresh.step(), 1);
+        assert_eq!(fresh.step().unwrap(), 1);
     }
 
     #[test]
@@ -752,7 +976,7 @@ mod checkpoint_tests {
             serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         m["schema_version"] = serde_json::json!(1);
         std::fs::write(&file, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
-        let e = Session::read_manifest(&path).unwrap_err().to_string();
+        let e = read_manifest(&path).unwrap_err().to_string();
         assert!(e.contains("schema 1 is not 2"), "{e}");
     }
 

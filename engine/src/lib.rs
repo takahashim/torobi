@@ -14,10 +14,12 @@ pub mod interp;
 pub mod memory;
 pub mod optimizer;
 pub mod plan;
+pub mod runtime;
 pub mod session;
 pub mod state;
 pub mod tensor;
 
+pub use runtime::{initialize, RuntimeError};
 pub use session::Session;
 
 /// What this engine was built from. The vendoring ledger (docs/vendoring.md)

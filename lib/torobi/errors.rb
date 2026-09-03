@@ -13,6 +13,8 @@ module Torobi
   #     Busy             the session is serving another thread. Nothing is
   #                      wrong with it; the call may be retried.
   #   SessionPoisoned    the engine panicked. The session is not usable.
+  #   RuntimePoisoned    the engine panicked while it held MLX. No session
+  #                      in this process is usable.
   #   SessionClosed      the session was closed.
   #   EngineUnavailable  the engine cannot run here at all. Raised before
   #                      MLX is touched, because some of these failures
@@ -56,6 +58,13 @@ module Torobi
 
   # An operation on a session that has been closed.
   class SessionClosed < Error; end
+
+  # The engine panicked while it held MLX. MLX is process-global, so what
+  # that left behind is not knowable and nothing more is attempted in this
+  # process: every session refuses, not only the one that panicked. Start a
+  # new process, from a checkpoint if there is one
+  # (notes/ENGINE_RUNTIME_BOUNDARY_PLAN.md section 5.2).
+  class RuntimePoisoned < Error; end
 
   # The engine cannot run here: the extension is missing, or something it
   # needs at runtime is not in place.

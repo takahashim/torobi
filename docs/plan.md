@@ -905,3 +905,46 @@ percent」しか効かない最適化のためにその穴を残す理由がな�
 要らないので deadlock しない。
 
 この時点で Ruby 168 件 / Rust 81 件。
+
+### 15.11 MLX の制約を、MLX を所有する crate へ(2026-09-03)
+
+engine のレビューと `notes/ENGINE_RUNTIME_BOUNDARY_PLAN.md` の提案を合わせて実施した。
+提案の要は 1 行である: **MLX を安全に扱う判断を、MLX を実際に所有する crate に 1 回だけ
+書く**。
+
+§15.10 でゲートの迂回を 3 つ塞いだが、あれは症状だった。原因は、制約の発生源 (engine が
+MLX を持つ) と強制する場所 (extension) が分かれていたことで、その形のままでは API を
+増やすたびに同じ漏れが起こる。実際 engine の CLI と engine 自身のテストは、どのゲートも
+通っていなかった。
+
+| 移したもの | どこへ |
+| --- | --- |
+| process-global gate | `engine/src/runtime.rs` の `Runtime`。生成口は非公開で、`OnceLock` 1 つだけ |
+| PID guard | 同上。`torobi_engine::initialize()` を拡張ロード時に 1 回。Session ごとの PID は廃止 |
+| MLX を呼ぶかの分類 | engine の `Session` facade。`SessionCore` は `pub(crate)` で、Runtime を通らずに MLX へ届く公開経路が無い |
+| device memory の解放 | `Runtime::release`。明示的 close と `Drop` が同じ経路を通り、fork 子では `forget` する |
+| allocator 操作 | `torobi_engine::memory::Memory`。裸の関数は `pub(crate)` |
+
+extension に残したのは Ruby runtime の制約だけである: 値の変換、GVL の解放、非同期
+割り込みを `Error` にすること、同一 Session の 2 本目に `Busy` を返すこと、snapshot。
+`on_cpu` と `static MLX` と native の `Drop` は消えた。unsafe な Ruby C API は
+`gvl.rs` だけになった。
+
+**一番はっきりした成果は engine のテストである。** 公開 `Session` を経由する 28 件が
+既定並列で通るようになった(`rake rust_test:facade`)。移す前は同じコマンドが SIGSEGV
+していた。残り 51 件は plan / state / optimizer / tensor の単体テストで、facade を
+通らないので今も直列である。**通らないのが正しい**: gate は facade の仕事であって、
+テストハーネスのために各層へ降ろすものではない。
+
+実装中に決めたこと 3 つ。
+
+- **panic は Runtime 全体を poison する。** 1 回の panic でそのプロセスの MLX 作業が
+  全部止まる。MLX は process-global で、gate 保持中の panic が stream をどう残したか
+  分からないためである。`Torobi::RuntimePoisoned` を型として足した。代償は
+  「その後 checkpoint も書けない」ことで、答えは §15.8 の専用プロセスである。
+- **`catch_unwind` は gate の外に置く。** 中で捕まえると Mutex の poison が発火せず、
+  上のルールが空文になる。engine は gate 内で panic を捕まえない。
+- **`Session::loss_and_grads` を削除した。** raw な `Array` を crate 外へ渡していた。
+  facade を作る作業は、公開 API から MLX handle が漏れていないかの点検も兼ねた。
+
+この時点で Ruby 168 件 / Rust 79 件。

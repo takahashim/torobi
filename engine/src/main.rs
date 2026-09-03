@@ -68,8 +68,8 @@ fn open(graph_path: &str, bindings_path: &str) -> Result<(Session, Batch)> {
 }
 
 fn grad(graph_path: &str, bindings_path: &str) -> Result<()> {
-    let (session, batch) = open(graph_path, bindings_path)?;
-    let (loss, _) = session.loss_and_grads(&batch)?;
+    let (mut session, batch) = open(graph_path, bindings_path)?;
+    let loss = session.evaluate(&batch)?;
     let grads = session
         .gradients(&batch)?
         .into_iter()
@@ -81,22 +81,19 @@ fn grad(graph_path: &str, bindings_path: &str) -> Result<()> {
             (path, serde_json::json!({ "shape": t.shape, "data": data }))
         })
         .collect::<serde_json::Map<_, _>>();
-    println!(
-        "{}",
-        serde_json::json!({ "loss": loss.item::<f32>(), "grads": grads })
-    );
+    println!("{}", serde_json::json!({ "loss": loss, "grads": grads }));
     Ok(())
 }
 
 fn train(graph_path: &str, bindings_path: &str, steps: usize, lr: f32) -> Result<()> {
     let (mut session, batch) = open(graph_path, bindings_path)?;
-    session.set_lr(lr);
-    while session.step() < steps {
+    session.set_lr(lr)?;
+    while session.step()? < steps {
         let loss = session.run_step(&batch)?;
-        if session.step() % 10 == 0 {
-            println!("{}", serde_json::json!({ "step": session.step(), "loss": loss }));
+        if session.step()? % 10 == 0 {
+            println!("{}", serde_json::json!({ "step": session.step()?, "loss": loss }));
         }
     }
-    println!("{}", serde_json::json!({ "final_loss": session.loss() }));
+    println!("{}", serde_json::json!({ "final_loss": session.loss()? }));
     Ok(())
 }

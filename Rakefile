@@ -26,19 +26,33 @@ task :metallib do
   puts "copied #{source} -> #{destination}"
 end
 
-# The engine's own tests, which reach MLX directly rather than through the
-# extension. Serial, and not by preference: MLX's default stream is one
-# command queue, and two threads submitting to it at once trips a Metal
-# assertion ("Completed handler provided after commit call") that aborts
-# the process. The extension holds a mutex for the same reason; a cargo
-# test binary has nothing holding one, so the harness is told not to.
+# The engine's own tests. Serial, and not by preference: MLX's default
+# stream is one command queue, and two threads submitting to it at once
+# trips a Metal assertion that aborts the process.
+#
+# The engine's runtime serializes everything that reaches MLX *through a
+# Session*, but most of these tests are of the layers below that (plan,
+# state, optimizer, tensor) and build arrays by hand. Pushing the gate down
+# into every layer to satisfy a test harness would be the wrong shape: the
+# gate belongs at the facade. So the harness is told to go one at a time,
+# and `rust_test:facade` below is what shows the facade actually works.
 desc "run the engine's Rust tests"
 task :rust_test do
   sh "cargo test -p torobi-engine -- --test-threads=1"
+end
+
+namespace :rust_test do
+  # The proof that the runtime is where the constraint is. Every test that
+  # goes through the public Session runs at the harness's default
+  # parallelism; before the runtime moved into the engine, this crashed.
+  desc "run the engine's facade tests in parallel, which is the point of the runtime"
+  task :facade do
+    sh "cargo test -p torobi-engine --lib session::"
+  end
 end
 
 Minitest::TestTask.create
 
 task compile: [] # defined by RbSys::ExtensionTask above
 task test: %i[compile metallib]
-task default: %i[test rust_test]
+task default: %i[test rust_test rust_test:facade]
