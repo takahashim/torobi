@@ -2,6 +2,9 @@
 
 require "json"
 require "digest"
+# For Time#iso8601, which is not on Time until somebody asks: a run
+# started by `Torobi::Runner` is a process where nothing else has.
+require "time"
 
 module Torobi
   # What a run recorded, so that it can be replayed.

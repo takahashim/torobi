@@ -1,5 +1,10 @@
 # frozen_string_literal: true
 
+# For Time#iso8601 in the note a child writes on its way out. The child
+# has loaded this library and nothing else, which is the whole point of
+# running it in a process of its own.
+require "time"
+
 require "json"
 
 module Torobi

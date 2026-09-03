@@ -156,4 +156,25 @@ class JournalTest < Minitest::Test
 
     assert_equal journal.to_a, Torobi::Journal.read(journal.to_jsonl)
   end
+
+  # A file asks for what it uses.
+  #
+  # Nothing in a run's own process can be relied on to have loaded
+  # `time`: a child started by `Torobi::Runner` has this library and the
+  # standard library it named, and none of the parent's rake, bundler or
+  # minitest. `Time#iso8601` is not on Time until somebody requires it.
+  #
+  # Checked by reading rather than by running, because a process that has
+  # already loaded `time` cannot notice: this cost an hour of CI on Ruby
+  # 3.2, where the parent's environment happened not to have loaded it
+  # either, and it passed everywhere else.
+  def test_every_file_that_formats_a_time_asks_for_time
+    lib = File.expand_path("../lib", __dir__)
+    forgot = Dir[File.join(lib, "**", "*.rb")].select do |path|
+      source = File.read(path)
+      source.include?("iso8601") && !source.include?(%(require "time"))
+    end
+
+    assert_empty(forgot.map { |path| path.delete_prefix("#{lib}/") })
+  end
 end
