@@ -20,8 +20,14 @@ the text ("検索クエリ: ", "検索文書: "), and its pooling config says th
 prefix is inside the average. Leaving them out is a different model.
 
     uv run --with pyarrow --with tokenizers python tools/retrieval_pairs.py \\
-      --tokenizer <ruri>/tokenizer.json --pairs 'data/*.parquet' \\
-      --rows 20000 --out train.jsonl
+      --tokenizer <ruri>/tokenizer.json --pairs 'data/**/*.parquet' \\
+      --query-column query --text-column text --title-column title \\
+      --rows 100000 --out train.jsonl
+
+A column that is not there is refused with the ones that are, because
+what a dataset calls its halves is the dataset's business: auto-wiki-qa
+holds `query`, `text` and `title`, and its `answer` is a span rather than
+the passage a query should find.
 
     uv run --with pyarrow --with tokenizers python tools/retrieval_pairs.py \\
       --tokenizer <ruri>/tokenizer.json --mteb <snapshot> --out eval.json
@@ -59,11 +65,19 @@ def encoder(path, limit):
 def pairs(args, encode):
     table = read(args.pairs)
     columns = table.column_names
-    for wanted in (args.query_column, args.text_column):
-        if wanted not in columns:
-            raise SystemExit(f"no column {wanted!r} in {columns}")
+    wanted = [args.query_column, args.text_column]
+    if args.title_column:
+        wanted.append(args.title_column)
+    for column in wanted:
+        if column not in columns:
+            raise SystemExit(f"no column {column!r} in {columns}")
     queries = table[args.query_column].to_pylist()
     texts = table[args.text_column].to_pylist()
+    if args.title_column:
+        # A document is what somebody would index, and a corpus that has
+        # titles indexes them: the evaluation side does the same.
+        titles = table[args.title_column].to_pylist()
+        texts = [f"{t}\n{body}" if t else body for t, body in zip(titles, texts)]
     rows = list(zip(queries, texts))[: args.rows]
     with open(args.out, "w") as f:
         for query, text in rows:
@@ -126,6 +140,7 @@ def main():
     parser.add_argument("--pairs", help="parquet of (query, text) rows")
     parser.add_argument("--query-column", default="query")
     parser.add_argument("--text-column", default="text")
+    parser.add_argument("--title-column", help="prepended to the text where a row has one")
     parser.add_argument("--rows", type=int, default=100_000)
     parser.add_argument("--mteb", help="a directory of queries/corpus/qrels parquet")
     args = parser.parse_args()
