@@ -30,8 +30,50 @@ impl Tensor {
     }
 }
 
+/// The same tensor, with its data as native-endian f32 bytes rather than
+/// JSON numbers.
+///
+/// Measurement drove this (docs/plan.md section 5A.2.1): serializing a
+/// batch as JSON cost two thirds of a step at 512 rows, while the call
+/// boundary itself was noise. The shape stays JSON - it is a handful of
+/// integers, and readable - and only the payload goes packed.
+pub struct PackedTensor {
+    pub shape: Vec<i32>,
+    pub bytes: Vec<u8>,
+}
+
+impl PackedTensor {
+    fn to_tensor(&self, name: &str) -> Result<Tensor> {
+        anyhow::ensure!(
+            self.bytes.len() % 4 == 0,
+            "input {name:?}: {} bytes is not a whole number of f32 values",
+            self.bytes.len()
+        );
+        let data = self
+            .bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        Ok(Tensor {
+            shape: self.shape.clone(),
+            data,
+        })
+    }
+}
+
 /// One step's inputs, by graph input name.
 pub type Batch = BTreeMap<String, Tensor>;
+
+/// The same, packed. Converted to a [`Batch`] on arrival.
+pub type PackedBatch = BTreeMap<String, PackedTensor>;
+
+/// Unpacks a batch, naming the input if the bytes do not divide.
+pub fn unpack(packed: &PackedBatch) -> Result<Batch> {
+    packed
+        .iter()
+        .map(|(name, t)| Ok((name.clone(), t.to_tensor(name)?)))
+        .collect()
+}
 
 /// The initial parameters, by path.
 #[derive(Deserialize)]

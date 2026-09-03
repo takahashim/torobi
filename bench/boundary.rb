@@ -7,8 +7,9 @@
 # has to be a measurement with a shape and a machine attached. This is that
 # measurement. It compares three things per shape:
 #
-#   marshal   Ruby's cost of serializing one batch (JSON.generate)
-#   step      a full step through the boundary (marshal + parse + compute)
+#   json      what the old JSON encoding cost per batch, for comparison
+#   pack      what the packed encoding costs per batch (Array#pack)
+#   step      a full step through the boundary (pack + copy + compute)
 #   span      the same steps handed over in one call
 #
 # The interesting number is the share of a step that is not compute.
@@ -46,12 +47,13 @@ rng = Random.new(1)
 Torobi::Session.open(config, weights(DIM)) { |s| 3.times { s.step!(batch(4, DIM, rng)) } }
 
 puts "torobi boundary cost, #{RUBY_PLATFORM}, dim=#{DIM}, #{STEPS} steps each"
-puts format("%8s %10s %10s %10s %10s", "rows", "marshal", "step", "span", "overhead")
+puts format("%8s %10s %10s %10s %10s", "rows", "json", "pack", "step", "span")
 
 [1, 8, 64, 512].each do |rows|
   batches = Array.new(STEPS) { batch(rows, DIM, rng) }
 
-  marshal = Benchmark.realtime { batches.each { |b| JSON.generate(b) } } / STEPS
+  json = Benchmark.realtime { batches.each { |b| JSON.generate(b) } } / STEPS
+  pack = Benchmark.realtime { batches.each { |b| Torobi::Batch.pack(b) } } / STEPS
 
   per_step = Torobi::Session.open(config, weights(DIM)) do |s|
     s.adjust(lr: 0.01)
@@ -65,10 +67,7 @@ puts format("%8s %10s %10s %10s %10s", "rows", "marshal", "step", "span", "overh
     Benchmark.realtime { s.run(batches) } / STEPS
   end
 
-  # What a span saves is the per-call boundary; what remains in `span` is
-  # compute plus the parse the engine does either way.
-  overhead = per_step - per_span
-  puts format("%8d %9.3fms %9.3fms %9.3fms %9.3fms (%.1f%%)",
-              rows, marshal * 1000, per_step * 1000, per_span * 1000,
-              overhead * 1000, 100.0 * overhead / per_step)
+  puts format("%8d %9.3fms %9.3fms %9.3fms %9.3fms   pack is %.0f%% of a step",
+              rows, json * 1000, pack * 1000, per_step * 1000, per_span * 1000,
+              100.0 * pack / per_step)
 end

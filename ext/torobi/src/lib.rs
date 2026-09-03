@@ -9,8 +9,9 @@ mod gvl;
 
 use std::cell::RefCell;
 
-use magnus::{function, method, prelude::*, Error, RArray, Ruby};
-use torobi_engine::session::{Batch, Tensor};
+use magnus::value::ReprValue;
+use magnus::{function, method, prelude::*, Error, RArray, RHash, RString, Ruby, Value};
+use torobi_engine::session::{unpack, Batch, PackedBatch, PackedTensor, Tensor};
 use torobi_engine::Session as EngineSession;
 
 /// The engine's session, owned by one Ruby object.
@@ -43,21 +44,25 @@ impl Session {
 
     /// One step on one batch, with the GVL released.
     ///
-    /// The batch arrives as JSON, which is a copy and a parse per step. That
-    /// is the cost the plan says to measure rather than assume (docs/plan.md
-    /// section 5A.2); `bench/boundary.rb` reports it.
-    fn run_step(ruby: &Ruby, rb_self: &Self, batch_json: String) -> Result<f32, Error> {
-        let batch = parse_batch(ruby, &batch_json)?;
+    /// The batch arrives as {name => [shape, packed_bytes]}: shapes as small
+    /// integer arrays, payloads as native-endian f32 strings. Measurement
+    /// chose this over JSON (docs/plan.md section 5A.2.1).
+    fn run_step(ruby: &Ruby, rb_self: &Self, batch: RHash) -> Result<f32, Error> {
+        let batch = read_batch(ruby, batch)?;
         let mut session = rb_self.borrow_mut(ruby)?;
         // No Ruby API is touched inside: the engine only sees its own data.
         gvl::without_gvl(|| session.run_step(&batch)).map_err(|e| to_error(ruby, e))
     }
 
-    /// A span: one step per batch, all of them handed over before the GVL
-    /// is released, so the engine never asks anyone for data mid-span.
-    fn run_steps(ruby: &Ruby, rb_self: &Self, batches_json: String) -> Result<f32, Error> {
-        let batches: Vec<Batch> = serde_json::from_str(&batches_json)
-            .map_err(|e| Error::new(ruby.exception_arg_error(), format!("bad batches: {e}")))?;
+    /// A span: one step per batch, all of them read before the GVL is
+    /// released, so the engine never asks anyone for data mid-span.
+    fn run_steps(ruby: &Ruby, rb_self: &Self, batches: RArray) -> Result<f32, Error> {
+        let batches: Vec<Batch> = batches
+            .into_iter()
+            .map(|value| read_batch(ruby, RHash::from_value(value).ok_or_else(|| {
+                Error::new(ruby.exception_arg_error(), "each batch must be a Hash")
+            })?))
+            .collect::<Result<_, Error>>()?;
         let mut session = rb_self.borrow_mut(ruby)?;
         gvl::without_gvl(|| session.run_steps(&batches)).map_err(|e| to_error(ruby, e))
     }
@@ -96,8 +101,8 @@ impl Session {
         Ok(tensor_to_ruby(ruby, tensor))
     }
 
-    fn gradients(ruby: &Ruby, rb_self: &Self, batch_json: String) -> Result<RArray, Error> {
-        let batch = parse_batch(ruby, &batch_json)?;
+    fn gradients(ruby: &Ruby, rb_self: &Self, batch: RHash) -> Result<RArray, Error> {
+        let batch = read_batch(ruby, batch)?;
         let grads = {
             let session = rb_self.0.borrow();
             gvl::without_gvl(|| session.gradients(&batch)).map_err(|e| to_error(ruby, e))?
@@ -111,9 +116,26 @@ impl Session {
     }
 }
 
-fn parse_batch(ruby: &Ruby, json: &str) -> Result<Batch, Error> {
-    serde_json::from_str(json)
-        .map_err(|e| Error::new(ruby.exception_arg_error(), format!("bad batch: {e}")))
+/// Reads {name => [shape, packed]} into the engine's batch. The bytes are
+/// copied out of the Ruby string here, while the GVL is still held; nothing
+/// borrowed from Ruby survives into the computation.
+fn read_batch(ruby: &Ruby, batch: RHash) -> Result<Batch, Error> {
+    let bad = |what: String| Error::new(ruby.exception_arg_error(), what);
+    let mut packed = PackedBatch::new();
+    batch.foreach(|name: String, pair: RArray| {
+        let shape: Vec<i32> = pair
+            .entry::<Vec<i32>>(0)
+            .map_err(|e| bad(format!("input {name:?}: bad shape ({e})")))?;
+        let data: RString = pair
+            .entry::<RString>(1)
+            .map_err(|e| bad(format!("input {name:?}: data must be a packed String ({e})")))?;
+        // Safety: the bytes are copied immediately, under the GVL, and the
+        // string is not modified in between.
+        let bytes = unsafe { data.as_slice() }.to_vec();
+        packed.insert(name, PackedTensor { shape, bytes });
+        Ok(magnus::r_hash::ForEach::Continue)
+    })?;
+    unpack(&packed).map_err(|e| bad(format!("{e:#}")))
 }
 
 /// A tensor leaves as two plain Ruby arrays: its shape and its flat data.

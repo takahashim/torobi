@@ -228,7 +228,20 @@ Ruby がデータを所有し、かつ計算中に Ruby コードを呼ばない
 2. **境界の実体は JSON 直列化である**。512 行では step 6.63 ms のうち marshal が
    4.28 ms(65%)。batch が大きいほど支配的になる。
 3. したがって最適化するなら投入キューではなく **encoding**(packed binary)である。
-   G0 の作業項目をそちらへ移す。
+   G0 の作業項目をそちらへ移した。
+
+**packed encoding 後**(同条件。shape は JSON のまま、payload は native-endian f32):
+
+| rows | json(旧) | pack(新) | step | span |
+| --- | --- | --- | --- | --- |
+| 1 | 0.009 ms | 0.003 ms | 0.382 ms | 0.466 ms |
+| 8 | 0.071 ms | 0.013 ms | 0.441 ms | 0.425 ms |
+| 64 | 0.535 ms | 0.095 ms | 0.530 ms | 0.485 ms |
+| 512 | 4.320 ms | 0.730 ms | **1.252 ms**(旧 6.629) | 1.286 ms |
+
+512 行の step が 5.3 倍速くなった。encoding は依然として大きな batch では step の
+半分強を占めるので、次に効くのは「呼び出し側が最初から packed で持つ」ことである
+(`Torobi::Batch.pack` は String をそのまま通す)。**投入キューは引き続き不要**。
 
 ### 5A.3 model graph と objective graph の接続
 

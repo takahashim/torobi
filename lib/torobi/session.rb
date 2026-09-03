@@ -34,17 +34,17 @@ module Torobi
     # the loss. The GVL is released for the step, so other Ruby threads
     # proceed.
     def step!(batch)
-      @native.run_step(JSON.generate(batch))
+      @native.run_step(Batch.pack(batch))
     end
 
     # A span: one step per batch. The batches are handed over before the GVL
     # is released, so the engine never asks Ruby for data mid-span. Takes an
     # array, or an enumerable of batches.
     def run(batches)
-      batches = batches.to_a
-      raise ArgumentError, "a span needs at least one batch" if batches.empty?
+      packed = batches.map { |b| Batch.pack(b) }
+      raise ArgumentError, "a span needs at least one batch" if packed.empty?
 
-      @native.run_steps(JSON.generate(batches))
+      @native.run_steps(packed)
     end
 
     # The same batch for `steps` steps. For fixed-data spikes and tests;
@@ -76,7 +76,7 @@ module Torobi
 
     # The gradients for `batch`, by parameter path. Does not update anything.
     def gradients(batch)
-      @native.gradients(JSON.generate(batch)).to_h { |path, shape, data| [path, { shape:, data: }] }
+      @native.gradients(Batch.pack(batch)).to_h { |path, shape, data| [path, { shape:, data: }] }
     end
   end
 end
