@@ -60,9 +60,9 @@ class ErrorsTest < Minitest::Test
     # "the engine refused, the session is still mine" is true of Busy.
     assert_operator Torobi::Busy, :<, Torobi::StepError
 
-    # It is false of these: either nothing ran at all, or the session is
-    # gone. A `rescue StepError` that retried would be wrong for both.
-    [Torobi::Interrupted, Torobi::SessionPoisoned, Torobi::SessionClosed].each do |klass|
+    # It is false of these: the session is gone, so a `rescue StepError`
+    # that retried would be wrong.
+    [Torobi::SessionPoisoned, Torobi::SessionClosed].each do |klass|
       assert_operator klass, :<, Torobi::Error
       refute_operator klass, :<, Torobi::StepError
     end

@@ -467,6 +467,20 @@ impl Session {
     /// dropped. In a forked child it is not done at all: the device those
     /// arrays belong to did not come along, and the child is leaving.
     fn close(ruby: &Ruby, rb_self: &Self) -> Result<bool, Error> {
+        // The pid first, before any lock: a mutex another thread held when
+        // the fork happened is locked forever in the child, and `close`
+        // runs from `ensure`, where refusing would be noise. A child marks
+        // the session closed if it can and leaves the device alone.
+        if !rb_self.here() {
+            if let Ok(mut guard) = rb_self.slot.try_lock() {
+                if let Slot::Ready(engine) = std::mem::replace(&mut *guard, Slot::Closed) {
+                    // The device those arrays belong to did not come along.
+                    std::mem::forget(engine);
+                }
+            }
+            return Ok(false);
+        }
+
         let engine = {
             let mut guard = rb_self.slot.try_lock().map_err(|_| busy(ruby))?;
             // A running session is not closed out from under its own step:
@@ -481,11 +495,7 @@ impl Session {
         };
         let was_live = engine.is_some();
         if let Some(engine) = engine {
-            if rb_self.here() {
-                let _ = in_mlx(move || drop(engine), OnRefusal::PressOn);
-            } else {
-                std::mem::forget(engine);
-            }
+            let _ = in_mlx(move || drop(engine), OnRefusal::PressOn);
         }
         Ok(was_live)
     }

@@ -227,6 +227,13 @@ class LifecycleTest < Minitest::Test
       end
       # And watching still answers: it reads no device.
       writer.puts "WATCHED #{session.step}"
+      # close runs from an ensure, so a child must not be made to raise
+      # there. It marks the session closed and leaves the device alone.
+      begin
+        writer.puts "CLOSED #{session.close}"
+      rescue StandardError => e
+        writer.puts "CLOSE RAISED #{e.class}"
+      end
       writer.close
       exit!(0)
     end
@@ -239,6 +246,7 @@ class LifecycleTest < Minitest::Test
     assert_match(/REFUSED/, output, output)
     assert_match(/fork/, output, output)
     assert_match(/WATCHED 1/, output, output)
+    assert_match(/CLOSED false/, output, output)
   end
 
   # The same for the process-global calls: they reach the allocator every
