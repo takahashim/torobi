@@ -20,9 +20,23 @@ module Torobi
     # beside the library holding the MLX symbols: the extension bundle.
     METALLIB = File.expand_path("mlx.metallib", __dir__)
 
+    # The process that loaded the extension. A Metal device and its command
+    # queues do not survive fork, so a child that inherited them cannot use
+    # them, and finding out at the GPU is finding out by aborting.
+    ORIGIN_PID = Process.pid
+
     module_function
 
     def check!
+      unless Process.pid == ORIGIN_PID
+        raise Torobi::EngineUnavailable,
+              "this process (#{Process.pid}) inherited Torobi from a fork of " \
+              "#{ORIGIN_PID}. A Metal device does not survive fork, so a session " \
+              "here would fail at the GPU rather than here. Run training in a " \
+              "process started with Process.spawn or exec, not in a prefork " \
+              "worker (Puma clustered, Sidekiq, Spring)."
+      end
+
       unless File.exist?(METALLIB)
         raise Torobi::EngineUnavailable,
               "MLX's metallib is not beside the extension (expected #{METALLIB}). " \
@@ -42,10 +56,13 @@ module Torobi
     #
     # Asked in a subprocess, because the failure it looks for is an abort:
     # asking in this process is the thing we are trying to avoid. The answer
-    # is memoized, so the cost is one fork per process, not per session.
+    # is memoized against the pid that learned it, so a forked child does
+    # not inherit its parent's answer (it would be answering about the
+    # parent's device, not its own).
     def probe_result
-      return @probe_result unless @probe_result.nil?
+      return @probe_result if defined?(@probe_pid) && @probe_pid == Process.pid
 
+      @probe_pid = Process.pid
       @probe_result = probe!
     end
 
@@ -77,6 +94,7 @@ module Torobi
 
     # For tests that need the probe run again.
     def forget_probe!
+      @probe_pid = nil
       @probe_result = nil
     end
   end

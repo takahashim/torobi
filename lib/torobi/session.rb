@@ -37,7 +37,13 @@ module Torobi
       session = new(native)
       return session unless block_given?
 
-      yield session
+      begin
+        yield session
+      ensure
+        # The block form owns the session's lifetime, so its device memory
+        # goes when the block does, rather than when the GC gets to it.
+        session.close
+      end
     end
 
     def initialize(native)
@@ -51,14 +57,48 @@ module Torobi
       @native.run_step(Batch.pack(batch))
     end
 
-    # A span: one step per batch. The batches are handed over before the GVL
-    # is released, so the engine never asks Ruby for data mid-span. Takes an
-    # array, or an enumerable of batches.
-    def run(batches)
-      packed = batches.map { |b| Batch.pack(b) }
+    # Hands several batches to the engine at once, which runs them without
+    # returning to Ruby in between.
+    #
+    # Faster by a fraction of a percent, and worth it only where a span is
+    # short and known: it cannot be interrupted, and every batch is held in
+    # memory (as Ruby objects, as packed strings, and again inside the
+    # engine) before the first step runs. `run` is the normal way.
+    def run_uninterruptible(batches, limit: 1024)
+      packed = batches.first(limit + 1).map { |b| Batch.pack(b) }
       raise ArgumentError, "a span needs at least one batch" if packed.empty?
+      if packed.size > limit
+        raise ArgumentError,
+              "run_uninterruptible takes at most #{limit} batches at a time; " \
+              "use run for a span this long"
+      end
 
       @native.run_steps(packed)
+    end
+
+    # A span: one step per batch, driven from here.
+    #
+    # One native call per step, not one per span. The boundary costs a
+    # fraction of a percent of a step (bench/boundary.rb), and driving it
+    # from Ruby is what makes the span interruptible: Ctrl-C, Thread#raise
+    # and Timeout all land between steps rather than after the last one.
+    # It also means an enumerable is consumed as it goes, so an endless one
+    # trains rather than exhausting memory first.
+    #
+    # Returns the last loss. Yields it per step if a block is given, which
+    # is where a caller records or decides.
+    def run(batches)
+      raise ArgumentError, "this session is closed" if closed?
+      empty = true
+
+      batches.each do |batch|
+        empty = false
+        loss = step!(batch)
+        yield loss if block_given?
+      end
+      raise ArgumentError, "a span needs at least one batch" if empty
+
+      @native.loss
     end
 
     # The same batch for `steps` steps. For fixed-data spikes and tests;
@@ -66,7 +106,10 @@ module Torobi
     def repeat(batch, steps:)
       raise ArgumentError, "steps must be positive" unless steps.positive?
 
-      run([batch] * steps)
+      packed = Batch.pack(batch)
+      last = nil
+      steps.times { last = @native.run_step(packed) }
+      last
     end
 
     def step = @native.step
@@ -99,6 +142,20 @@ module Torobi
       @native.restore(dir.to_s)
       self
     end
+
+    # Releases the engine and its device memory. Idempotent; afterwards
+    # every call refuses rather than pretending. Returns whether this call
+    # was the one that closed it.
+    def close
+      @native.close
+    end
+
+    def closed? = @native.closed?
+
+    # Whether the engine panicked under this session. A poisoned session
+    # cannot be trusted to hold consistent state, so nothing more is
+    # attempted with it; open a new one, from a checkpoint if there is one.
+    def poisoned? = @native.poisoned?
 
     def parameter_paths = @native.parameter_paths
     def input_names = @native.input_names

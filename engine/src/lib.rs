@@ -8,6 +8,7 @@
 pub mod checkpoint;
 pub mod graph;
 pub mod interp;
+pub mod memory;
 pub mod optimizer;
 pub mod session;
 

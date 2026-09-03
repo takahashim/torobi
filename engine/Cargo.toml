@@ -16,6 +16,9 @@ license = "MIT"
 # pre-built MLX when no Metal compiler is present, which is what lets the
 # gem build on a machine without Xcode.
 mlx-rs = { git = "https://github.com/OminiX-ai/OminiX-MLX.git", rev = "4988a3fcfa48b8cb5d0780a501b92c6a41401523", features = ["safetensors"] }
+# The memory metrics are mlx-c's rather than mlx-rs's, so the sys crate
+# is a direct dependency for those few calls (engine/src/memory.rs).
+mlx-sys = { git = "https://github.com/OminiX-ai/OminiX-MLX.git", rev = "4988a3fcfa48b8cb5d0780a501b92c6a41401523" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

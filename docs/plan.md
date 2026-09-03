@@ -639,6 +639,22 @@ M0 と M1 の一部(§9.1 の M1 のうち single-step とその境界の初期�
 | journal の digest が `("ab","c") == ("a","bc")` | 長さ framing + canonical JSON。entry ごとに flush、deep freeze |
 | `build_info` が実態と違う("path dependency") | build.rs が Cargo.toml の rev を埋め込む |
 
+### 15.2.2 外部レビュー第 2 回(2026-09-03)
+
+「in-process の狭い腰は維持すべきだが、長時間 GPU 学習を同居させる設計としてはまだ穴がある」
+という判定。実測で再現し、推奨順に対処した。
+
+| 指摘 | 実測 | 対処 |
+| --- | --- | --- |
+| `RefCell` を GVL 解放中に保持 → 別スレッドの読みで panic → **Ruby fatal でプロセス終了** | 再現(`RefCell already mutably borrowed`) | `Mutex` + `try_lock` の状態機械。使用中の session は **busy を答えて生き続ける**。blocking lock は GVL 待ちで deadlock するため使わない |
+| Rust panic は回復可能な例外ではない(magnus が fatal に変換) | 再現 | GVL ラッパは panic を **返す**(resume しない)。session は **Poisoned** になり以後拒否。プロセスは生存 |
+| `run` が全 batch を先に materialize → 無限 enumerable が始まらない、多重保持、Ctrl-C が span 末尾まで効かない | コード上明白 | `run` は **step 単位で Ruby が駆動**(境界コストは実測で誤差)。block を渡せば step ごとに yield。bulk は `run_uninterruptible`(上限付き)に分離 |
+| fork 後の安全性を probe では保証できない(`@probe_result` が子に継承される) | — | 拡張ロード時 PID を記録し、不一致なら `EngineUnavailable`。probe の記憶も PID に紐づけ。prefork worker(Puma clustered / Sidekiq / Spring)は非対応と明記 |
+| `close` がなく、GPU 資源の解放が GC 任せ | — | 冪等な `close` と `Closed` 状態、block 形式の `ensure`。device memory の観測(`Torobi::Memory`: active / cache / peak / limit、`clear_cache!`、`limit=`)。「開いて閉じた 20 session が MB 単位を残さない」ことをテスト |
+
+**残る推奨**: 長時間学習を `Process.spawn` した専用 runner で走らせることを正式経路にする
+(§11.4 の配布方針と同じ判断の裏表)。engine CLI が既にあるので発展は容易。M3a の前後で決める。
+
 ### 15.3 M2 の進捗(2026-09-03)
 
 | 出口条件 | 状態 |

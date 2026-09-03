@@ -26,9 +26,15 @@ where
 
 /// Runs `call` with the GVL released, so other Ruby threads proceed.
 ///
+/// Returns `Err` with the panic's message if `call` panicked. Resuming the
+/// unwind would be worse than returning it: magnus turns a panic that
+/// escapes into a Ruby `fatal`, which no `rescue` catches and which ends
+/// the process. The caller turns this into a StepError and poisons the
+/// session instead (docs/plan.md section 4.1).
+///
 /// # Safety contract (upheld by the callers in this crate, not by the type
 /// system): `call` must not touch the Ruby VM in any way.
-pub fn without_gvl<F, R>(call: F) -> R
+pub fn without_gvl<F, R>(call: F) -> Result<R, String>
 where
     F: FnOnce() -> R,
 {
@@ -48,7 +54,16 @@ where
         );
     }
     match payload.outcome.expect("the trampoline stored an outcome") {
-        Ok(value) => value,
-        Err(panic) => std::panic::resume_unwind(panic),
+        Ok(value) => Ok(value),
+        Err(panic) => Err(describe(panic)),
     }
+}
+
+/// What a panic said, as far as it can be recovered.
+fn describe(panic: Box<dyn Any + Send>) -> String {
+    panic
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic with no message".to_string())
 }
