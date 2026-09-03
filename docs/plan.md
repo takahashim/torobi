@@ -1998,9 +1998,20 @@ GradCache は表現の幅も部分の行数も知らずに済む。graph 側は 
 | | 何か | どこ |
 | --- | --- | --- |
 | mlx-rs (上流) | 非公式の Rust binding。crates.io の `mlx-rs`。**Torobi はこれを使っていない** | `oxiglade/mlx-rs` (旧 `oxideai/mlx-rs`。組織名の改称で旧 URL はリダイレクトする。混乱の一因) |
-| OminiX-MLX | その codebase を取り込んだ monorepo (gemma4 や flux など無関係な model crate と同居)。**Torobi が build するのはこれ**、1 コミットに固定 | `OminiX-ai/OminiX-MLX` の `mlx-rs/` |
+| OminiX-MLX | **同じリポジトリの続き**。履歴は mlx-rs 自身のもの (534 コミット、最古が `init commit`、302 が上流の主著者) で、2026-01-25 の `753d289 Move original mlx-rs components into mlx-rs directory` でサブディレクトリへ移されただけ。**Torobi が build するのはこれ**、1 コミットに固定 | `OminiX-ai/OminiX-MLX` の `mlx-rs/` |
 | mlx-c | MLX の C API。`mlx-sys` の submodule | `ml-explore/mlx-c` |
 | MLX | 本体。ここでは build せず、prebuilt を落としてくる | `ml-explore/mlx` |
+
+**「crates.io のものと同じか」への答えは「出自は同じ、いまも近づけている、
+ただし同一ではない」。** 上流の PR (#289, #305, #311, #313, #314, #321, #323) が
+履歴に入っており、`b6c36f3 remove duplicate gather_mm and Float64 pattern after
+upstream rebase` が示すとおり rebase で追随している。一方 OminiX 側の作者による
+コミットが `mlx-rs/` に 12 個あり、**そのうち 1 つが Torobi がこの fork を使う
+理由そのもの** (`100f155 Auto-download pre-built MLX when Xcode is unavailable`)。
+他に `try_as_slice` / `contiguous` の contiguity 検査 (engine が `contiguous` を
+呼ぶ)、safetensors の Float64、deployment target の上書きなど。**版番号は比較
+できない** (fork は OminiX-API に合わせて 1.0.0 へ振り直し、いまは 1.2.0。
+crates.io は独自の 0.x 系)。意味を持つ版は `Cargo.lock` のコミットだけである。
 
 **メタデータが上流を指している。** OminiX の workspace は上流の
 `repository = "https://github.com/oxideai/mlx-rs"` をそのまま持っているので、

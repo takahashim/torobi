@@ -10,9 +10,33 @@ do not make it obvious which one is built. In order, top to bottom:
 | | what it is | where |
 |---|---|---|
 | **mlx-rs (upstream)** | the unofficial Rust bindings, by Minghua Wu and David Chavez. crates.io's `mlx-rs`. **Not what Torobi builds** | `github.com/oxiglade/mlx-rs`, formerly `github.com/oxideai/mlx-rs` (the org was renamed; the old links redirect, which is one source of the confusion) |
-| **OminiX-MLX** | a monorepo whose `mlx-rs/` subtree is that codebase carried forward, beside a dozen unrelated model crates (gemma4, flux, glm4). **This is what Torobi builds**, pinned to one commit | `github.com/OminiX-ai/OminiX-MLX`, subtree `mlx-rs/` |
+| **OminiX-MLX** | **the same repository, continued.** Not a rewrite and not a vendored copy: the history is mlx-rs's own (534 commits, `init commit` at the bottom, 302 of them by upstream's main author), and on 2026-01-25 `753d289 refactor: Move original mlx-rs components into mlx-rs directory` moved it into a subdirectory to make room for model crates. **This is what Torobi builds**, pinned to one commit | `github.com/OminiX-ai/OminiX-MLX`, subtree `mlx-rs/` |
 | **mlx-c** | Apple's C API for MLX, a git submodule of `mlx-sys`. bindgen reads its headers | `github.com/ml-explore/mlx-c` |
 | **MLX** | the library itself. Not built here: a pre-built binary is downloaded at build time (below) | `github.com/ml-explore/mlx` |
+
+## Is the fork's mlx-rs the same as the one on crates.io
+
+Same origin, still converging, not the same code.
+
+**Still converging**: upstream's work keeps arriving. The history carries
+upstream pull requests (#289, #305, #311, #313, #314, #321, #323) and a
+commit that says how they get there, `b6c36f3 fix: remove duplicate
+gather_mm and Float64 pattern after upstream rebase`. The Rust API is
+upstream's, which is what makes the exit below realistic.
+
+**Not the same code**: twelve commits by OminiX-era authors touch
+`mlx-rs/` and upstream does not have them. The one Torobi depends on is
+`100f155 feat: Auto-download pre-built MLX when Xcode is unavailable`,
+which is the reason this fork is here at all. Others are a contiguity
+check in `try_as_slice` / `contiguous` (the engine calls `contiguous`),
+Float64 in safetensors, a deployment-target override, IO extensions, and
+`d145d5b`, which requires MLX 0.32.0.
+
+**The version numbers do not compare.** The fork renumbered to 1.0.0 in
+`e5aed65 feat: v1.0.0 - version alignment with OminiX-API` and is 1.2.0
+now; crates.io's mlx-rs is on its own 0.x line. Neither number tells you
+anything about the other, and `Cargo.lock`'s commit is the only version
+that means something here.
 
 **The crate metadata points at the wrong one.** OminiX's workspace still
 carries upstream's `repository = "https://github.com/oxideai/mlx-rs"`, so
