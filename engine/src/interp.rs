@@ -19,7 +19,12 @@ pub fn evaluate(
     graph: &Graph,
     params: &[Array],
     inputs: &BTreeMap<String, Array>,
+    rng: Option<&Array>,
 ) -> Result<BTreeMap<String, Array>> {
+    // One key per graph, split per dropout node, so two dropouts in one
+    // step draw different masks and the same step always draws the same
+    // ones.
+    let mut key = rng.cloned();
     let mut values: Vec<Array> = Vec::with_capacity(graph.nodes.len());
     let resolve = |text: &str, values: &Vec<Array>| -> Result<Array> {
         match parse_ref(text).map_err(|e| Exception::custom(e.to_string()))? {
@@ -59,6 +64,28 @@ pub fn evaluate(
             "div_scalar" => ins[0].divide(Array::from_f32(number(node, "value")?))?,
             "square" => ins[0].square()?,
             "stop_gradient" => mlx_rs::stop_gradient(&ins[0])?,
+            "dropout" => {
+                let p = number(node, "p")?;
+                if !(0.0..1.0).contains(&p) {
+                    return Err(fail(&format!("p must be in 0..1, got {p}")));
+                }
+                if p == 0.0 {
+                    ins[0].clone()
+                } else {
+                    let current = key
+                        .as_ref()
+                        .ok_or_else(|| fail("dropout needs the session's RNG state"))?;
+                    let (next, draw) = mlx_rs::random::split(current, 2)?;
+                    key = Some(next);
+                    let keep = Array::from_f32(1.0 - p);
+                    // Inverted dropout: scale what survives, so inference
+                    // needs no correction.
+                    let mask = mlx_rs::random::bernoulli(&keep, ins[0].shape(), &draw)?;
+                    ins[0]
+                        .multiply(mask.as_dtype(mlx_rs::Dtype::Float32)?)?
+                        .divide(&keep)?
+                }
+            }
             "mean" => {
                 if !node.attributes.get("axes").is_none_or(|v| v.is_null()) {
                     return Err(fail("mean over specific axes is not implemented in M1"));

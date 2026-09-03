@@ -154,6 +154,10 @@ module Torobi
       # through this (docs/plan.md section 5A.3).
       def stop_gradient(x) = emit("stop_gradient", inputs: [x])
 
+      # Inverted dropout, drawing from the session's RNG state. `p` is the
+      # rate dropped; 0 is the identity.
+      def dropout(x, p) = emit("dropout", inputs: [x], attrs: { p: })
+
       # --- core ---
 
       # Adds one node: checks ownership, arity and attributes against the

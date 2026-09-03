@@ -86,6 +86,15 @@
   shape_rule: same_as_input
   handle: true
 
+# The only op that consumes randomness. Its key comes from the session's
+# RNG state, never from a global: that is what makes a resumed run take the
+# same masks a continuous one would (docs/plan.md section 11.1).
+- name: dropout
+  inputs: 1
+  attributes: { p: number }
+  shape_rule: same_as_input
+  handle: true
+
 # Semantic op, kept whole: the backend decides how to realize it, and the
 # IR says what it means. Gradients do not flow through it.
 - name: stop_gradient

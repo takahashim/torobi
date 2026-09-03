@@ -617,4 +617,15 @@ M0 と M1 の一部(§9.1 の M1 のうち single-step とその境界の初期�
 配布は形も事実も成立した。残るのは方針の決定(§11.4)であり、
 それは利用者像が見えてからでよい。
 
-M2(stateful core: AdamW、RNG、checkpoint / resume)に進む。
+### 15.3 M2 の進捗(2026-09-03)
+
+| 出口条件 | 状態 |
+| --- | --- |
+| AdamW が oracle の最初の数 step と一致 | **済**。論文の式から Ruby で書き起こした oracle と 5 step すべて 1e-5 一致。bias correction(最初の step が勾配によらず約 lr 動く)と decoupled decay も検証 |
+| RNG state | **済**。session が key を持ち、step ごとに split する。dropout が最初の消費者で、seed の一致・不一致・p=0 の恒等性・同一 step 内の 2 つの dropout が別の mask を引くことを検証 |
+| checkpoint / resume(resume = 連続実行) | **済**。manifest + parameters / optimizer / random の safetensors、staging → atomic rename。**dropout を有効にしたまま** step 5 で中断・再開した run が、12 step 連続実行と 1e-5 一致 |
+
+optimizer は engine が所有(§5 の方針どおり mlx-rs のものを使わない)。checkpoint は
+digest・path・shape・optimizer 種別を読み戻しで検証し、不一致を拒否する。
+
+次は M2.5(窓: ノブ、フック、journal の実運用、2 種の replay)、または M3a(model import)。

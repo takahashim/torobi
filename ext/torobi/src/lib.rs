@@ -100,6 +100,18 @@ impl Session {
         self.0.borrow().lr()
     }
 
+    fn seed(&self) -> u64 {
+        self.0.borrow().seed()
+    }
+
+    fn set_seed(ruby: &Ruby, rb_self: &Self, seed: u64) -> Result<u64, Error> {
+        rb_self
+            .borrow_mut(ruby)?
+            .set_seed(seed)
+            .map(|()| seed)
+            .map_err(|e| to_error(ruby, e))
+    }
+
     fn set_lr(ruby: &Ruby, rb_self: &Self, lr: f32) -> Result<f32, Error> {
         rb_self.borrow_mut(ruby)?.set_lr(lr);
         Ok(lr)
@@ -201,6 +213,8 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("loss", method!(Session::loss, 0))?;
     class.define_method("lr", method!(Session::lr, 0))?;
     class.define_method("lr=", method!(Session::set_lr, 1))?;
+    class.define_method("seed", method!(Session::seed, 0))?;
+    class.define_method("seed=", method!(Session::set_seed, 1))?;
     class.define_method("save", method!(Session::save, 1))?;
     class.define_method("restore", method!(Session::restore, 1))?;
     class.define_method("parameter_paths", method!(Session::parameter_paths, 0))?;

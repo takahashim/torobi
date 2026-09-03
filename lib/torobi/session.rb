@@ -73,9 +73,15 @@ module Torobi
     def loss = @native.loss
     def lr = @native.lr
 
+    # The seed the RNG runs from. Explicit state, not a global: the draws a
+    # step makes are a function of this and the step count, which is what
+    # lets a resumed run take the same ones (docs/plan.md section 11.1).
+    def seed = @native.seed
+
     # Knobs take effect from the next step.
-    def adjust(lr: nil)
+    def adjust(lr: nil, seed: nil)
       @native.lr = lr if lr
+      @native.seed = seed if seed
       self
     end
 

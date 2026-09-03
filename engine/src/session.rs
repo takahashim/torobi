@@ -109,6 +109,12 @@ pub struct Session {
     /// The digest of the GraphConfig this session runs, so a checkpoint can
     /// say which description its state belongs to.
     config_digest: String,
+    /// The RNG, held as state rather than left to a global. Every step
+    /// splits it, so the sequence of draws is a function of the seed and
+    /// the step count, and a resumed run draws what a continuous one would
+    /// (docs/plan.md section 11.1).
+    rng: Array,
+    seed: u64,
     step: usize,
     last_loss: f32,
 }
@@ -174,7 +180,10 @@ impl Session {
         );
 
         let optimizer = Optimizer::new(optimizer, &params, &argnums)?;
+        let seed = 0;
         Ok(Self {
+            rng: mlx_rs::random::key(seed)?,
+            seed,
             models,
             objective: config.objective,
             params,
@@ -204,6 +213,8 @@ impl Session {
                 .collect(),
             argnums: &self.argnums,
             slots: (m, v),
+            rng: &self.rng,
+            seed: self.seed,
         };
         Ok(checkpoint::write(dir, state)?.display().to_string())
     }
@@ -270,8 +281,12 @@ impl Session {
         self.params = params;
         self.optimizer.restore(m, v, manifest.optimizer_steps);
         self.step = manifest.step;
+        self.seed = manifest.seed;
+        self.rng = loaded
+            .rng
+            .context("the checkpoint has no RNG state")?;
         self.last_loss = f32::NAN;
-        eval(self.params.iter())?;
+        eval(self.params.iter().chain(std::iter::once(&self.rng)))?;
         Ok(())
     }
 
@@ -290,6 +305,18 @@ impl Session {
     /// A knob: effect begins with the next step.
     pub fn set_lr(&mut self, lr: f32) {
         self.optimizer.config_mut().set_lr(lr);
+    }
+
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Restarts the RNG. A knob like any other, and recorded like one:
+    /// after this the draws are a function of the new seed alone.
+    pub fn set_seed(&mut self, seed: u64) -> Result<()> {
+        self.seed = seed;
+        self.rng = mlx_rs::random::key(seed)?;
+        Ok(())
     }
 
     /// What update rule this session runs, as data.
@@ -424,13 +451,20 @@ impl Session {
         objective: Option<&Graph>,
         params: &[Array],
         fields: &BTreeMap<String, Array>,
+        rng: &Array,
     ) -> std::result::Result<Array, mlx_rs::error::Exception> {
         let fail = |what: String| mlx_rs::error::Exception::custom(what);
         let mut outputs: BTreeMap<(String, String), Array> = BTreeMap::new();
 
+        // One key per graph, split from the step's, so a model and the
+        // objective never draw the same numbers.
+        let mut key = rng.clone();
         for model in models {
             let inputs = Self::resolve(&model.graph, fields, &outputs, &model.name)?;
-            let produced = interp::evaluate(&model.graph, &params[model.slice.clone()], &inputs)?;
+            let (next, mine) = mlx_rs::random::split(&key, 2)?;
+            key = next;
+            let produced =
+                interp::evaluate(&model.graph, &params[model.slice.clone()], &inputs, Some(&mine))?;
             for (name, value) in produced {
                 outputs.insert((model.name.clone(), name), value);
             }
@@ -446,7 +480,7 @@ impl Session {
         };
 
         let inputs = Self::resolve(objective, fields, &outputs, "objective")?;
-        let produced = interp::evaluate(objective, &[], &inputs)?;
+        let produced = interp::evaluate(objective, &[], &inputs, Some(&key))?;
         let mut values = produced.into_values();
         let loss = values
             .next()
@@ -496,8 +530,9 @@ impl Session {
     fn differentiate(&self, fields: &BTreeMap<String, Array>) -> Result<(Array, Vec<Array>)> {
         let models = &self.models;
         let objective = self.objective.as_ref();
+        let rng = &self.rng;
         let fun = |ps: &[Array]| -> std::result::Result<Vec<Array>, mlx_rs::error::Exception> {
-            Self::forward(models, objective, ps, fields).map(|loss| vec![loss])
+            Self::forward(models, objective, ps, fields, rng).map(|loss| vec![loss])
         };
         let mut vg = value_and_grad_with_argnums(fun, &self.argnums[..]);
         let (mut values, grads) = vg(&self.params)?;
@@ -511,6 +546,10 @@ impl Session {
     fn update(&mut self, fields: &BTreeMap<String, Array>) -> Result<f32> {
         let (loss, grads) = self.differentiate(fields)?;
         self.optimizer.apply(&mut self.params, &self.argnums, &grads)?;
+        // The step's key is spent; advance so the next step draws anew.
+        let (next, _) = mlx_rs::random::split(&self.rng, 2)?;
+        self.rng = next;
+        eval(std::iter::once(&self.rng))?;
         self.last_loss = loss.item::<f32>();
         self.step += 1;
         Ok(self.last_loss)

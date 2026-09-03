@@ -6,6 +6,7 @@
 //! checkpoint/000042/
 //! ├── manifest.json
 //! ├── parameters.safetensors
+//! ├── random.safetensors
 //! └── optimizer.safetensors     (absent for an optimizer with no slots)
 //! ```
 //!
@@ -39,6 +40,9 @@ pub struct Manifest {
     /// Steps the optimizer has taken, which is not the same as `step` once
     /// a run resumes: bias correction depends on it.
     pub optimizer_steps: u64,
+    /// The seed the RNG was started from. The key itself is a tensor, and
+    /// lives in random.safetensors.
+    pub seed: u64,
     pub parameters: Vec<ParameterEntry>,
     pub build: serde_json::Value,
 }
@@ -62,6 +66,9 @@ pub struct State<'a> {
     pub argnums: &'a [i32],
     /// The optimizer's slots, parallel to `argnums`.
     pub slots: (&'a [Array], &'a [Array]),
+    /// The RNG key, so a resumed run draws what a continuous one would.
+    pub rng: &'a Array,
+    pub seed: u64,
 }
 
 /// Writes a checkpoint, atomically. Returns where it landed.
@@ -80,6 +87,7 @@ pub fn write(dir: impl AsRef<Path>, state: State<'_>) -> Result<PathBuf> {
         step: state.step,
         optimizer: state.optimizer.clone(),
         optimizer_steps: state.optimizer_steps,
+        seed: state.seed,
         parameters: state
             .parameters
             .iter()
@@ -115,6 +123,13 @@ pub fn write(dir: impl AsRef<Path>, state: State<'_>) -> Result<PathBuf> {
                                 staging.join("optimizer.safetensors"))
             .context("writing optimizer state")?;
     }
+
+    Array::save_safetensors(
+        [("key", state.rng)],
+        None,
+        staging.join("random.safetensors"),
+    )
+    .context("writing the RNG state")?;
 
     std::fs::write(
         staging.join("manifest.json"),
@@ -153,6 +168,7 @@ pub struct Loaded {
     pub parameters: HashMap<String, Array>,
     /// (m, v) by parameter path. Empty when the optimizer has no slots.
     pub slots: HashMap<String, (Array, Array)>,
+    pub rng: Option<Array>,
 }
 
 pub fn read(dir: impl AsRef<Path>) -> Result<Loaded> {
@@ -176,9 +192,13 @@ pub fn read(dir: impl AsRef<Path>) -> Result<Loaded> {
             slots.insert(path.to_string(), (array.clone(), v.clone()));
         }
     }
+    let rng = Array::load_safetensors(dir.join("random.safetensors"))
+        .context("reading the RNG state")?
+        .remove("key");
     Ok(Loaded {
         manifest,
         parameters,
         slots,
+        rng,
     })
 }
