@@ -1,12 +1,16 @@
 # torobi-engine
 
 Torobi's execution engine: interprets a GraphConfig on MLX (via mlx-rs).
-M1 state: a spike that trains linear regression from the Ruby-built graph.
+It runs what `Torobi::Models` describes, ModernBERT included, and it is
+what the Ruby extension holds.
+
+`torobi-engine`, the binary, is the same engine with a command line on it:
+one graph, one batch, gradients or a short training run. Useful when
+something aborts, because the trace is the engine's with no Ruby in it.
 
 ```
-ruby spike/gen.rb                        # graph.json + bindings.json
-cargo build --release -p torobi-engine   # the workspace shares ../target
-ruby spike/verify.rb                     # closed-form oracle + SGD run
+rake engine:check    # from the repository root: build it, and hold it to
+                     # closed-form gradients (engine/check)
 ```
 
 The Ruby extension is built separately, through `rake compile` at the

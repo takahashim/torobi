@@ -1,20 +1,34 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# M1 spike, half two: hold the engine against a closed-form oracle. Linear
-# regression with mse has exact gradients, so this is a mathematical oracle
-# with no framework behind it. Then train 200 SGD steps and require the
-# loss to collapse.
+# The engine held to exact arithmetic, through the command line.
+#
+# Linear regression with mse has closed-form gradients, so what the engine
+# says is compared with what the maths says rather than with another
+# implementation: no framework behind the answer, and nothing recorded that
+# could go stale (`test/oracle/` is the other kind, recorded from kohagi).
+# Then 200 SGD steps, and the loss has to collapse.
+#
+# Through `torobi-engine`, the command-line face of the engine, which is
+# the only way to run it with no Ruby in the picture. That is worth having
+# when MLX aborts: the trace is the engine's alone. It is also the only
+# thing that exercises that binary, so this check is what keeps it honest.
+#
+#   rake engine:check
 
 require "json"
 
 dir = __dir__
 # The workspace shares one target directory (see the root Cargo.toml).
-engine = File.expand_path("../../target/release/torobi-engine", dir)
+# Debug by default: the tests build it anyway, and this is about what the
+# engine answers rather than how fast.
+engine = %w[debug release]
+         .map { |profile| File.expand_path("../../target/#{profile}/torobi-engine", dir) }
+         .find { |path| File.exist?(path) }
 graph = File.join(dir, "graph.json")
 bindings_path = File.join(dir, "bindings.json")
-abort "run gen.rb first" unless File.exist?(bindings_path)
-abort "build the engine first (cargo build --release)" unless File.exist?(engine)
+abort "run generate.rb first" unless File.exist?(bindings_path)
+abort "build the engine first (cargo build -p torobi-engine)" unless engine
 
 b = JSON.parse(File.read(bindings_path))
 rows = ->(t) { t["data"].each_slice(t["shape"][1] || 1).to_a }
@@ -52,4 +66,4 @@ final = lines.last.fetch("final_loss")
 puts format("train: loss %.4f -> %.6f over 200 steps", first, final)
 raise "loss did not collapse" unless final < first * 0.05
 
-puts "M1 spike: OK"
+puts "engine check: OK"

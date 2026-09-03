@@ -1,9 +1,13 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# M1 spike, half one: build the linear-regression GraphConfig with the DSL
-# and write deterministic synthetic data beside it. The engine and the
-# verifier both read exactly these files.
+# The graph and the data `verify.rb` holds the engine to: linear regression
+# built with the DSL, and deterministic synthetic rows beside it.
+#
+# Written every time rather than committed. They were committed once, and
+# by the time anyone looked the DSL had started naming nodes while the
+# committed graph had not: the check passed, against a shape the DSL no
+# longer produces.
 
 require_relative "../../lib/torobi"
 require "json"

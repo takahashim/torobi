@@ -7,6 +7,9 @@
 # an unanchored rule is the only one that covers the next one. engine/target
 # reached the history once, with a 100 MB metallib inside it.
 target/
-engine/spike/*.json
+# Written by engine/check/generate.rb every time the check runs. Committed
+# once, and by the time anyone looked the DSL had moved and the check was
+# holding the engine to a shape it no longer produces.
+engine/check/*.json
 lib/torobi/torobi.bundle
 lib/torobi/mlx.metallib

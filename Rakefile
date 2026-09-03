@@ -108,6 +108,19 @@ end
 desc "regenerate every oracle artifact"
 task oracle: ["oracle:ruri", "oracle:reranker", "oracle:forward"]
 
+# The engine held to exact arithmetic, through its command line
+# (engine/check). Part of the default task: it is cheap, it is the only
+# thing that runs the `torobi-engine` binary, and a check nobody runs is
+# not a check.
+namespace :engine do
+  desc "run the engine's command line against a closed-form oracle"
+  task :check do
+    sh "cargo build -q -p torobi-engine --bin torobi-engine"
+    sh RbConfig.ruby, "engine/check/generate.rb"
+    sh RbConfig.ruby, "engine/check/verify.rb"
+  end
+end
+
 # M1's last exit condition (docs/plan.md section 9.1): the gem installs
 # somewhere clean and takes a step there.
 #
@@ -141,4 +154,4 @@ Minitest::TestTask.create
 
 task compile: [] # defined by RbSys::ExtensionTask above
 task test: %i[compile metallib]
-task default: %i[test rust_test rust_test:facade]
+task default: %i[test rust_test rust_test:facade engine:check]
