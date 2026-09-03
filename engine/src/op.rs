@@ -58,6 +58,7 @@ pub enum Op {
     Rope { theta: f32 },
 
     Transpose(Vec<i32>),
+    Reshape(Vec<i32>),
     Slice { axis: i32, start: i32, length: i32 },
     Mean { axes: Option<Vec<i32>>, keepdims: bool },
     Sum { axes: Option<Vec<i32>>, keepdims: bool },
@@ -123,6 +124,18 @@ impl Op {
                 theta: number(attributes, "theta")?,
             },
             "transpose" => Op::Transpose(integers(attributes, "axes")?),
+            "reshape" => {
+                let shape = integers(attributes, "shape")?;
+                anyhow::ensure!(
+                    shape.iter().filter(|d| **d == -1).count() <= 1,
+                    "reshape: only one dimension may be -1, got {shape:?}"
+                );
+                anyhow::ensure!(
+                    shape.iter().all(|d| *d > 0 || *d == -1),
+                    "reshape: a shape is positive integers and at most one -1, got {shape:?}"
+                );
+                Op::Reshape(shape)
+            }
             "slice" => Op::Slice {
                 axis: integer(attributes, "axis")?,
                 start: integer(attributes, "start")?,
@@ -437,6 +450,16 @@ mod tests {
         );
         assert!(e.contains("1 inputs"), "{e}");
         assert!(e.contains("takes 2"), "{e}");
+    }
+
+    #[test]
+    fn a_reshape_naming_two_free_dimensions_is_refused() {
+        let e = refusal(
+            vec![node(0, "reshape", &["input:0"], json!({"shape": [-1, -1]}))],
+            &[("loss", "node:0")],
+            0,
+        );
+        assert!(e.contains("only one dimension may be -1"), "{e}");
     }
 
     #[test]

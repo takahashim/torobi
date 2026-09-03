@@ -180,6 +180,7 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
         Op::Rope { theta } => rope(&ins[0], *theta)?,
 
         Op::Transpose(axes) => ins[0].transpose_axes(axes)?,
+        Op::Reshape(shape) => ins[0].reshape(shape)?,
         Op::Slice {
             axis,
             start,
@@ -413,6 +414,19 @@ mod tests {
             v
         };
         close(&got, &want);
+    }
+
+    #[test]
+    fn reshape_rearranges_without_moving_anything() {
+        // What multi-head attention needs: [seq, heads * head] becomes
+        // [seq, heads, head], reading in order.
+        let got = output(
+            "reshape",
+            &[2, 4],
+            serde_json::json!({"shape": [2, 2, 2]}),
+            &[&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]],
+        );
+        close(&got, &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
     }
 
     #[test]

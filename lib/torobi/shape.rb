@@ -6,6 +6,14 @@ module Torobi
   # concrete dimensions must match exactly. Everything raises ConfigError
   # naming the node and op, so a shape mistake is reported at build time.
   module Shape
+    # The rules this module implements, which must be exactly the set
+    # `config/ops.yml` names. Declared rather than left implicit in the
+    # dispatch below, so the two can be compared instead of remembered.
+    RULES = %i[
+      parameter same_as_input broadcast transpose reshape slice reduce
+      matmul take sdpa
+    ].freeze
+
     module_function
 
     # Returns [shape, dtype] for one emission.
@@ -15,6 +23,7 @@ module Torobi
       when :same_as_input then same_as_input(inputs, where:)
       when :broadcast then binary(inputs, where:)
       when :transpose then transpose(inputs, attrs, where:)
+      when :reshape then reshape(inputs, attrs, where:)
       when :slice then slice(inputs, attrs, where:)
       when :reduce then reduce(inputs, attrs, where:)
       when :matmul then matmul(inputs, where:)
@@ -59,6 +68,55 @@ module Torobi
 
     def same_as_input(inputs, where:)
       [inputs.first.shape, same_dtype(inputs, where:)]
+    end
+
+    # One dimension may be -1 and takes whatever is left over.
+    #
+    # A symbolic dimension can only go there: nothing else can stand for
+    # "however many rows this batch has". So a reshape of a symbolic input
+    # must name a -1, and the concrete part has to be preserved exactly,
+    # which is a check worth having rather than a formality.
+    def reshape(inputs, attrs, where:)
+      from = inputs.first.shape
+      target = attrs.fetch("shape")
+      inferred = target.count(-1)
+      if inferred > 1
+        raise ConfigError, "#{where}: only one dimension may be -1, got #{target.inspect}"
+      end
+      if target.any? { |d| !d.is_a?(Integer) || (d < 1 && d != -1) }
+        raise ConfigError, "#{where}: a shape is positive integers and at most one -1, " \
+                           "got #{target.inspect}"
+      end
+
+      known = target.reject { |d| d == -1 }.reduce(1, :*)
+      if from.include?(nil)
+        unless inferred == 1
+          raise ConfigError,
+                "#{where}: #{from.inspect} has a symbolic dimension, so the target " \
+                "must name a -1 for it to go into (got #{target.inspect})"
+        end
+        concrete = from.compact.reduce(1, :*)
+        unless concrete == known
+          raise ConfigError,
+                "#{where}: #{from.inspect} holds #{concrete} per symbolic step and " \
+                "#{target.inspect} wants #{known}"
+        end
+        return [target.map { |d| d == -1 ? nil : d }, inputs.first.dtype]
+      end
+
+      total = from.reduce(1, :*)
+      if inferred.zero?
+        unless total == known
+          raise ConfigError, "#{where}: #{from.inspect} holds #{total}, " \
+                             "#{target.inspect} wants #{known}"
+        end
+        return [target, inputs.first.dtype]
+      end
+      unless known.positive? && (total % known).zero?
+        raise ConfigError, "#{where}: #{from.inspect} holds #{total}, which does not " \
+                           "divide into #{target.inspect}"
+      end
+      [target.map { |d| d == -1 ? total / known : d }, inputs.first.dtype]
     end
 
     def binary(inputs, where:)

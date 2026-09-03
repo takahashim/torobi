@@ -130,10 +130,16 @@ class DslTest < Minitest::Test
   end
 
   def test_the_manifest_and_the_ruby_side_agree
-    known_rules = %i[parameter same_as_input broadcast transpose slice reduce matmul take sdpa]
     Torobi::Ops::REGISTRY.each_value do |spec|
-      assert_includes known_rules, spec.shape_rule, "op #{spec.name} has an unknown shape rule"
+      assert_includes Torobi::Shape::RULES, spec.shape_rule,
+                      "op #{spec.name} has an unknown shape rule"
     end
+    # And nothing in Shape that no op asks for: a rule with no op is a rule
+    # nobody has checked.
+    asked_for = Torobi::Ops::REGISTRY.each_value.map(&:shape_rule).uniq
+
+    assert_empty Torobi::Shape::RULES - asked_for,
+                 "Shape implements rules no op names"
     Torobi::Ops.handle_ops.each do |spec|
       assert Torobi::DSL::Handle.method_defined?(spec.name),
              "manifest marks #{spec.name} as a handle op, but Handle does not define it"

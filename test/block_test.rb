@@ -24,6 +24,35 @@ class BlockTest < Minitest::Test
     skip "extension not compiled" unless defined?(Torobi::Session)
   end
 
+  # The shape a real encoder block has: one projection to q, k and v, the
+  # heads split out and put in front, rotary positions, attention, and the
+  # heads folded back. Everything M3b needs except the stack.
+  def multi_head_block
+    heads = HEADS
+    head_dim = DIM / HEADS
+    Torobi.graph do |g|
+      x = g.input :x, [nil, SEQ, DIM]
+      target = g.input :y, [nil, SEQ, DIM]
+
+      normed = g.layer_norm(x, name: "attn_norm")
+      q, k, v = g.linear(normed, DIM * 3, name: "wqkv", bias: false).split(3, axis: -1)
+      # [batch, seq, dim] -> [batch, heads, seq, head] so attention runs
+      # per head and the batch dimension stays symbolic.
+      to_heads = lambda do |h|
+        h.reshape(shape: [-1, SEQ, heads, head_dim]).transpose(axes: [0, 2, 1, 3])
+      end
+      # Rotary positions go on the queries and the keys, not the values.
+      attended = g.sdpa(to_heads.call(q).rope(theta: 10_000.0),
+                        to_heads.call(k).rope(theta: 10_000.0),
+                        to_heads.call(v))
+      folded = attended.transpose(axes: [0, 2, 1, 3]).reshape(shape: [-1, SEQ, DIM])
+      x = x + g.linear(folded, DIM, name: "wo", bias: false)
+
+      x = x + g.geglu(g.layer_norm(x, name: "mlp_norm"), DIM * 2, name: "mlp")
+      g.output :loss, g.mse(x, target)
+    end
+  end
+
   # attention over one head group, then a GeGLU, each with a residual and a
   # norm. The shapes are small on purpose: finite differences cost one
   # forward per parameter element, twice.
@@ -44,7 +73,7 @@ class BlockTest < Minitest::Test
     end
   end
 
-  def config = Torobi::GraphConfig.new(models: { "m" => block })
+  def config = Torobi::GraphConfig.new(models: { "m" => @graph || block })
 
   # Deterministic and small, so a difference is the engine's rather than
   # the data's.
@@ -81,6 +110,35 @@ class BlockTest < Minitest::Test
   # differentiating. Central differences, at a step chosen so that
   # truncation and f32 rounding are both small.
   def test_every_gradient_agrees_with_central_differences
+    check_gradients_against_differences
+  end
+
+  # The same, over the shape a real encoder has: heads split out with
+  # reshape, rotary positions, attention per head, heads folded back. The
+  # ops M3b adds are exactly the ones a single-head block does not reach.
+  def test_a_multi_head_block_agrees_with_central_differences
+    @graph = multi_head_block
+    check_gradients_against_differences
+  end
+
+  # A block trains: the loss falls, and it falls on parameters that moved.
+  def test_a_block_trains
+    b = batch
+    Torobi::Session.open(config, weights: weights,
+                         optimizer: { kind: :adamw, lr: 0.02 }) do |s|
+      before = s.evaluate(b)
+      before_weight = s.fetch("m.q.weight")[:data]
+      s.repeat(b, steps: 30)
+      after = s.evaluate(b)
+
+      assert_operator after, :<, before * 0.9, "the block should learn its own batch"
+      refute_equal before_weight, s.fetch("m.q.weight")[:data]
+    end
+  end
+
+  private
+
+  def check_gradients_against_differences
     @differences_batch = batch
     b = @differences_batch
     Torobi::Session.open(config, weights: weights) do |s|
@@ -115,23 +173,6 @@ class BlockTest < Minitest::Test
                       "#{worst[:path]}[#{worst[:at]}] disagrees with the forward"
     end
   end
-
-  # A block trains: the loss falls, and it falls on parameters that moved.
-  def test_a_block_trains
-    b = batch
-    Torobi::Session.open(config, weights: weights,
-                         optimizer: { kind: :adamw, lr: 0.02 }) do |s|
-      before = s.evaluate(b)
-      before_weight = s.fetch("m.q.weight")[:data]
-      s.repeat(b, steps: 30)
-      after = s.evaluate(b)
-
-      assert_operator after, :<, before * 0.9, "the block should learn its own batch"
-      refute_equal before_weight, s.fetch("m.q.weight")[:data]
-    end
-  end
-
-  private
 
   # Up to four positions, spread across the parameter.
   def sample(size)

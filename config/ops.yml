@@ -120,6 +120,16 @@
   inputs: 1
   attributes: { axes: int_list }
   shape_rule: transpose
+  handle: true
+# Multi-head attention is the reason this exists: [batch, seq, heads*head]
+# has to become [batch, seq, heads, head] before the transpose that puts
+# heads in front. One dimension may be -1, and it takes whatever is left,
+# including a symbolic batch.
+- name: reshape
+  inputs: 1
+  attributes: { shape: int_list }
+  shape_rule: reshape
+  handle: true
 - name: slice
   inputs: 1
   attributes: { axis: int, start: int, length: int }

@@ -1064,6 +1064,37 @@ fail closed で、この milestone が問うている誤り(forward は正しく
 
 この時点で Ruby 178 件 / Rust 107 件。
 
+### 15.16 M3b の下ごしらえ: reshape と multi-head(2026-09-03)
+
+M3b(ModernBERT)を DSL で書こうとして、**`reshape` が語彙に無い**ことが分かった。
+multi-head attention は [batch, seq, heads*head] を [batch, seq, heads, head] にして
+から heads を前に出すので、これが無いと 1 head しか書けない。`transpose` も
+`handle: true` になっておらず、`linear` の中からしか使えなかった。
+
+`reshape` を 3 面(`config/ops.yml`、Ruby の形推論、engine)に足した。**-1 は 1 つだけ**
+許し、そこに残りが入る。symbolic な batch 次元は -1 にしか入れられないので、symbolic な
+入力の reshape は -1 を名指すことを要求し、concrete 部分の一致も検査する。形の間違いを
+build 時に言うための検査であって、形式ではない。
+
+`transpose` も handle op にした。
+
+**multi-head ブロックが書けて、勾配が中心差分と一致した**。wqkv 1 本 → split →
+reshape で heads を出す → transpose で前に出す → rope(q と k のみ) → sdpa →
+transpose で戻す → reshape で畳む → wo。39 ノード、6 パラメータ。§15.15 の
+single-head と同じ閾値 1e-4 で通っている。
+
+途中で `test_the_manifest_and_the_ruby_side_agree` が落ちた。この検査は shape rule の
+一覧を**テストが手書きで持っていた**ので、`Shape::RULES` として `Shape` 自身に宣言させ、
+テストは 2 つの実物を突き合わせる形にした。あわせて「どの op も名指さない rule が
+Shape にある」ことも見るようにした。誰も検査していない rule は無いのと同じである。
+
+**残る M3b**: ModernBERT 本体(埋め込み + ブロックの積み重ね + local/global の交替)、
+tiny dataset の過学習、memory 予算の実測、そして forward / gradient の parity。
+最後の 1 つは Python MLX oracle を要り、この機械にはまだ入っていない(§12 の層 4、
+§10)。
+
+この時点で Ruby 179 件 / Rust 109 件。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。
