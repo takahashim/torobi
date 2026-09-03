@@ -104,6 +104,22 @@ runner.stop              # asks it to stop at the next step boundary
 runner.wait.finished?    # => true
 ```
 
+## Development
+
+```
+bundle exec rake     # rubocop, the Ruby tests, the engine's Rust tests, engine:check
+bundle exec rake smoke   # build the gem, install it somewhere clean, take a step there
+```
+
+The Ruby tests build the extension, which links a prebuilt MLX fetched
+once and checked against the digest in `ext/torobi/mlx_prebuilt.json`
+(`rake mlx:pin` moves it). CI runs the same `rake` on a `macos-15`
+runner, on the oldest Ruby the gemspec claims and on the newest.
+
+`.rubocop.yml` says which rules are on and why the rest are not. What is
+off is the part that would argue about design; what is on is the part a
+reader cannot be relied on to catch.
+
 ## Status
 
 The milestones in [docs/plan.md](docs/plan.md) section 9.1 are met

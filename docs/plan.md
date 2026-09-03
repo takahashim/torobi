@@ -2279,6 +2279,49 @@ pooling 側 (`test/pooling_test.rb`) は padding 不変性を **seq 6 と seq 3 
 
 この時点で Ruby 246 件 / Rust 122 + 37 件。
 
+### 15.46 lint と CHANGELOG と CI(2026-09-04)
+
+リポジトリ衛生として残していた 3 つ。
+
+**rubocop。** 方針は「**slip を捕まえるためのもので、style を裁定するものではない**」。
+残したのは読み手が見落とす類 (shadow された変数、`IO.read` のような引数次第で
+コマンドになるもの、隣り合う行で変わる quote)。切ったのは `.rubocop.yml` に理由を
+書いた上で:
+
+| 切ったもの | 理由 |
+| --- | --- |
+| `Metrics/*` 全部 | 大きさは「それが何であるか」の問いで、この repo はレビューと plan.md で答えている。1 つのアーキテクチャを記述するメソッドは、アーキテクチャが長いから長い |
+| `Minitest/AssertTruthy` / `RefuteFalse` | `assert_equal true, x` は「値が `true` である」、`assert x` は「nil でも false でもない」。JSON 越しには別の主張で、狭い方を言っている |
+| `Minitest/MultipleAssertions` | 1 つの主張を数文で言っている |
+| `Gemspec/DevelopmentDependencies` | dev 依存は gemspec に置く (何のためのものかの隣に置く) |
+
+`Layout/LineLength` は **120 ではなく 100** にした。デフォルトはこの repo の
+どのコードより広く、それだと誰も決めないまま行が伸びる。
+
+自動修正で 383 行動いた。手で直したのは 3 つだけである:
+
+- `grad_cache_test` の `open` ヘルパが `Kernel#open` と衝突して `Security/Open` が
+  鳴っていた。cop の false positive ではあるが、**名前の方が悪い**ので
+  `open_encoder` にした。
+- `Runner` の journal は run の間ずっと開いたままにするのが正しいので、
+  `Style/FileOpen` は理由付きの inline disable。
+- 100 文字を超えた 3 か所は中間変数に切り出した (深い入れ子の hash literal)。
+
+78 files / 0 offenses。`rake` の先頭に置いた (5 秒で、残りは compile)。
+
+**CHANGELOG.md。** まだ 1 度もリリースしていないので、「版の間で何が動いたか」ではなく
+**「0.0.1 が何を持つか」**を書いた。理由は plan.md §15 に残す、という分担も書いてある。
+
+**CI (`.github/workflows/ci.yml`)。** macos-15 で `bundle exec rake` を、Ruby 3.2
+(gemspec が主張する下限) と 3.4 で。**Metal toolchain を入れないのが要点**で、
+入れてしまうと install が通る経路ではない道を試すことになる。prebuilt MLX の cache
+key は pin ファイルの hash なので、pin を動かすと自動で外れる。`rake smoke` と
+oracle 系は入れていない (前者は gem をもう一度建てるので数分、後者は公開
+checkpoint がディスクに要る)。
+
+**まだ 1 度も走っていない。** mlx-prebuilt のときと同じで、最初の 1 回が
+「image に何があるか」を確かめる回になる。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。
