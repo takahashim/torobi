@@ -30,11 +30,20 @@ module Torobi
     #
     # `optimizer` is data, so that a journal and a checkpoint can record
     # exactly what ran: {kind: :adamw, lr: 1e-3, weight_decay: 0.01}.
-    def self.open(config, weights, optimizer: DEFAULT_OPTIMIZER)
+    #
+    # `journal:` records what happened, for the replay of docs/plan.md
+    # section 8.6. Pass a Journal, or `io:` to have one made against this
+    # config's provenance; without either, nothing is recorded and the
+    # session is exactly as fast.
+    def self.open(config, weights, optimizer: DEFAULT_OPTIMIZER, journal: nil, io: nil,
+                  dataset: nil)
       Preflight.check!
       native = Native::Session.open(config.canonical_json, JSON.generate(weights),
                                     JSON.generate(optimizer))
-      session = new(native)
+      journal ||= Journal.new(Provenance.of(config, dataset:, extra: { "optimizer" => optimizer }),
+                              io:) if io
+      session = new(native, journal:)
+      journal&.note(step: 0, event: "opened", optimizer: optimizer.transform_keys(&:to_s))
       return session unless block_given?
 
       begin
@@ -46,15 +55,22 @@ module Torobi
       end
     end
 
-    def initialize(native)
+    def initialize(native, journal: nil)
       @native = native
+      @journal = journal
     end
+
+    # What this session is recording into, if anything.
+    attr_reader :journal
 
     # One step on `batch`, a Hash of input name => {shape:, data:}. Returns
     # the loss. The GVL is released for the step, so other Ruby threads
     # proceed.
     def step!(batch)
-      @native.run_step(Batch.pack(batch))
+      loss = @native.run_step(Batch.pack(batch))
+      @journal&.span(steps: 1, loss:, step: @native.step,
+                     batches_digest: Provenance.digest_of(batch.keys.map(&:to_s)))
+      loss
     end
 
     # Hands several batches to the engine at once, which runs them without
@@ -91,6 +107,7 @@ module Torobi
       raise ArgumentError, "this session is closed" if closed?
       empty = true
 
+      started = @native.step
       batches.each do |batch|
         empty = false
         loss = step!(batch)
@@ -98,6 +115,8 @@ module Torobi
       end
       raise ArgumentError, "a span needs at least one batch" if empty
 
+      @journal&.note(step: @native.step, event: "span", steps: @native.step - started,
+                     loss: @native.loss)
       @native.loss
     end
 
@@ -121,18 +140,37 @@ module Torobi
     # lets a resumed run take the same ones (docs/plan.md section 11.1).
     def seed = @native.seed
 
-    # Knobs take effect from the next step.
+    # Knobs take effect from the next step, and are recorded: a journal
+    # that holds the decisions is what a replay applies (docs/plan.md 8.6).
     def adjust(lr: nil, seed: nil)
-      @native.lr = lr if lr
-      @native.seed = seed if seed
+      turned = {}
+      if lr
+        @native.lr = lr
+        turned[:lr] = lr
+      end
+      if seed
+        @native.seed = seed
+        turned[:seed] = seed
+      end
+      @journal&.adjust(step: @native.step, **turned) unless turned.empty?
       self
+    end
+
+    # Records what the window read. A policy that reads and then decides
+    # has the reading as its input, so a deterministic rerun is held to it
+    # (docs/plan.md section 8.5).
+    def observe(**values)
+      @journal&.observe(step: @native.step, **values)
+      values
     end
 
     # Writes the run's state to `dir`, atomically: parameters, optimizer
     # slots, the step counts, and the digest of the description they belong
     # to. Returns the path. Interrupting it leaves no half-checkpoint.
     def checkpoint!(dir)
-      @native.save(dir.to_s)
+      path = @native.save(dir.to_s)
+      @journal&.checkpoint(path:, step: @native.step)
+      path
     end
 
     # Restores what `checkpoint!` wrote. Refuses a checkpoint from another
@@ -140,6 +178,7 @@ module Torobi
     # absorbing the difference.
     def restore(dir)
       @native.restore(dir.to_s)
+      @journal&.note(step: @native.step, event: "restored", path: dir.to_s)
       self
     end
 
@@ -147,7 +186,15 @@ module Torobi
     # every call refuses rather than pretending. Returns whether this call
     # was the one that closed it.
     def close
-      @native.close
+      # Read the counter before closing: afterwards the session refuses,
+      # which is the point of closing.
+      last_step = @native.closed? ? nil : @native.step
+      closed = @native.close
+      if closed
+        @journal&.note(step: last_step, event: "closed")
+        @journal&.close
+      end
+      closed
     end
 
     def closed? = @native.closed?
@@ -156,6 +203,39 @@ module Torobi
     # cannot be trusted to hold consistent state, so nothing more is
     # attempted with it; open a new one, from a checkpoint if there is one.
     def poisoned? = @native.poisoned?
+
+    # Stops training what matches `pattern`: a path, or a prefix ending in
+    # `*` ("student.layers.3.*"). Returns the paths that moved.
+    #
+    # Not a scalar knob (docs/plan.md 5A.1): it changes what autodiff
+    # differentiates, so the optimizer's slots follow - kept for what
+    # stays, dropped for what freezes, started at zero for what thaws. It
+    # takes effect from the next step, like every knob, and is recorded.
+    def freeze!(pattern)
+      moved = @native.set_frozen(pattern.to_s, true)
+      @journal&.adjust(step: @native.step, freeze: pattern.to_s, moved:) unless moved.empty?
+      moved
+    end
+
+    # The reverse: gradual unfreezing is the usual reason.
+    def unfreeze!(pattern)
+      moved = @native.set_frozen(pattern.to_s, false)
+      @journal&.adjust(step: @native.step, unfreeze: pattern.to_s, moved:) unless moved.empty?
+      moved
+    end
+
+    # What is being trained right now, by qualified path.
+    def trainable = @native.trainable
+
+    # Writes one parameter from a copy: {shape:, data:, dtype:}. The
+    # window's writing half, and recorded by digest rather than by value -
+    # a journal names what was written without holding it.
+    def put(path, tensor)
+      packed = Batch.pack({ path.to_s => tensor }).fetch(path.to_s)
+      @native.put(path.to_s, packed)
+      @journal&.put(path: path.to_s, digest: Provenance.digest_of(packed[2]))
+      self
+    end
 
     def parameter_paths = @native.parameter_paths
     def input_names = @native.input_names

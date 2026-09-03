@@ -225,6 +225,35 @@ impl Session {
         })
     }
 
+    /// Freezes or unfreezes what matches `pattern`; returns what moved.
+    fn set_frozen(
+        ruby: &Ruby,
+        rb_self: &Self,
+        pattern: String,
+        frozen: bool,
+    ) -> Result<RArray, Error> {
+        let moved = rb_self.with_engine(ruby, true, |engine| {
+            engine.set_frozen(&pattern, frozen)
+        })?;
+        Ok(ruby.ary_from_vec(moved))
+    }
+
+    fn trainable(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
+        let paths = rb_self.read(ruby, |engine| engine.trainable())?;
+        Ok(ruby.ary_from_vec(paths))
+    }
+
+    /// Writes one parameter from a copy: [dtype, shape, packed].
+    fn put(ruby: &Ruby, rb_self: &Self, path: String, tensor: RArray) -> Result<(), Error> {
+        let one = ruby.hash_new();
+        one.aset(path.clone(), tensor)?;
+        let mut batch = read_batch(ruby, one)?;
+        let tensor = batch
+            .remove(&path)
+            .ok_or_else(|| Error::new(ruby.exception_arg_error(), "no tensor given"))?;
+        rb_self.with_engine(ruby, true, |engine| engine.put(&path, &tensor))
+    }
+
     fn parameter_paths(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
         let paths = rb_self.read(ruby, |engine| engine.parameter_paths())?;
         Ok(ruby.ary_from_vec(paths))
@@ -347,6 +376,9 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("lr=", method!(Session::set_lr, 1))?;
     class.define_method("seed", method!(Session::seed, 0))?;
     class.define_method("seed=", method!(Session::set_seed, 1))?;
+    class.define_method("set_frozen", method!(Session::set_frozen, 2))?;
+    class.define_method("trainable", method!(Session::trainable, 0))?;
+    class.define_method("put", method!(Session::put, 2))?;
     class.define_method("parameter_paths", method!(Session::parameter_paths, 0))?;
     class.define_method("input_names", method!(Session::input_names, 0))?;
     class.define_method("fetch", method!(Session::fetch, 1))?;

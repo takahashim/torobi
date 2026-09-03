@@ -147,8 +147,12 @@ pub struct Session {
     params: Vec<Array>,
     /// Qualified paths ("student.head.weight"), parallel to `params`.
     paths: Vec<String>,
-    /// Positions in `params` that autodiff differentiates.
+    /// Positions in `params` that autodiff differentiates now. Moves when
+    /// the window freezes or unfreezes something.
     argnums: Vec<i32>,
+    /// Positions the config declared trainable at all: the set `argnums`
+    /// is a subset of, and the bounds freezing moves within.
+    candidates: Vec<i32>,
     /// The update rule and its slots. Half of what a checkpoint restores.
     optimizer: Optimizer,
     /// The digest of the GraphConfig this session runs, so a checkpoint can
@@ -226,7 +230,9 @@ impl Session {
 
         let optimizer = Optimizer::new(optimizer, &params, &argnums)?;
         let seed = 0;
+        let candidates = argnums.clone();
         Ok(Self {
+            candidates,
             rng: mlx_rs::random::key(seed)?,
             seed,
             models,
@@ -272,6 +278,91 @@ impl Session {
     pub fn set_seed(&mut self, seed: u64) -> Result<()> {
         self.seed = seed;
         self.rng = mlx_rs::random::key(seed)?;
+        Ok(())
+    }
+
+    /// Which parameters are currently differentiated, by qualified path.
+    pub fn trainable(&self) -> Vec<String> {
+        self.argnums
+            .iter()
+            .map(|&i| self.paths[i as usize].clone())
+            .collect()
+    }
+
+    /// Every parameter a model declared trainable, whether or not it is
+    /// frozen right now: the set `freeze` and `unfreeze` move within.
+    pub fn trainable_candidates(&self) -> Vec<String> {
+        self.candidates
+            .iter()
+            .map(|&i| self.paths[i as usize].clone())
+            .collect()
+    }
+
+    /// Freezes or unfreezes parameters whose path matches `pattern`, and
+    /// returns those that moved.
+    ///
+    /// Not a scalar knob (docs/plan.md section 5A.1): changing it changes
+    /// what autodiff differentiates, so the optimizer's slots have to
+    /// follow - kept for what stays, dropped for what freezes, started at
+    /// zero for what thaws. Which is why this lives here rather than in a
+    /// setter.
+    pub fn set_frozen(&mut self, pattern: &str, frozen: bool) -> Result<Vec<String>> {
+        let mut matcher = Pattern::parse(pattern)?;
+        let mut wanted: Vec<i32> = Vec::new();
+        let mut moved = Vec::new();
+        for &i in &self.candidates {
+            let path = &self.paths[i as usize];
+            let matches = matcher.matches(path);
+            let currently = self.argnums.contains(&i);
+            let next = if matches { !frozen } else { currently };
+            if next != currently {
+                moved.push(path.clone());
+            }
+            if next {
+                wanted.push(i);
+            }
+        }
+        anyhow::ensure!(
+            !moved.is_empty() || matcher.matched_any,
+            "no parameter matches {pattern:?} (this run has {:?})",
+            self.trainable_candidates()
+        );
+        if moved.is_empty() {
+            return Ok(moved);
+        }
+        anyhow::ensure!(
+            !wanted.is_empty(),
+            "freezing {pattern:?} would leave nothing to train"
+        );
+
+        self.optimizer.refit(&self.argnums, &wanted, &self.params)?;
+        self.argnums = wanted;
+        Ok(moved)
+    }
+
+    /// Writes one parameter, by qualified path, from a copy. The window's
+    /// B capability (docs/plan.md section 8.3).
+    pub fn put(&mut self, path: &str, tensor: &Tensor) -> Result<()> {
+        let index = self
+            .paths
+            .iter()
+            .position(|p| p == path)
+            .with_context(|| format!("no parameter named {path:?}"))?;
+        let array = tensor.to_array();
+        anyhow::ensure!(
+            array.shape() == self.params[index].shape(),
+            "parameter {path:?}: given shape {:?} is not {:?}",
+            array.shape(),
+            self.params[index].shape()
+        );
+        anyhow::ensure!(
+            array.dtype() == self.params[index].dtype(),
+            "parameter {path:?}: given {:?}, holds {:?}",
+            array.dtype(),
+            self.params[index].dtype()
+        );
+        eval(std::iter::once(&array))?;
+        self.params[index] = array;
         Ok(())
     }
 
@@ -655,6 +746,45 @@ impl Session {
         self.last_loss = loss.item::<f32>();
         self.step += 1;
         Ok(self.last_loss)
+    }
+}
+
+/// A freeze pattern: a path, or a prefix ending in `*`.
+///
+/// Deliberately small. A path names one parameter, `student.*` names a
+/// model's, `student.layers.3.*` names a block's; anything more expressive
+/// would be a query language nobody asked for.
+struct Pattern {
+    prefix: String,
+    exact: bool,
+    matched_any: bool,
+}
+
+impl Pattern {
+    fn parse(pattern: &str) -> Result<Self> {
+        anyhow::ensure!(!pattern.is_empty(), "a freeze pattern must not be empty");
+        Ok(match pattern.strip_suffix('*') {
+            Some(prefix) => Self {
+                prefix: prefix.to_string(),
+                exact: false,
+                matched_any: false,
+            },
+            None => Self {
+                prefix: pattern.to_string(),
+                exact: true,
+                matched_any: false,
+            },
+        })
+    }
+
+    fn matches(&mut self, path: &str) -> bool {
+        let hit = if self.exact {
+            path == self.prefix
+        } else {
+            path.starts_with(&self.prefix)
+        };
+        self.matched_any |= hit;
+        hit
     }
 }
 

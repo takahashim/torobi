@@ -111,6 +111,41 @@ impl Optimizer {
         (&self.m, &self.v)
     }
 
+    /// Moves the slots to follow a change in what is differentiated:
+    /// kept for parameters that stay, dropped for those that freeze,
+    /// started at zero for those that thaw.
+    ///
+    /// The step count is not reset. A thawed parameter joins a run in
+    /// progress, and its bias correction is that run's, not a new one's.
+    pub fn refit(&mut self, was: &[i32], now: &[i32], params: &[Array]) -> Result<()> {
+        if !self.wants_slots() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            self.m.len() == was.len(),
+            "the optimizer has {} slots for {} parameters",
+            self.m.len(),
+            was.len()
+        );
+        let mut m = Vec::with_capacity(now.len());
+        let mut v = Vec::with_capacity(now.len());
+        for &i in now {
+            match was.iter().position(|&w| w == i) {
+                Some(slot) => {
+                    m.push(self.m[slot].clone());
+                    v.push(self.v[slot].clone());
+                }
+                None => {
+                    m.push(zeros_like(&params[i as usize])?);
+                    v.push(zeros_like(&params[i as usize])?);
+                }
+            }
+        }
+        self.m = m;
+        self.v = v;
+        Ok(())
+    }
+
     /// Restores state a checkpoint held. The shapes are the caller's to
     /// have checked against the parameters.
     pub fn restore(&mut self, m: Vec<Array>, v: Vec<Array>, t: u64) {
