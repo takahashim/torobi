@@ -37,7 +37,7 @@ module Torobi
     # 67 MB limit, and a step reaching 14.5 GB ran under a 9 GB one, thirteen
     # times slower than usual. MLX reads this as pressure on its cache, so
     # it reclaims earlier and keeps going. A run that must not pass a size
-    # wants `Torobi::Policies::MemoryGuard` as well, which reads `active`
+    # wants `Torobi::Policies::MemoryGuard` as well, which reads `peak`
     # between steps and stops.
     def limit=(bytes)
       Native.memory_limit = bytes

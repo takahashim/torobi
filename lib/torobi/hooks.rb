@@ -160,19 +160,32 @@ module Torobi
     # rather than failing). MLX treats the limit as pressure on its cache,
     # not as a ceiling.
     #
-    # So the ceiling has to be Ruby's. This reads what the device is
-    # holding between steps and raises when it passes `bytes`, which the
-    # run's process reports as a failure and the parent reads from the
-    # journal. On unified memory the alternative is the machine stopping
+    # So the ceiling has to be Ruby's. This reads the high-water mark
+    # between steps and raises when it passes `bytes`, which the run's
+    # process reports as a failure and the parent reads from the journal.
+    # On unified memory the alternative is the machine stopping
     # (docs/plan.md section 15.22), which no rescue sees.
     #
     #   s.use(Torobi::Policies::MemoryGuard.new(10 * 1024**3), every: 10)
     #
+    # **The peak, not what is held now.** Between steps a run holds its
+    # parameters and its optimizer; what it passes through in the middle
+    # of a step is several times that, and that is the number the machine
+    # reacts to. Measured on a small model: 101 MB held between steps
+    # against a 369 MB peak, and at ModernBERT sizes the gap is wider. A
+    # guard reading what is held would have watched a step touch 14.5 GB
+    # and said nothing.
+    #
+    # **It cannot stop a step in the middle.** No Ruby runs during one, so
+    # this fires at the first hook after the overshoot. Whether a shape
+    # fits at all is answered by running one step of it and reading the
+    # peak (bench/overfit.rb), not by this.
+    #
     # `every:` is worth using: reading costs a call through the runtime's
-    # gate, and device memory does not change between steps that are not
-    # taking any.
+    # gate. The peak is a high-water mark and is not reset here, so a
+    # sparser check still sees an overshoot between two of them.
     class MemoryGuard
-      # What the device was holding when this last looked.
+      # The high-water mark when this last looked.
       attr_reader :seen
 
       def initialize(bytes, on_limit: nil)
@@ -184,14 +197,16 @@ module Torobi
       end
 
       def call(event)
-        @seen = Torobi::Memory.active
+        @seen = Torobi::Memory.peak
         return if @seen <= @bytes
 
-        event.session.observe(memory_at: event.step, active: @seen, limit: @bytes)
+        event.session.observe(memory_at: event.step, peak: @seen, limit: @bytes)
         return @on_limit.call(event) if @on_limit
 
         raise Torobi::StepError,
-              "the device is holding #{@seen / 1024**2} MB at step #{event.step}, "               "past the #{@bytes / 1024**2} MB this run was given. Stopping here "               "rather than letting the machine find out"
+              "this run has passed through #{@seen / 1024**2} MB on the device by " \
+              "step #{event.step}, past the #{@bytes / 1024**2} MB it was given. " \
+              "Stopping here rather than letting the machine find out"
       end
     end
 

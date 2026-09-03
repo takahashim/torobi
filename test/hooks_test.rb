@@ -166,13 +166,20 @@ class HooksTest < Minitest::Test
     end
   end
 
-  # A limit nothing passes is a policy that does nothing.
-  def test_a_memory_guard_under_the_limit_is_quiet
+  # A limit nothing passes is a policy that does nothing, and what it
+  # watches is the high-water mark rather than what is held between steps.
+  # The two differ by more than a little: a step passes through several
+  # times what it leaves behind, and the larger number is the one the
+  # machine reacts to.
+  def test_a_memory_guard_under_the_limit_is_quiet_and_watches_the_peak
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
-      s.use(Torobi::Policies::MemoryGuard.new(4 * 1024**3))
+      guard = Torobi::Policies::MemoryGuard.new(4 * 1024**3)
+      s.use(guard)
       s.repeat(batch, steps: 3)
 
       assert_equal 3, s.step
+      assert_operator guard.seen, :>, Torobi::Memory.active
+      assert_equal Torobi::Memory.peak, guard.seen
     end
   end
 
