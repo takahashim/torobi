@@ -161,13 +161,16 @@ impl Session {
         rb_self.with_engine(ruby, true, |engine| engine.run_steps(&batches))
     }
 
-    /// Writes the run's state and returns where it landed.
-    fn save(ruby: &Ruby, rb_self: &Self, dir: String) -> Result<String, Error> {
-        rb_self.with_engine(ruby, true, |engine| engine.save(&dir))
+    /// Writes the run's state and returns where it landed. `run` is the
+    /// caller's own record (epoch, batch position, sampler state) as JSON;
+    /// the engine writes it verbatim and never reads it.
+    fn save(ruby: &Ruby, rb_self: &Self, dir: String, run: String) -> Result<String, Error> {
+        rb_self.with_engine(ruby, true, |engine| engine.save(&dir, &run))
     }
 
     /// Restores state written by `save`, refusing what does not belong.
-    fn restore(ruby: &Ruby, rb_self: &Self, dir: String) -> Result<(), Error> {
+    /// Returns the caller's record as JSON.
+    fn restore(ruby: &Ruby, rb_self: &Self, dir: String) -> Result<String, Error> {
         rb_self.with_engine(ruby, true, |engine| engine.restore(&dir))
     }
 
@@ -382,11 +385,22 @@ fn build_info(ruby: &Ruby) -> Result<Value, Error> {
     json_to_ruby(ruby, torobi_engine::build_info())
 }
 
+/// What a checkpoint says about itself, without opening it into a session.
+/// For a caller deciding which one to resume from, and for anyone asking
+/// what a directory on disk actually holds.
+fn checkpoint_manifest(ruby: &Ruby, dir: String) -> Result<Value, Error> {
+    let json = torobi_engine::Session::read_manifest(&dir).map_err(|e| to_error(ruby, e))?;
+    ruby.class_object()
+        .const_get::<_, magnus::RModule>("JSON")
+        .and_then(|module| module.funcall("parse", (json,)))
+}
+
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
     let torobi = ruby.define_module("Torobi")?;
     let native = torobi.define_module("Native")?;
     native.define_singleton_method("build_info", function!(build_info, 0))?;
+    native.define_singleton_method("checkpoint_manifest", function!(checkpoint_manifest, 1))?;
     native.define_singleton_method("memory", function!(memory, 0))?;
     native.define_singleton_method("clear_cache", function!(clear_cache, 0))?;
     native.define_singleton_method("memory_limit=", function!(set_memory_limit, 1))?;
@@ -395,7 +409,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_singleton_method("open", function!(Session::open, 3))?;
     class.define_method("run_step", method!(Session::run_step, 1))?;
     class.define_method("run_steps", method!(Session::run_steps, 1))?;
-    class.define_method("save", method!(Session::save, 1))?;
+    class.define_method("save", method!(Session::save, 2))?;
     class.define_method("restore", method!(Session::restore, 1))?;
     class.define_method("close", method!(Session::close, 0))?;
     class.define_method("closed?", method!(Session::closed, 0))?;

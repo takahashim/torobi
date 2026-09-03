@@ -190,12 +190,25 @@ impl TrainState {
         Ok(self.last_loss)
     }
 
-    /// Writes the run's state: parameters, optimizer slots, counters, and
-    /// what they belong to. Atomic (docs/plan.md section 11.2).
-    pub fn save(&self, plan: &Plan, dir: &str) -> Result<String> {
+    /// Writes the run's state: parameters, optimizer slots, counters, the
+    /// description they belong to, and whatever the caller wants recorded
+    /// alongside. Atomic (docs/plan.md section 11.2).
+    ///
+    /// `run` is the caller's half of the record. Epoch, batch position,
+    /// sampler state and dataset identity are not the engine's to know
+    /// (it is handed a batch, it does not fetch one), so they travel as
+    /// JSON that is written verbatim and read back verbatim.
+    pub fn save(&self, plan: &Plan, dir: &str, run: &str) -> Result<String> {
+        let run: serde_json::Value = if run.trim().is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(run).context("the run metadata is not JSON")?
+        };
         let (m, v) = self.optimizer.slots();
         let state = checkpoint::State {
             config_digest: &plan.config_digest,
+            graph_json: &plan.graph_json,
+            semantics_version: plan.semantics_version,
             step: self.step,
             optimizer: self.optimizer.config(),
             optimizer_steps: self.optimizer.steps_taken(),
@@ -204,6 +217,7 @@ impl TrainState {
             slots: (m, v),
             rng: &self.rng,
             seed: self.seed,
+            run,
         };
         Ok(checkpoint::write(dir, state)?.display().to_string())
     }
@@ -212,10 +226,13 @@ impl TrainState {
     /// that does not belong to this run: another description, another
     /// optimizer, a parameter of another shape, a missing slot.
     ///
+    /// Returns what the caller recorded in `run`, so that whoever owns the
+    /// data can put its sampler back where the checkpoint left it.
+    ///
     /// Nothing is committed until everything has been read, checked and
     /// evaluated. A checkpoint that turns out to be wrong halfway leaves
     /// this run exactly as it was.
-    pub fn restore(&mut self, plan: &Plan, dir: &str) -> Result<()> {
+    pub fn restore(&mut self, plan: &Plan, dir: &str) -> Result<String> {
         let loaded = checkpoint::read(dir)?;
         let manifest = &loaded.manifest;
         anyhow::ensure!(
@@ -297,6 +314,7 @@ impl TrainState {
         }
 
         let rng = loaded.rng.context("the checkpoint has no RNG state")?;
+        let run = serde_json::to_string(&loaded.manifest.run)?;
 
         // Everything is here and consistent; make it real before touching
         // this state, so a failure below cannot leave it half restored.
@@ -314,7 +332,7 @@ impl TrainState {
         self.seed = manifest.seed;
         self.step = manifest.step;
         self.last_loss = f32::NAN;
-        Ok(())
+        Ok(run)
     }
 }
 
@@ -490,7 +508,7 @@ mod tests {
         for _ in 0..2 {
             step(&plan, &mut straight, &rows);
         }
-        straight.save(&plan, &path).unwrap();
+        straight.save(&plan, &path, "").unwrap();
         for _ in 0..3 {
             step(&plan, &mut straight, &rows);
         }
@@ -516,7 +534,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ckpt").display().to_string();
         let (plan, state) = open(fixtures::scaled_mean(), sgd(0.1));
-        state.save(&plan, &path).unwrap();
+        state.save(&plan, &path, "").unwrap();
 
         let (other, mut into) = open(fixtures::teacher_and_student(), sgd(0.1));
         let e = into.restore(&other, &path).unwrap_err().to_string();
@@ -528,7 +546,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ckpt").display().to_string();
         let (plan, state) = open(fixtures::scaled_mean(), sgd(0.1));
-        state.save(&plan, &path).unwrap();
+        state.save(&plan, &path, "").unwrap();
 
         let (plan2, mut into) = open(fixtures::scaled_mean(), adamw());
         let e = into.restore(&plan2, &path).unwrap_err().to_string();
@@ -541,7 +559,7 @@ mod tests {
         let path = dir.path().join("ckpt").display().to_string();
         let (plan, mut state) = open(fixtures::scaled_mean(), adamw());
         step(&plan, &mut state, &[1.0, 2.0]);
-        let written = state.save(&plan, &path).unwrap();
+        let written = state.save(&plan, &path, "").unwrap();
         std::fs::remove_file(std::path::Path::new(&written).join("optimizer.safetensors")).unwrap();
 
         let (plan2, mut into) = open(fixtures::scaled_mean(), adamw());
@@ -556,7 +574,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ckpt").display().to_string();
         let (plan, state) = open(fixtures::scaled_mean(), sgd(0.1));
-        state.save(&plan, &path).unwrap();
+        state.save(&plan, &path, "").unwrap();
 
         let (plan2, mut into) = open(fixtures::scaled_mean(), sgd(0.1));
         step(&plan2, &mut into, &[1.0, 2.0]);

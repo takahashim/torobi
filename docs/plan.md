@@ -525,6 +525,22 @@ parameter の path・shape・dtype の inventory。
 書き込みは一時ディレクトリに行い、flush と検証の後に atomic rename する。読み込み時は
 digest・path・shape・dtype・optimizer 種別を検証し、**不一致を silent に無視しない**。
 
+`graph.json` は digest の重複ではない。**digest は description を名指すだけで、復元は
+しない**。書いた run が失われた checkpoint を後から読めることが、run checkpoint と
+engine-state checkpoint の違いである。読み戻し時に graph.json の digest が manifest の
+主張と一致することを確かめる。
+
+**engine が知らないものは engine が書かない。** epoch、batch position、sampler state、
+dataset の同一性は、データを所有する側のものである(§5A.2: engine は batch を渡される
+のであって取りに行かない)。これらは `run` として JSON のまま書かれ、そのまま返される。
+engine は中身を解釈しない。Ruby 側の `checkpoint!(dir, at:)` が position を、session が
+持つ provenance(config digest、dataset、gem / Ruby / engine の版)を合わせて詰める。
+session を開かずに読む口が `Torobi::Checkpoint`(manifest / graph_json / position / exist?)。
+
+残る欠けは checkpoint 側ではなく調達側にある: MLX と mlx-c の exact revision が
+OminiX のビルド済みバイナリ由来で不明なこと(docs/vendoring.md)。mlx-rs の rev は
+`build.mlx_rs` に入っている。
+
 ### 11.3 メモリ
 
 Ruby の GC は device memory を把握しない。対策: 中間値を engine の内部に閉じ込める、
@@ -684,8 +700,6 @@ digest・path・shape・optimizer 種別を読み戻しで検証し、不一致�
 
 **残る作業**(M3a の前に片付けるか、並行するか):
 
-- checkpoint の完全性(§11.2 の graph.json、epoch、sampler position、dtype inventory)。
-  現状は engine-state checkpoint であって run checkpoint ではない
 - rollback ノブ、損失重みノブ
 - 長時間学習のための `Process.spawn` runner(§11.4 の配布方針と同じ判断)
 
@@ -707,3 +721,20 @@ provided after commit call`)。拡張側は既に mutex で直列化している
 cargo のテストハーネスは既定で並列なので `rake rust_test` は `--test-threads=1` を渡す。
 あわせて `engine/build.rs` が metallib をテストバイナリの隣(`target/<profile>/deps/`)へ
 symlink する。105MB なのでコピーではなく symlink。
+
+### 15.6 checkpoint を run checkpoint にする(2026-09-03)
+
+§11.2 に対して欠けていた 4 点を埋めた。schema version は 1 → 2(未リリースなので
+後方互換は取らない)。
+
+| 欠け | 埋めかた |
+| --- | --- |
+| `graph.json` が無い | GraphConfig のバイト列をそのまま同梱。読み戻しで digest 照合 |
+| dtype inventory が無い | manifest の parameter entry に dtype。safetensors 側の実物と突き合わせて拒否 |
+| semantics version / 実行機が無い | manifest に `semantics_version` と `platform`(os / arch) |
+| epoch・batch position・sampler が無い | **engine には書けない**ので `run` として不透明に運ぶ。`checkpoint!(dir, at:)` が position を、session の provenance が config digest・dataset・版を詰める。`restore` は position を返す |
+
+session を開かずに読む口として `Torobi::Checkpoint` と `Native.checkpoint_manifest` を
+足した。どの checkpoint から再開するかを決めるのに、session を 1 つ開く必要はない。
+
+この時点で Ruby 143 件 / Rust 74 件。

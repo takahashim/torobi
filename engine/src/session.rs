@@ -226,16 +226,23 @@ impl Session {
         self.plan.input_names()
     }
 
-    /// Writes the run's state: parameters, optimizer slots, counters, and
-    /// what they belong to. Atomic (docs/plan.md section 11.2).
-    pub fn save(&self, dir: &str) -> Result<String> {
-        self.state.save(&self.plan, dir)
+    /// Writes the run's state and the description it belongs to. Atomic
+    /// (docs/plan.md section 11.2). `run` is the caller's own record
+    /// (epoch, batch position, sampler state), written verbatim.
+    pub fn save(&self, dir: &str, run: &str) -> Result<String> {
+        self.state.save(&self.plan, dir, run)
     }
 
     /// Restores state written by [`Session::save`], refusing anything that
-    /// does not belong to this session.
-    pub fn restore(&mut self, dir: &str) -> Result<()> {
+    /// does not belong to this session. Returns the caller's record.
+    pub fn restore(&mut self, dir: &str) -> Result<String> {
         self.state.restore(&self.plan, dir)
+    }
+
+    /// What a checkpoint says about itself, without opening it into a
+    /// session: for a caller deciding which one to resume from.
+    pub fn read_manifest(dir: &str) -> Result<String> {
+        Ok(serde_json::to_string(&crate::checkpoint::read_manifest(dir)?)?)
     }
 
     /// One step over already-bound inputs: differentiate, read the taps,
@@ -466,7 +473,7 @@ mod tests {
 
         let mut session = session(fixtures::scaled_mean());
         session.run_step(&batch).unwrap();
-        let written = session.save(&path).unwrap();
+        let written = session.save(&path, "").unwrap();
         assert!(std::path::Path::new(&written).join("manifest.json").exists());
         let want = values(&session.fetch("m.w").unwrap());
 
@@ -474,5 +481,160 @@ mod tests {
         fresh.restore(&path).unwrap();
         assert_eq!(fresh.step(), 1);
         close(&values(&fresh.fetch("m.w").unwrap()), &want);
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    use crate::fixtures;
+
+    fn open(which: (String, String)) -> Session {
+        Session::open(&which.0, &which.1).unwrap()
+    }
+
+    fn written(session: &Session, run: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ckpt").display().to_string();
+        session.save(&path, run).unwrap();
+        (dir, path)
+    }
+
+    fn manifest(path: &str) -> serde_json::Value {
+        serde_json::from_str(&Session::read_manifest(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_checkpoint_carries_the_description_and_not_only_its_digest() {
+        let (config, weights) = fixtures::scaled_mean();
+        let session = Session::open(&config, &weights).unwrap();
+        let (_dir, path) = written(&session, "");
+
+        let graph = std::fs::read_to_string(std::path::Path::new(&path).join("graph.json")).unwrap();
+        assert_eq!(graph, config);
+        // Which is to say: the checkpoint can be read without the run that
+        // wrote it, and the digest it claims is of what is actually there.
+        assert_eq!(
+            manifest(&path)["config_digest"].as_str().unwrap().len(),
+            64
+        );
+    }
+
+    #[test]
+    fn a_graph_that_is_not_the_one_the_manifest_claims_is_refused() {
+        let session = open(fixtures::scaled_mean());
+        let (_dir, path) = written(&session, "");
+        let graph = std::path::Path::new(&path).join("graph.json");
+        std::fs::write(&graph, fixtures::teacher_and_student().0).unwrap();
+
+        let mut into = open(fixtures::scaled_mean());
+        let e = into.restore(&path).unwrap_err().to_string();
+        assert!(e.contains("not the description this manifest claims"), "{e}");
+    }
+
+    #[test]
+    fn the_manifest_inventories_every_parameters_dtype() {
+        let session = open(fixtures::teacher_and_student());
+        let (_dir, path) = written(&session, "");
+        let m = manifest(&path);
+        let params = m["parameters"].as_array().unwrap();
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0]["path"], "student.scale");
+        assert_eq!(params[0]["dtype"], "f32");
+        assert_eq!(params[0]["shape"], serde_json::json!([2]));
+        assert_eq!(params[0]["trained"], true);
+        assert_eq!(params[1]["path"], "teacher.scale");
+        assert_eq!(params[1]["trained"], false);
+    }
+
+    #[test]
+    fn a_parameter_whose_dtype_disagrees_with_the_manifest_is_refused() {
+        let session = open(fixtures::scaled_mean());
+        let (_dir, path) = written(&session, "");
+        let file = std::path::Path::new(&path).join("manifest.json");
+        let mut m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        m["parameters"][0]["dtype"] = serde_json::json!("bf16");
+        std::fs::write(&file, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+
+        let mut into =
+            open(fixtures::scaled_mean());
+        let e = into.restore(&path).unwrap_err().to_string();
+        assert!(e.contains("the manifest says bf16"), "{e}");
+    }
+
+    #[test]
+    fn the_manifest_says_what_it_was_written_by_and_on() {
+        let session = open(fixtures::scaled_mean());
+        let (_dir, path) = written(&session, "");
+        let m = manifest(&path);
+        assert_eq!(m["schema_version"], 2);
+        assert_eq!(m["semantics_version"], 3);
+        assert_eq!(m["platform"]["os"], std::env::consts::OS);
+        assert_eq!(m["platform"]["arch"], std::env::consts::ARCH);
+        assert!(m["build"]["mlx_rs"].is_string(), "{m}");
+        assert_eq!(m["optimizer"]["kind"], "sgd");
+    }
+
+    #[test]
+    fn what_the_caller_records_comes_back_unchanged() {
+        // Epoch, batch position and sampler state are not the engine's to
+        // know, so they travel opaquely. What matters is that they survive.
+        let run = r#"{"epoch":3,"batch":1200,"sampler":{"kind":"shuffled","seed":9}}"#;
+        let mut session =
+            open(fixtures::scaled_mean());
+        session.run_step(&fixtures::batch_x(&[1.0, 2.0])).unwrap();
+        let (_dir, path) = written(&session, run);
+
+        let mut fresh =
+            open(fixtures::scaled_mean());
+        let back: serde_json::Value = serde_json::from_str(&fresh.restore(&path).unwrap()).unwrap();
+        assert_eq!(back["epoch"], 3);
+        assert_eq!(back["batch"], 1200);
+        assert_eq!(back["sampler"]["seed"], 9);
+        assert_eq!(fresh.step(), 1);
+    }
+
+    #[test]
+    fn a_run_record_that_is_not_json_is_refused_before_anything_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ckpt").display().to_string();
+        let session = open(fixtures::scaled_mean());
+        let e = session.save(&path, "not json").unwrap_err().to_string();
+        assert!(e.contains("not JSON"), "{e}");
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    #[test]
+    fn a_checkpoint_with_no_caller_record_restores_to_null() {
+        let mut session =
+            open(fixtures::scaled_mean());
+        let (_dir, path) = written(&session, "");
+        assert_eq!(session.restore(&path).unwrap(), "null");
+    }
+
+    #[test]
+    fn a_checkpoint_of_an_older_schema_is_refused_rather_than_guessed_at() {
+        let session = open(fixtures::scaled_mean());
+        let (_dir, path) = written(&session, "");
+        let file = std::path::Path::new(&path).join("manifest.json");
+        let mut m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        m["schema_version"] = serde_json::json!(1);
+        std::fs::write(&file, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+        let e = Session::read_manifest(&path).unwrap_err().to_string();
+        assert!(e.contains("schema 1 is not 2"), "{e}");
+    }
+
+    #[test]
+    fn a_manifest_reads_without_a_session_to_read_it_into() {
+        // What a caller consults to decide which checkpoint to resume.
+        let mut session = open(fixtures::teacher_and_student());
+        session.run_step(&fixtures::batch_x(&[1.0, 1.0])).unwrap();
+        let (_dir, path) = written(&session, r#"{"epoch":2}"#);
+        let m = manifest(&path);
+        assert_eq!(m["step"], 1);
+        assert_eq!(m["run"]["epoch"], 2);
+        assert_eq!(m["seed"], 0);
     }
 }

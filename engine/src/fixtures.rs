@@ -60,6 +60,7 @@ pub fn named(id: usize, op: &str, inputs: Value, parameters: Value, name: &str) 
 pub fn config(models: Value, objective: Value, train: Value) -> String {
     json!({
         "schema_version": 1,
+        "semantics_version": 3,
         "models": models,
         "objective": objective,
         "train": train,

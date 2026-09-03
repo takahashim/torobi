@@ -10,6 +10,11 @@ use serde::Deserialize;
 pub struct GraphConfig {
     #[allow(dead_code)]
     pub schema_version: u32,
+    /// Which meaning of the ops this was written against. Recorded in a
+    /// checkpoint, so a restore into a later engine can say what it is
+    /// reading rather than guess (docs/plan.md section 11.2).
+    #[serde(default)]
+    pub semantics_version: u32,
     pub models: BTreeMap<String, Graph>,
     pub objective: Option<Graph>,
     /// Which models are differentiated. Everything else is frozen.

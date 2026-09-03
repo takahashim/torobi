@@ -40,9 +40,12 @@ module Torobi
       Preflight.check!
       native = Native::Session.open(config.canonical_json, JSON.generate(weights),
                                     JSON.generate(optimizer))
-      journal ||= Journal.new(Provenance.of(config, dataset:, extra: { "optimizer" => optimizer }),
-                              io:) if io
-      session = new(native, journal:)
+      # Gathered whether or not anything is journalling: a checkpoint
+      # records it too, so that what it holds can be identified later
+      # (docs/plan.md section 11.2).
+      provenance = Provenance.of(config, dataset:, extra: { "optimizer" => optimizer })
+      journal ||= Journal.new(provenance, io:) if io
+      session = new(native, journal:, provenance:)
       journal&.note(step: 0, event: "opened", optimizer: optimizer.transform_keys(&:to_s))
       return session unless block_given?
 
@@ -55,14 +58,19 @@ module Torobi
       end
     end
 
-    def initialize(native, journal: nil)
+    def initialize(native, journal: nil, provenance: nil)
       @native = native
       @journal = journal
+      @provenance = provenance
       @hooks = Hooks.new(self)
     end
 
     # What this session is recording into, if anything.
     attr_reader :journal
+
+    # What this run is: the config's digest, the dataset it was opened
+    # against, the build. Written into every checkpoint.
+    attr_reader :provenance
 
     # Registers a hook. Sugar for the window and nothing more: a hook can
     # do what the window can do, because it fires in one (docs/plan.md
@@ -189,10 +197,19 @@ module Torobi
     end
 
     # Writes the run's state to `dir`, atomically: parameters, optimizer
-    # slots, the step counts, and the digest of the description they belong
-    # to. Returns the path. Interrupting it leaves no half-checkpoint.
-    def checkpoint!(dir)
-      path = @native.save(dir.to_s)
+    # slots, the step counts, the description they belong to, and this
+    # run's provenance. Returns the path. Interrupting it leaves no
+    # half-checkpoint.
+    #
+    # `at:` is where in the data the run is - epoch, batch, whatever a
+    # sampler needs to carry on. Torobi is handed batches and never fetches
+    # them (docs/plan.md section 5A.2), so it cannot work this out; it
+    # records what it is told, verbatim, and hands it back on restore.
+    #
+    #   s.checkpoint!("run/000200", at: { epoch: 2, batch: 1_400 })
+    def checkpoint!(dir, at: nil)
+      record = { "provenance" => @provenance, "position" => stringify(at) }.compact
+      path = @native.save(dir.to_s, JSON.generate(record))
       @journal&.checkpoint(path:, step: @native.step)
       @hooks.fire(:checkpoint_written, step: @native.step, loss: @native.loss)
       path
@@ -201,10 +218,14 @@ module Torobi
     # Restores what `checkpoint!` wrote. Refuses a checkpoint from another
     # description, another optimizer, or another shape, rather than
     # absorbing the difference.
+    #
+    # Returns the position that was recorded with it (or nil), so that
+    # whoever owns the data can put its sampler back where it was. The
+    # whole record, provenance included, is `Torobi::Checkpoint.manifest`.
     def restore(dir)
-      @native.restore(dir.to_s)
+      recorded = JSON.parse(@native.restore(dir.to_s))
       @journal&.note(step: @native.step, event: "restored", path: dir.to_s)
-      self
+      recorded.is_a?(Hash) ? recorded["position"] : nil
     end
 
     # Releases the engine and its device memory. Idempotent; afterwards
@@ -308,6 +329,21 @@ module Torobi
     # The gradients for `batch`, by parameter path. Does not update anything.
     def gradients(batch)
       @native.gradients(Batch.pack(batch)).to_h { |path, shape, data| [path, { shape:, data: }] }
+    end
+
+    private
+
+    # A position travels as JSON, so its keys are strings by the time it
+    # comes back. Convert on the way in, so that what a caller reads after
+    # a restore is what it wrote.
+    def stringify(value)
+      case value
+      when nil then nil
+      when Hash then value.to_h { |k, v| [k.to_s, stringify(v)] }
+      when Array then value.map { |v| stringify(v) }
+      when Symbol then value.to_s
+      else value
+      end
     end
   end
 end

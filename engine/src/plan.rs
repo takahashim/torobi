@@ -57,6 +57,11 @@ pub struct Plan {
     /// The digest of exactly the bytes the caller handed over, which is
     /// what the Ruby side computed and what a checkpoint records.
     pub config_digest: String,
+    /// Those bytes themselves. A checkpoint carries them, so that what it
+    /// holds can be read without the run that wrote it: a digest names a
+    /// description, it does not reconstruct one (docs/plan.md 11.2).
+    pub graph_json: String,
+    pub semantics_version: u32,
 }
 
 impl Plan {
@@ -121,6 +126,8 @@ impl Plan {
                 paths,
                 candidates,
                 config_digest,
+                graph_json: graph_json.to_string(),
+                semantics_version: config.semantics_version,
             },
             params,
         ))

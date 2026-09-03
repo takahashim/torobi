@@ -5,16 +5,25 @@
 //! ```text
 //! checkpoint/000042/
 //! ├── manifest.json
+//! ├── graph.json
 //! ├── parameters.safetensors
 //! ├── random.safetensors
 //! └── optimizer.safetensors     (absent for an optimizer with no slots)
 //! ```
 //!
-//! Two rules give it its value. It is written to a temporary directory and
-//! renamed into place, so an interrupted write leaves no half-checkpoint.
-//! And it is read back against the manifest - the config's digest, every
-//! parameter's path and shape, the optimizer's kind - so a mismatch is
-//! refused rather than silently absorbed.
+//! Three rules give it its value. It is written to a temporary directory
+//! and renamed into place, so an interrupted write leaves no
+//! half-checkpoint. It is read back against the manifest (the config's
+//! digest, every parameter's path, shape and dtype, the optimizer's kind)
+//! so a mismatch is refused rather than silently absorbed. And it carries
+//! the description itself, not only its digest: a digest names a
+//! GraphConfig, it does not reconstruct one, and a checkpoint nobody can
+//! read without the run that wrote it is a run checkpoint in name only.
+//!
+//! What the engine does not know is carried opaquely. Epoch, batch
+//! position, sampler state and dataset identity belong to whoever owns the
+//! data, which is never this crate (docs/plan.md section 5A.2); they
+//! travel in `run`, which is written verbatim and handed back verbatim.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -25,7 +34,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::optimizer::Config as OptimizerConfig;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// The file the GraphConfig is written to, beside the manifest.
+pub const GRAPH_FILE: &str = "graph.json";
 
 /// What a checkpoint claims about itself. Everything here is checked on the
 /// way back in.
@@ -35,6 +47,8 @@ pub struct Manifest {
     /// The GraphConfig this state belongs to. A checkpoint restored into a
     /// different description is not a resumed run.
     pub config_digest: String,
+    /// Which meaning of the ops the description was written against.
+    pub semantics_version: u32,
     pub step: usize,
     pub optimizer: OptimizerConfig,
     /// Steps the optimizer has taken, which is not the same as `step` once
@@ -45,18 +59,32 @@ pub struct Manifest {
     pub seed: u64,
     pub parameters: Vec<ParameterEntry>,
     pub build: serde_json::Value,
+    /// The machine this was written on.
+    pub platform: serde_json::Value,
+    /// Whatever the caller wanted recorded: epoch, batch position, sampler
+    /// state, dataset identity, the Ruby side's own versions. Not
+    /// interpreted here, and handed back unchanged on the way out.
+    #[serde(default)]
+    pub run: serde_json::Value,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct ParameterEntry {
     pub path: String,
     pub shape: Vec<i32>,
+    /// Checked on the way back in: a parameter restored at another
+    /// precision is not the parameter that was saved.
+    pub dtype: String,
     pub trained: bool,
 }
 
 /// The state a checkpoint holds, on its way in or out.
 pub struct State<'a> {
     pub config_digest: &'a str,
+    /// The GraphConfig itself, as the caller handed it over. Its digest
+    /// must be `config_digest`, which the read-back check confirms.
+    pub graph_json: &'a str,
+    pub semantics_version: u32,
     pub step: usize,
     pub optimizer: &'a OptimizerConfig,
     pub optimizer_steps: u64,
@@ -69,6 +97,8 @@ pub struct State<'a> {
     /// The RNG key, so a resumed run draws what a continuous one would.
     pub rng: &'a Array,
     pub seed: u64,
+    /// The caller's own record, written verbatim.
+    pub run: serde_json::Value,
 }
 
 /// Writes a checkpoint, atomically. Returns where it landed.
@@ -84,6 +114,7 @@ pub fn write(dir: impl AsRef<Path>, state: State<'_>) -> Result<PathBuf> {
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
         config_digest: state.config_digest.to_string(),
+        semantics_version: state.semantics_version,
         step: state.step,
         optimizer: state.optimizer.clone(),
         optimizer_steps: state.optimizer_steps,
@@ -95,11 +126,17 @@ pub fn write(dir: impl AsRef<Path>, state: State<'_>) -> Result<PathBuf> {
             .map(|(i, (path, array))| ParameterEntry {
                 path: path.clone(),
                 shape: array.shape().to_vec(),
+                dtype: dtype_name(array.dtype()),
                 trained: state.argnums.contains(&(i as i32)),
             })
             .collect(),
         build: crate::build_info(),
+        platform: platform(),
+        run: state.run.clone(),
     };
+
+    std::fs::write(staging.join(GRAPH_FILE), state.graph_json)
+        .context("writing the graph")?;
 
     Array::save_safetensors(
         state.parameters.iter().map(|(path, array)| (path, *array)),
@@ -177,6 +214,28 @@ fn sync_dir(dir: &Path) -> Result<()> {
         .with_context(|| format!("syncing {}", dir.display()))
 }
 
+/// How a dtype is spelled in a manifest, in the graph's vocabulary.
+fn dtype_name(dtype: mlx_rs::Dtype) -> String {
+    use mlx_rs::Dtype;
+    match dtype {
+        Dtype::Float32 => "f32",
+        Dtype::Bfloat16 => "bf16",
+        Dtype::Float16 => "f16",
+        Dtype::Int32 => "i32",
+        Dtype::Bool => "bool",
+        other => return format!("{other:?}").to_lowercase(),
+    }
+    .to_string()
+}
+
+/// The machine, for a checkpoint carried between them.
+fn platform() -> serde_json::Value {
+    serde_json::json!({
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+    })
+}
+
 pub fn read_manifest(dir: impl AsRef<Path>) -> Result<Manifest> {
     let path = dir.as_ref().join("manifest.json");
     let text = std::fs::read_to_string(&path)
@@ -195,6 +254,8 @@ pub fn read_manifest(dir: impl AsRef<Path>) -> Result<Manifest> {
 /// What a checkpoint holds, read back.
 pub struct Loaded {
     pub manifest: Manifest,
+    /// The description this state belongs to, as it was written.
+    pub graph_json: String,
     pub parameters: HashMap<String, Array>,
     /// (m, v) by parameter path. Empty when the optimizer has no slots.
     pub slots: HashMap<String, (Array, Array)>,
@@ -204,8 +265,40 @@ pub struct Loaded {
 pub fn read(dir: impl AsRef<Path>) -> Result<Loaded> {
     let dir = dir.as_ref();
     let manifest = read_manifest(dir)?;
+    let graph_json = std::fs::read_to_string(dir.join(GRAPH_FILE))
+        .with_context(|| format!("reading {}", dir.join(GRAPH_FILE).display()))?;
+    {
+        use sha2::{Digest, Sha256};
+        let digest = format!("{:x}", Sha256::digest(graph_json.as_bytes()));
+        anyhow::ensure!(
+            digest == manifest.config_digest,
+            "{GRAPH_FILE} is not the description this manifest claims \
+             (digest {}, manifest says {})",
+            &digest[..12],
+            &manifest.config_digest[..12.min(manifest.config_digest.len())]
+        );
+    }
     let parameters = Array::load_safetensors(dir.join("parameters.safetensors"))
         .context("reading parameters")?;
+    for entry in &manifest.parameters {
+        let array = parameters
+            .get(&entry.path)
+            .with_context(|| format!("the manifest lists {:?}, the file has none", entry.path))?;
+        anyhow::ensure!(
+            array.shape() == entry.shape,
+            "parameter {:?}: the file holds {:?}, the manifest says {:?}",
+            entry.path,
+            array.shape(),
+            entry.shape
+        );
+        let dtype = dtype_name(array.dtype());
+        anyhow::ensure!(
+            dtype == entry.dtype,
+            "parameter {:?}: the file holds {dtype}, the manifest says {}",
+            entry.path,
+            entry.dtype
+        );
+    }
 
     let optimizer_path = dir.join("optimizer.safetensors");
     let mut slots = HashMap::new();
@@ -227,6 +320,7 @@ pub fn read(dir: impl AsRef<Path>) -> Result<Loaded> {
         .remove("key");
     Ok(Loaded {
         manifest,
+        graph_json,
         parameters,
         slots,
         rng,
