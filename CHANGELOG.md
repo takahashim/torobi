@@ -52,9 +52,9 @@ between two versions people have.
   above: four norms a layer rather than two, q and k normalized per
   head, norms that scale by `1 + w`, the tanh approximation of GELU, and
   embeddings scaled by the square root of the width. It declares exactly
-  the 236 parameters gemma-3-270m holds. Most of its layers see only the
-  recent past, which is one additive mask that is causal and windowed at
-  once.
+  the 236 parameters gemma-3-270m holds and answers what transformers
+  answers. Most of its layers see only the recent past, which is one
+  additive mask that is causal and windowed at once.
 - **`Torobi::Models::Llama`**, the Llama-shaped decoder and so most of
   them: one description that declares exactly the 290 parameters
   Qwen2.5-0.5B holds and exactly the 219 sarashina2.2-0.5b holds, biases

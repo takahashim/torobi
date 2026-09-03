@@ -192,7 +192,8 @@ to build (scaled rotary embeddings, sliding window attention).
 `Models::Gemma3` is the other shape: four norms a layer, head-wise
 norms on q and k, `1 + w` scaling, a tanh GELU, and most layers seeing
 only a window of the recent past. It declares exactly what gemma-3-270m
-holds.
+holds, and its numbers agree with transformers as closely as the family
+above does.
 
 What is deliberately absent is generation: no KV cache, no sampling
 loop. What Torobi does with a decoder is fine-tune it, in bf16 or behind
