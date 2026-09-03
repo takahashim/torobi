@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use magnus::exception::ExceptionClass;
 use magnus::value::ReprValue;
 use magnus::{function, method, prelude::*, Error, RArray, RHash, RString, Ruby, Value};
-use torobi_engine::session::{unpack, Batch, PackedBatch, PackedTensor, Tensor, Values};
+use torobi_engine::tensor::{unpack, Batch, PackedBatch, PackedTensor, Tensor, Values};
 use torobi_engine::Session as EngineSession;
 
 /// The engine's session, owned by one Ruby object.

@@ -9,7 +9,7 @@
 //! gives each step its own (docs/plan.md section 5A.2).
 
 use anyhow::{bail, Result};
-use torobi_engine::session::{Batch, Tensor, Values};
+use torobi_engine::tensor::{Batch, Tensor, Values};
 use torobi_engine::Session;
 
 use mlx_rs::Dtype;

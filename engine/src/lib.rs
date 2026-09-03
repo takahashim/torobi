@@ -6,11 +6,15 @@
 //! callbacks come back in, and the model never leaves this crate.
 
 pub mod checkpoint;
+pub mod executor;
 pub mod graph;
 pub mod interp;
 pub mod memory;
 pub mod optimizer;
+pub mod plan;
 pub mod session;
+pub mod state;
+pub mod tensor;
 
 pub use session::Session;
 
