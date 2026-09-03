@@ -3,10 +3,16 @@
 module Torobi
   # How a batch reaches the engine.
   #
-  # A batch is written as {input_name => {shape:, data:, dtype:}}, where
-  # data is a flat Array of numbers or an already-packed String. It crosses
-  # as {name => [dtype, shape, packed]}: the dtype and shape stay readable,
-  # the payload goes as native-endian 4-byte values.
+  # A batch is written as {input_name => tensor}, where a tensor is a
+  # `Torobi::TensorData` or the plain {shape:, data:, dtype:} Hash that
+  # predates it (data being a flat Array or already-packed String). It
+  # crosses as {name => [dtype, shape, packed]}: the dtype and shape stay
+  # readable, the payload goes as native-endian 4-byte values.
+  #
+  # Prefer TensorData for anything large. A Hash of numbers means every
+  # element exists in Ruby before any of it is packed, which for a mask is
+  # millions of Floats built to be thrown away; TensorData can be built
+  # from runs instead.
   #
   # The dtype travels because a graph may declare an i32 input, which is
   # what an embedding reads; a boundary that assumed f32 could not carry
@@ -23,6 +29,9 @@ module Torobi
 
     def pack(batch)
       batch.to_h do |name, tensor|
+        next [name.to_s, [tensor.dtype.to_s, tensor.shape, tensor.bytes]] if
+          tensor.is_a?(TensorData)
+
         dtype = (tensor[:dtype] || tensor["dtype"] || DEFAULT_DTYPE).to_s
         format = FORMATS.fetch(dtype) do
           raise ArgumentError,

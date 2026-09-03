@@ -35,6 +35,11 @@ module Torobi
 
         def theta(layer) = global?(layer) ? global_rope_theta : local_rope_theta
 
+        # Whether any layer is local. A configuration small enough to have
+        # none needs no window, and asking for one it never reads would be
+        # a batch field with nothing to do.
+        def any_local? = num_hidden_layers.times.any? { |i| !global?(i) }
+
         def check!
           unless (hidden_size % num_attention_heads).zero?
             raise ConfigError,
@@ -154,15 +159,22 @@ module Torobi
       # description rather than two that must be kept in step.
       def encode(g, config, seq:)
         ids = g.input(:input_ids, [nil, seq], dtype: :i32)
-        global = g.input(:mask, [nil, 1, seq, seq])
-        local = g.input(:local_mask, [nil, 1, seq, seq])
+        padding = g.input(:mask, [nil, 1, 1, seq])
+        # Summed once, not in each of the local layers: both are the same
+        # for every one of them. Only when there is a local layer to read
+        # it, so a configuration with none asks for no window.
+        local = if config.any_local?
+                  padding + g.input(:window, [1, 1, seq, seq])
+                else
+                  padding
+                end
 
         x = g.embedding(ids, vocab: config.vocab_size, dim: config.hidden_size,
                         name: "embeddings.tok_embeddings")
         x = norm(g, x, config, name: "embeddings.norm")
 
         config.num_hidden_layers.times do |i|
-          mask = config.global?(i) ? global : local
+          mask = config.global?(i) ? padding : local
           x = g.scope("layers.#{i}") { layer(g, x, config, i, mask, seq:) }
         end
         norm(g, x, config, name: "final_norm")
@@ -246,7 +258,7 @@ module Torobi
         end
 
         ids = rows.flat_map { |row| row + Array.new(seq - row.size, config.pad_token_id) }
-        { input_ids: { shape: [rows.size, seq], data: ids, dtype: :i32 } }
+        { input_ids: TensorData.from_a([rows.size, seq], ids, dtype: :i32) }
           .merge(masks(config, seq:, lengths:))
       end
 
@@ -255,10 +267,13 @@ module Torobi
       # already padded its own ids.
       #
       # `lengths` is how many real tokens each row has; the rest is
-      # padding, which nothing may attend to. The local mask is the same,
-      # plus the sliding window: a position sees no further than
-      # `local_attention / 2` in either direction, which is the reference's
-      # own reading of that number.
+      # padding, which nothing may attend to.
+      #
+      # Neither is built as an Array of Floats. A mask is runs of the same
+      # number, so both are written as bytes directly (`TensorData.runs`);
+      # at sequence 512 and batch 32 that is the difference between a few
+      # hundred kilobytes and building 16.8 million Ruby Floats to throw
+      # away.
       #
       # A large negative rather than -Infinity: a row that can attend to
       # nothing would otherwise softmax to NaN, and a finite floor keeps a
@@ -266,18 +281,31 @@ module Torobi
       NEGATIVE = -1.0e9
 
       def masks(config, seq:, lengths:)
+        padding = TensorData.runs(
+          [lengths.size, 1, 1, seq],
+          lengths.flat_map { |length| [[length, 0.0], [seq - length, NEGATIVE]] }
+        )
+        return { mask: padding } unless config.any_local?
+
+        { mask: padding, window: window(config, seq:) }
+      end
+
+      # The sliding window the local layers see, [1, 1, seq, seq].
+      #
+      # It depends on the sequence length and the configured width and on
+      # nothing in the batch, so there is one of it however many rows there
+      # are, and it is built once per shape and handed out again. A run
+      # does thousands of steps and this is the same bytes every time.
+      def window(config, seq:)
         half = config.local_attention / 2
-        rows = lengths.map do |length|
-          padding = Array.new(seq) { |j| j < length ? 0.0 : NEGATIVE }
-          global = Array.new(seq) { padding }.flatten
-          local = (0...seq).flat_map do |i|
-            (0...seq).map { |j| (i - j).abs > half ? NEGATIVE : padding[j] }
+        (@windows ||= {})[[seq, half]] ||= TensorData.runs(
+          [1, 1, seq, seq],
+          (0...seq).flat_map do |i|
+            first = [i - half, 0].max
+            last = [i + half, seq - 1].min
+            [[first, NEGATIVE], [last - first + 1, 0.0], [seq - 1 - last, NEGATIVE]]
           end
-          [global, local]
-        end
-        shape = [lengths.size, 1, seq, seq]
-        { mask: { shape:, data: rows.flat_map(&:first) },
-          local_mask: { shape:, data: rows.flat_map(&:last) } }
+        )
       end
     end
   end

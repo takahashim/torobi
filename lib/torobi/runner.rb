@@ -44,6 +44,14 @@ module Torobi
     # this after the fact, from a run it did not start.
     DIRECTORY_VARIABLE = "TOROBI_RUN_DIR"
 
+    # What the child may allocate on the device, in bytes.
+    #
+    # MLX draws from the same memory the rest of the machine uses, so a run
+    # that asks for more than there is does not fail: the machine stops
+    # answering and its watchdog ends the session. A cap turns that into an
+    # exception the child can report. Set it.
+    LIMIT_VARIABLE = "TOROBI_MEMORY_LIMIT"
+
     # What the child exits with. A signal is not in here on purpose: that is
     # the case this whole arrangement exists for, and it arrives as a signal
     # rather than as a number.
@@ -51,12 +59,17 @@ module Torobi
     EXIT_FAILED = 70          # EX_SOFTWARE: the run raised
     EXIT_UNAVAILABLE = 69     # EX_UNAVAILABLE: the engine cannot run here
 
-    def initialize(command, dir:, env: {})
+    # `memory_limit:` is bytes the child may hold on the device. Nil leaves
+    # MLX uncapped, which is what a spike wants and what a long run should
+    # not have: an uncapped run that asks for too much takes the machine
+    # with it (see LIMIT_VARIABLE).
+    def initialize(command, dir:, env: {}, memory_limit: nil)
       @command = Array(command).map(&:to_s)
       raise ArgumentError, "a runner needs a command" if @command.empty?
 
       @dir = File.expand_path(dir.to_s)
       @env = env.transform_keys(&:to_s).transform_values(&:to_s)
+      @env[LIMIT_VARIABLE] = Integer(memory_limit).to_s if memory_limit
       @pid = nil
       @outcome = nil
     end
@@ -227,10 +240,22 @@ module Torobi
     # only way to ask is a signal, and a signal handler must set a flag
     # rather than do work.
     class Child
-      def initialize(dir)
+      def initialize(dir, memory_limit: nil)
         @dir = dir
         @stopping = false
         @journal = nil
+        @memory_limit = memory_limit
+      end
+
+      # Caps what this run may hold on the device, if the parent said so.
+      #
+      # Before anything opens a session, because the point is to be told
+      # rather than to find out: past the cap MLX raises, and under it the
+      # machine stays answerable.
+      def cap!
+        return unless @memory_limit && Torobi.const_defined?(:Memory)
+
+        Torobi::Memory.limit = @memory_limit
       end
 
       attr_reader :dir
@@ -271,7 +296,9 @@ module Torobi
       def child(dir = ENV.fetch(DIRECTORY_VARIABLE, nil))
         raise ArgumentError, "no run directory (#{DIRECTORY_VARIABLE})" unless dir
 
-        run = Child.new(dir).listen
+        limit = ENV.fetch(LIMIT_VARIABLE, nil)
+        run = Child.new(dir, memory_limit: limit && Integer(limit)).listen
+        run.cap!
         begin
           yield run
           finish(run, run.stopping? ? "stopped" : "finished")

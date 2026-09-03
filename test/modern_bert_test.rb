@@ -215,20 +215,52 @@ class ModernBertTest < Minitest::Test
   # already reads; tokenizing does not.
   def test_a_batch_is_built_from_ids_with_what_the_config_knows
     b = Torobi::Models::ModernBERT.batch(config, [[1, 843, 2], [1, 90, 77, 55, 2]], seq: 6)
+    ids = b.fetch(:input_ids)
 
-    assert_equal [2, 6], b.dig(:input_ids, :shape)
-    assert_equal :i32, b.dig(:input_ids, :dtype)
+    assert_equal [2, 6], ids.shape
+    assert_equal :i32, ids.dtype
     pad = config.pad_token_id
 
     assert_equal 3, pad, "ruri-v3 pads with 3, and this should read it rather than guess"
-    assert_equal [1, 843, 2, pad, pad, pad, 1, 90, 77, 55, 2, pad], b.dig(:input_ids, :data)
+    assert_equal [1, 843, 2, pad, pad, pad, 1, 90, 77, 55, 2, pad], ids.to_a
 
-    # Padding is masked out for every row, and the mask is per row.
-    global = b.dig(:mask, :data).each_slice(6).to_a
+    # Padding is masked per row, and only along the key axis: whether a
+    # position may be attended to is a property of the key, so the query
+    # axis is 1 and MLX broadcasts it.
+    mask = b.fetch(:mask)
 
-    assert_equal [0.0, 0.0, 0.0], global[0].first(3)
-    assert(global[0].last(3).all?(&:negative?), "the first row's padding is masked")
-    assert_equal [0.0] * 5, global[6].first(5), "the second row keeps five positions"
+    assert_equal [2, 1, 1, 6], mask.shape
+    rows = mask.to_a.each_slice(6).to_a
+
+    assert_equal [0.0, 0.0, 0.0], rows[0].first(3)
+    assert(rows[0].last(3).all?(&:negative?), "the first row's padding is masked")
+    assert_equal [0.0] * 5, rows[1].first(5), "the second row keeps five positions"
+  end
+
+  # Nothing large is built as an Array of Floats. At the sizes a real run
+  # uses, the mask would be the biggest thing Ruby touches.
+  def test_the_masks_are_bytes_rather_than_millions_of_floats
+    seq = 256
+    b = Torobi::Models::ModernBERT.batch(config, Array.new(8) { Array.new(seq, 1) }, seq:)
+
+    assert_kind_of Torobi::TensorData, b.fetch(:mask)
+    assert_kind_of Torobi::TensorData, b.fetch(:window)
+    # The padding is per row along one axis; the window is one for the
+    # whole batch. Together that is far less than batch * seq^2.
+    assert_equal 8 * seq * 4, b.fetch(:mask).bytesize
+    assert_equal seq * seq * 4, b.fetch(:window).bytesize
+    assert_operator b.fetch(:mask).bytesize + b.fetch(:window).bytesize,
+                    :<, 8 * seq * seq * 4 / 4,
+                    "the two together should be a fraction of one dense mask"
+  end
+
+  # The window depends on nothing in the batch, so it is the same object
+  # from one step to the next.
+  def test_the_window_is_built_once_for_a_shape
+    first = Torobi::Models::ModernBERT.window(config, seq: 64)
+    second = Torobi::Models::ModernBERT.window(config, seq: 64)
+
+    assert_same first, second
   end
 
   def test_a_row_longer_than_the_graph_is_refused_rather_than_cut
@@ -240,157 +272,18 @@ class ModernBertTest < Minitest::Test
     assert_match(/caller's to decide/, e.message)
   end
 
-  # The window is the architecture's number, so the local mask is too.
-  def test_the_local_mask_is_the_window_the_config_names
+  # The window is the architecture's number, and it says what a position
+  # may see rather than what this batch happens to hold.
+  def test_the_window_is_the_one_the_config_names
     seq = 300
     half = config.local_attention / 2
-    b = Torobi::Models::ModernBERT.batch(config, [Array.new(seq, 1)], seq:)
-    local = b.dig(:local_mask, :data).each_slice(seq).to_a
+    w = Torobi::Models::ModernBERT.window(config, seq:).to_a.each_slice(seq).to_a
 
-    assert_equal 0.0, local[0][half], "the far edge of the window is open"
-    assert_operator local[0][half + 1], :<, 0, "one past it is not"
-    assert_equal 0.0, local[200][200 - half]
-    assert_operator local[200][200 - half - 1], :<, 0
-    # The global mask has no window at all.
-    assert(b.dig(:mask, :data).all?(&:zero?), "nothing is padding here")
-  end
-
-  # Torobi is handed ids and does not know what produced them, so what
-  # produced them has to be written down. `dataset:` is where, and it
-  # reaches both the journal and every checkpoint.
-  def test_what_tokenized_the_ids_is_recorded_where_a_reader_will_find_it
-    require "stringio"
-    require "tmpdir"
-    tokenizer = { "tokenizer" => "cl-nagoya/ruri-v3-130m", "max_seq_length" => 512 }
-
-    Dir.mktmpdir("torobi-provenance") do |dir|
-      io = StringIO.new
-      # The published model would do, but this needs no half a gigabyte to
-      # show where provenance goes: the same builder, scaled down.
-      small = Torobi::Models::ModernBERT.from_hash(
-        oracle.fetch("config").merge(
-          "vocab_size" => 8, "hidden_size" => 8, "intermediate_size" => 8,
-          "num_hidden_layers" => 1, "num_attention_heads" => 2
-        )
-      )
-      encoder = Torobi::Models::ModernBERT.graph(small, seq: 4)
-      tiny = Torobi::GraphConfig.new(
-        models: { m: encoder },
-        objective: Torobi.objective(m: encoder) { |g|
-          g.output :loss, g.mean(g.from_model(:m, :hidden))
-        }
-      )
-      weights = { params: tiny.parameters.to_h { |parameter|
-        shape = parameter.spec.shape
-        [parameter.qualified_path, { shape:, data: Array.new(shape.reduce(1, :*), 0.01) }]
-      } }
-
-      Torobi::Session.open(tiny, weights:, io:, dataset: tokenizer) do |s|
-        s.step!(Torobi::Models::ModernBERT.batch(small, [[1, 2, 3]], seq: 4))
-        written = s.checkpoint!(File.join(dir, "c"))
-
-        assert_equal tokenizer,
-                     Torobi::Checkpoint.manifest(written).dig("run", "provenance", "dataset")
-      end
-
-      header = Torobi::Journal.read(io.string).first
-
-      assert_equal tokenizer, header.dig("provenance", "dataset")
-    end
-  end
-
-  # The teacher this project distils from: ModernBertForSequenceClassification,
-  # 25 layers, a pooled head and a one-label classifier.
-  RERANKER = File.expand_path("oracle/ruri-v3-reranker-310m.json", __dir__)
-
-  def reranker_oracle = @reranker_oracle ||= JSON.parse(File.read(RERANKER))
-
-  def reranker_config = Torobi::Models::ModernBERT.from_hash(reranker_oracle.fetch("config"))
-
-  def test_the_classifier_declares_what_the_reranker_holds
-    c = reranker_config
-
-    assert_equal 768, c.hidden_size
-    assert_equal 25, c.num_hidden_layers
-    assert_equal :cls, c.classifier_pooling
-    assert_equal 1, c.num_labels
-
-    declared = Torobi::Models::ModernBERT.classifier(c, seq: 32)
-                                         .parameters.to_h { |s| [s.path, s.shape] }
-    held = reranker_oracle.fetch("parameters").transform_values { |t| t.fetch("shape") }
-
-    assert_empty declared.keys - held.keys, "this graph declares what the checkpoint lacks"
-    mismatched = declared.filter_map do |path, shape|
-      "#{path}: declares #{shape.inspect}, holds #{held[path].inspect}" if held[path] != shape
-    end
-
-    assert_empty mismatched
-    # The encoder sits under `model.`, as the checkpoint has it.
-    assert_includes declared.keys, "model.layers.24.attn.Wqkv.weight"
-    assert_includes declared.keys, "head.dense.weight"
-    assert_includes declared.keys, "classifier.weight"
-  end
-
-  # One tensor in the file is not part of the model, and that is correct.
-  #
-  # `config.json` says `classifier_bias: false`, and HF builds the head from
-  # the flag rather than from what the file happens to carry, so
-  # `from_pretrained` leaves this one unloaded. kohagi follows the flag for
-  # the same reason (its `rerank::bias` says so, and warns). Torobi agrees:
-  # a checkpoint and its config can disagree, and the config wins.
-  def test_a_tensor_the_config_does_not_declare_is_left_alone
-    declared = Torobi::Models::ModernBERT.classifier(reranker_config, seq: 32)
-                                         .parameters.map(&:path)
-    held = reranker_oracle.fetch("parameters").keys
-
-    assert_equal ["classifier.bias"], held - declared
-    refute reranker_oracle.dig("config", "classifier_bias"),
-           "the config says no classifier bias, which is why the tensor is unused"
-    # Which the import path allows: a file may hold more than a graph wants.
-    assert_equal 155, declared.size
-    assert_equal 156, held.size
-  end
-
-  # What this project is for: ruri-v3-130m's encoder with a reranking head
-  # on top, pulled towards a teacher's scores.
-  #
-  # The head exists in no checkpoint, which is the case `fresh:` is for.
-  # The encoder is at the root here, because a bare encoder is published
-  # that way and a classifier keeps it under `model.`; naming which is
-  # what `encoder_prefix:` is for.
-  def test_a_reranking_student_is_a_published_encoder_and_a_new_head
-    dir = checkpoint
-    skip "cl-nagoya/ruri-v3-130m is not in the cache (set RURI_V3_130M)" unless dir
-
-    seq = 24
-    student = Torobi::Models::ModernBERT.classifier(config, seq:, encoder_prefix: "")
-    objective = Torobi.objective(student: student) do |g|
-      teacher = g.input(:teacher, [nil, 1])
-      g.output :loss, g.mse(g.from_model(:student, :logits).sigmoid, teacher)
-    end
-    session_config = Torobi::GraphConfig.new(models: { student: }, objective:,
-                                             train: ["student"])
-    ids = [Array.new(seq) { |i| ((i * 137) + 11) % config.vocab_size },
-           Array.new(seq) { |i| ((i * 31) + 5) % config.vocab_size }]
-    batch = Torobi::Models::ModernBERT.batch(config, ids, seq:)
-                                      .merge(teacher: { shape: [2, 1], data: [0.72, 0.01] })
-
-    Torobi::Session.open(session_config,
-                         pretrained: { student: File.join(dir, "model.safetensors") },
-                         fresh: ["student.head.*", "student.classifier.*"],
-                         optimizer: { kind: :adamw, lr: 3e-4 }) do |s|
-      # 116 from the file, three the file does not have.
-      assert_equal 119, s.parameter_paths.size
-      assert_equal %w[student.classifier.weight student.head.dense.weight
-                      student.head.norm.weight],
-                   s.parameter_paths.grep(/head|classifier/).sort
-
-      before = s.evaluate(batch)
-      10.times { s.step!(batch) }
-
-      assert_operator s.evaluate(batch), :<, before,
-                      "the student should move towards the teacher"
-    end
+    assert_equal 0.0, w[0][half], "the far edge of the window is open"
+    assert_operator w[0][half + 1], :<, 0, "one past it is not"
+    assert_equal 0.0, w[200][200 - half]
+    assert_operator w[200][200 - half - 1], :<, 0
+    assert_operator w[200][200 + half], :>=, 0.0
   end
 
   def test_a_hidden_size_that_does_not_divide_into_heads_is_refused

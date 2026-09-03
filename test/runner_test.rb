@@ -114,6 +114,49 @@ class RunnerTest < Minitest::Test
                  "the second run carried on from the first"
   end
 
+  # MLX draws from the same memory the machine runs on, so an uncapped run
+  # that asks for too much does not fail: the machine stops answering and
+  # its watchdog ends the session. A cap turns that into an exception the
+  # run can report, which is much of why a long run lives in a process of
+  # its own.
+  def test_a_cap_reaches_the_child_and_is_in_force
+    skip "extension not compiled" unless defined?(Torobi::Session)
+
+    script = <<~SCRIPT
+      $LOAD_PATH.unshift(#{File.expand_path("../lib", __dir__).inspect})
+      require "torobi"
+      Torobi::Runner.child! do |run|
+        File.write(File.join(run.dir, "limit.txt"), Torobi::Memory.report[:limit])
+      end
+    SCRIPT
+    file = File.join(@dir, "capped.rb")
+    File.write(file, script)
+    outcome = Torobi::Runner.new([RbConfig.ruby, file], dir: @dir,
+                                 memory_limit: 3_000_000_000).start.wait
+
+    assert_predicate outcome, :finished?, outcome.to_s
+    assert_equal 3_000_000_000, Integer(File.read(File.join(@dir, "limit.txt")).strip)
+  end
+
+  # And without one, nothing is imposed: a spike should not have to ask.
+  def test_no_cap_is_the_default
+    skip "extension not compiled" unless defined?(Torobi::Session)
+
+    script = <<~SCRIPT
+      $LOAD_PATH.unshift(#{File.expand_path("../lib", __dir__).inspect})
+      require "torobi"
+      Torobi::Runner.child! do |run|
+        File.write(File.join(run.dir, "limit.txt"), Torobi::Memory.report[:limit])
+      end
+    SCRIPT
+    file = File.join(@dir, "uncapped.rb")
+    File.write(file, script)
+    Torobi::Runner.new([RbConfig.ruby, file], dir: @dir).start.wait
+    reported = Integer(File.read(File.join(@dir, "limit.txt")).strip)
+
+    refute_equal 3_000_000_000, reported
+  end
+
   def test_a_runner_refuses_to_start_twice
     r = runner("STEPS" => "5").start
     assert_raises(Torobi::Error) { r.start }

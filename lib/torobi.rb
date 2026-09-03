@@ -16,6 +16,7 @@ require_relative "torobi/models/modern_bert"
 begin
   require_relative "torobi/torobi"
   require_relative "torobi/preflight"
+  require_relative "torobi/tensor_data"
   require_relative "torobi/batch"
   require_relative "torobi/checkpoint"
   require_relative "torobi/session"
