@@ -192,6 +192,36 @@ impl SessionCore {
         self.update(&fields)
     }
 
+    /// Adds one batch's gradients to what is waiting, without stepping.
+    ///
+    /// A batch too large to hold is trained as several that fit
+    /// (docs/plan.md section 15.35). The taps report this pass like any
+    /// other, so the parts of a batch can be watched as they go.
+    pub(crate) fn accumulate(&mut self, batch: &Batch) -> Result<f32> {
+        let fields = self.plan.bind(batch)?;
+        let (loss, grads, tapped) =
+            executor::differentiate(&self.plan, self.state.pass(), &fields, &self.taps)?;
+        let tapped = Self::to_host(tapped)?;
+        let loss = self.state.accumulate(&loss, &grads)?;
+        self.tapped = tapped;
+        Ok(loss)
+    }
+
+    /// Takes the step the accumulated gradients ask for.
+    pub(crate) fn apply(&mut self) -> Result<f32> {
+        self.state.apply()
+    }
+
+    /// How many parts are waiting for a step.
+    pub(crate) fn accumulated(&self) -> usize {
+        self.state.accumulated()
+    }
+
+    /// Throws away what was accumulated. Returns how many parts went.
+    pub(crate) fn discard(&mut self) -> usize {
+        self.state.discard()
+    }
+
     /// The loss for `batch`, without taking a step.
     ///
     /// What a validation set is read with. No gradients, so it costs a
@@ -453,6 +483,30 @@ impl Session {
         runtime().execute(|| core.run_step(batch))
     }
 
+    /// Adds one batch's gradients to what is waiting, without stepping.
+    pub fn accumulate(&mut self, batch: &Batch) -> Outcome<f32> {
+        let core = self.core_mut()?;
+        runtime().execute(|| core.accumulate(batch))
+    }
+
+    /// Takes the step the accumulated gradients ask for, and reports the
+    /// mean of the losses they came from.
+    pub fn apply(&mut self) -> Outcome<f32> {
+        let core = self.core_mut()?;
+        runtime().execute(|| core.apply())
+    }
+
+    /// How many parts are waiting for a step. Touches no MLX.
+    pub fn accumulated(&self) -> Outcome<usize> {
+        Ok(self.core()?.accumulated())
+    }
+
+    /// Throws away what was accumulated, and says how many parts went.
+    pub fn discard(&mut self) -> Outcome<usize> {
+        let core = self.core_mut()?;
+        runtime().execute(|| Ok(core.discard()))
+    }
+
     /// The loss for `batch` without taking a step: no gradients, no
     /// randomness, nothing moved. What a validation set is read with.
     pub fn evaluate(&mut self, batch: &Batch) -> Outcome<f32> {
@@ -548,6 +602,33 @@ mod tests {
 
     pub fn close(got: &[f32], want: &[f32]) {
         within(got, want, 1e-6);
+    }
+
+    /// The same batch with its numbers scaled.
+    ///
+    /// The fixture's loss is a mean and is linear in x, so this scales the
+    /// loss and with it the gradients. Splitting a batch means weighting
+    /// its parts, and for a mean over rows the weight is the share of the
+    /// rows each part holds; the engine does not guess it because only the
+    /// caller knows what its loss is a mean of.
+    fn scaled(batch: &Batch, by: f32) -> Batch {
+        batch
+            .iter()
+            .map(|(name, tensor)| {
+                let values = match &tensor.values {
+                    Values::F32(v) => Values::F32(v.iter().map(|x| x * by).collect()),
+                    _ => panic!("this fixture is f32"),
+                };
+                (
+                    name.clone(),
+                    Tensor {
+                        dtype: tensor.dtype,
+                        shape: tensor.shape.clone(),
+                        values,
+                    },
+                )
+            })
+            .collect()
     }
 
     pub fn within(got: &[f32], want: &[f32], tolerance: f32) {
@@ -670,6 +751,80 @@ mod tests {
         close(&values(&seen[0].1), &[1.0, 1.0]);
         assert_eq!(seen[1].0, "teacher.scaled");
         close(&values(&seen[1].1), &[3.0, 4.0]);
+    }
+
+    /// The property accumulation exists for: the gradients of a sum are
+    /// the sum of the gradients, so a batch trained as parts reaches where
+    /// one step over the whole of it would have.
+    #[test]
+    fn parts_accumulated_reach_where_the_whole_batch_would() {
+        let whole = fixtures::batch_x(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        let mut one = session(fixtures::scaled_mean());
+        one.run_step(&whole).unwrap();
+
+        // The same rows, in two halves. The loss is a mean over rows, so
+        // each half carries half the weight of the whole; the caller's
+        // arithmetic, which is why the engine does not guess it.
+        let mut parts = session(fixtures::scaled_mean());
+        for half in [
+            fixtures::batch_x(&[1.0, 2.0, 3.0, 4.0]),
+            fixtures::batch_x(&[5.0, 6.0, 7.0, 8.0]),
+        ] {
+            parts.accumulate(&scaled(&half, 0.5)).unwrap();
+        }
+        assert_eq!(parts.accumulated().unwrap(), 2);
+        parts.apply().unwrap();
+        assert_eq!(parts.accumulated().unwrap(), 0);
+
+        assert_eq!(parts.step().unwrap(), 1, "applying is one step");
+        within(
+            &values(&parts.fetch("m.w").unwrap()),
+            &values(&one.fetch("m.w").unwrap()),
+            1e-6,
+        );
+    }
+
+    #[test]
+    fn accumulating_moves_nothing_until_it_is_applied() {
+        let mut session = session(fixtures::scaled_mean());
+        let before = values(&session.fetch("m.w").unwrap());
+        session
+            .accumulate(&fixtures::batch_x(&[1.0, 2.0]))
+            .unwrap();
+
+        assert_eq!(session.step().unwrap(), 0);
+        close(&values(&session.fetch("m.w").unwrap()), &before);
+
+        assert_eq!(session.discard().unwrap(), 1);
+        assert_eq!(session.accumulated().unwrap(), 0);
+        close(&values(&session.fetch("m.w").unwrap()), &before);
+    }
+
+    #[test]
+    fn a_step_from_nothing_accumulated_is_refused() {
+        let mut session = session(fixtures::scaled_mean());
+        let e = session.apply().unwrap_err().to_string();
+
+        assert!(e.contains("nothing has been accumulated"), "{e}");
+    }
+
+    /// Freezing moves what a gradient is for, and a checkpoint does not
+    /// hold what is waiting. Both say so rather than quietly dropping it.
+    #[test]
+    fn what_is_waiting_blocks_freezing_and_checkpointing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = session(fixtures::scaled_mean());
+        session
+            .accumulate(&fixtures::batch_x(&[1.0, 2.0]))
+            .unwrap();
+
+        let e = session.set_frozen("m.w", true).unwrap_err().to_string();
+        assert!(e.contains("accumulated"), "{e}");
+        let e = session
+            .save(dir.path().join("c").to_str().unwrap(), "")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("accumulated"), "{e}");
     }
 
     #[test]

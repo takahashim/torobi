@@ -63,6 +63,23 @@ pub struct TrainState {
     seed: u64,
     step: usize,
     last_loss: f32,
+    /// Gradients waiting for a step, and the losses they came from.
+    ///
+    /// A batch that does not fit is trained as several that do, summing
+    /// their gradients and updating once. Held here rather than by the
+    /// caller because they are device arrays parallel to `argnums`, which
+    /// is this module's invariant to keep: a caller holding them could
+    /// freeze a parameter between two of them and hand back a vector that
+    /// no longer lines up.
+    pending: Option<Pending>,
+}
+
+/// What has been accumulated since the last step.
+struct Pending {
+    /// One per differentiated parameter, in `argnums` order.
+    grads: Vec<Array>,
+    /// The losses that produced them, so a step can report their mean.
+    losses: Vec<f32>,
 }
 
 impl TrainState {
@@ -84,6 +101,7 @@ impl TrainState {
             seed,
             step: 0,
             last_loss: f32::NAN,
+            pending: None,
         })
     }
 
@@ -167,6 +185,16 @@ impl TrainState {
         if moved.is_empty() {
             return Ok(moved);
         }
+        // The waiting gradients are one per differentiated parameter, in
+        // this order. Moving the set would leave them meaning something
+        // else, and a caller that froze in the middle of a batch has lost
+        // track of which half is which.
+        anyhow::ensure!(
+            self.pending.is_none(),
+            "{} parts are accumulated and freezing changes what a gradient is for. \
+             Apply them or discard them first",
+            self.accumulated()
+        );
         anyhow::ensure!(
             !wanted.is_empty(),
             "freezing {pattern:?} would leave nothing to train"
@@ -260,6 +288,83 @@ impl TrainState {
         Ok(value)
     }
 
+    /// Adds one batch's gradients to what is waiting, and reports its
+    /// loss. No step is taken and no counter moves.
+    ///
+    /// What this is for: a batch too large to hold is trained as several
+    /// that fit. The gradients of a sum are the sum of the gradients, so
+    /// accumulating and then stepping reaches where one step over the
+    /// whole batch would have. Whether the parts are a mean or a sum of
+    /// each other is the caller's arithmetic (a loss that is a mean over
+    /// its rows wants the parts weighted), and this does not guess.
+    ///
+    /// A part whose loss is not finite is not added, for the reason
+    /// `advance` does not take such a step: its gradients are not finite
+    /// either, and one of them would poison the sum. The loss is still
+    /// reported, so a caller sees it happen.
+    ///
+    /// The RNG does not move. A draw belongs to a step, and this is a
+    /// fraction of one; the step that applies these makes the draw.
+    pub fn accumulate(&mut self, loss: &Array, grads: &[Array]) -> Result<f32> {
+        let value = loss.item::<f32>();
+        anyhow::ensure!(
+            grads.len() == self.argnums.len(),
+            "these gradients are for {} parameters and {} are differentiated",
+            grads.len(),
+            self.argnums.len()
+        );
+        if !value.is_finite() {
+            return Ok(value);
+        }
+
+        let pending = match self.pending.take() {
+            None => Pending {
+                grads: grads.to_vec(),
+                losses: vec![value],
+            },
+            Some(mut held) => {
+                held.grads = held
+                    .grads
+                    .iter()
+                    .zip(grads)
+                    .map(|(held, new)| held.add(new))
+                    .collect::<std::result::Result<_, _>>()?;
+                held.losses.push(value);
+                held
+            }
+        };
+        // Evaluated here rather than left lazy: a run that accumulates ten
+        // parts should hold ten sums, not a graph ten deep.
+        eval(pending.grads.iter())?;
+        self.pending = Some(pending);
+        Ok(value)
+    }
+
+    /// Takes the step the accumulated gradients ask for, and reports the
+    /// mean of the losses they came from.
+    ///
+    /// Refuses when nothing is waiting: a step from no gradients is not a
+    /// step of zero, it is a caller that has lost track of where it is.
+    pub fn apply(&mut self) -> Result<f32> {
+        let Some(pending) = self.pending.take() else {
+            anyhow::bail!("nothing has been accumulated, so there is no step to take");
+        };
+        let mean = pending.losses.iter().sum::<f32>() / pending.losses.len() as f32;
+        let loss = Array::from_f32(mean);
+        self.advance(&loss, &pending.grads)
+    }
+
+    /// How many parts are waiting for a step.
+    pub fn accumulated(&self) -> usize {
+        self.pending.as_ref().map_or(0, |p| p.losses.len())
+    }
+
+    /// Throws away what was accumulated, for a caller abandoning a batch
+    /// part way through. Returns how many parts went.
+    pub fn discard(&mut self) -> usize {
+        self.pending.take().map_or(0, |p| p.losses.len())
+    }
+
     /// Writes the run's state: parameters, optimizer slots, counters, the
     /// description they belong to, and whatever the caller wants recorded
     /// alongside. Atomic (docs/plan.md section 11.2).
@@ -269,6 +374,16 @@ impl TrainState {
     /// (it is handed a batch, it does not fetch one), so they travel as
     /// JSON that is written verbatim and read back verbatim.
     pub fn save(&self, plan: &Plan, dir: &str, run: &str) -> Result<String> {
+        // A checkpoint is a whole run record, and gradients waiting for a
+        // step are not in it: restoring one would silently be a run that
+        // had dropped half a batch. Refusing says so while the caller can
+        // still choose.
+        anyhow::ensure!(
+            self.pending.is_none(),
+            "{} parts are accumulated and a checkpoint does not hold them. \
+             Apply them or discard them first",
+            self.accumulated()
+        );
         let run: serde_json::Value = if run.trim().is_empty() {
             serde_json::Value::Null
         } else {
@@ -324,6 +439,10 @@ impl TrainState {
         self.seed = accepted.seed;
         self.step = accepted.step;
         self.last_loss = f32::NAN;
+        // Gradients for parameters that are no longer there. Going back is
+        // the answer to a batch that went wrong, so they are dropped
+        // rather than refused.
+        self.pending = None;
         Ok(accepted.run)
     }
 

@@ -501,6 +501,27 @@ impl Session {
 
     /// The loss for one batch without taking a step: no gradients, no
     /// randomness, nothing moved. What a validation set is read with.
+    /// One batch's gradients added to what is waiting, with no step.
+    fn accumulate(ruby: &Ruby, rb_self: &Self, batch: RHash) -> Result<f32, Error> {
+        let batch = read_batch(ruby, batch)?;
+        rb_self.with_engine(ruby, |engine| engine.accumulate(&batch))
+    }
+
+    /// The step the accumulated gradients ask for.
+    fn apply(ruby: &Ruby, rb_self: &Self) -> Result<f32, Error> {
+        rb_self.with_engine(ruby, |engine| engine.apply())
+    }
+
+    /// How many parts are waiting for a step.
+    fn accumulated(ruby: &Ruby, rb_self: &Self) -> Result<usize, Error> {
+        rb_self.read(ruby, |engine| engine.accumulated())
+    }
+
+    /// Throws away what is waiting, and says how many parts went.
+    fn discard(ruby: &Ruby, rb_self: &Self) -> Result<usize, Error> {
+        rb_self.with_engine(ruby, |engine| engine.discard())
+    }
+
     fn evaluate(ruby: &Ruby, rb_self: &Self, batch: RHash) -> Result<f32, Error> {
         let batch = read_batch(ruby, batch)?;
         rb_self.with_engine(ruby, |engine| engine.evaluate(&batch))
@@ -822,6 +843,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_singleton_method("open_from_file", function!(Session::open_from_file, 4))?;
     class.define_singleton_method("open_pretrained", function!(Session::open_pretrained, 5))?;
     class.define_method("run_step", method!(Session::run_step, 1))?;
+    class.define_method("accumulate", method!(Session::accumulate, 1))?;
+    class.define_method("apply", method!(Session::apply, 0))?;
+    class.define_method("accumulated", method!(Session::accumulated, 0))?;
+    class.define_method("discard", method!(Session::discard, 0))?;
     class.define_method("evaluate", method!(Session::evaluate, 1))?;
     class.define_method("save", method!(Session::save, 2))?;
     class.define_method("restore", method!(Session::restore, 1))?;

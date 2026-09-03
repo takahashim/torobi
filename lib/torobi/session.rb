@@ -202,6 +202,53 @@ module Torobi
       loss
     end
 
+    # Adds one batch's gradients to what is waiting, and returns its loss.
+    # No step is taken and no counter moves.
+    #
+    # What this is for is a batch too large to hold: train it as several
+    # that fit, then `apply!`. The gradients of a sum are the sum of the
+    # gradients, so the step lands where one over the whole batch would
+    # have. It is also what a gradient cache is built on, where the parts
+    # are re-run with a cotangent the caller worked out in between.
+    #
+    # **The weighting is the caller's.** A loss that is a mean over its
+    # rows means each part carries the share of the rows it holds; the
+    # engine sums what it is given and does not guess what the loss was a
+    # mean of.
+    #
+    #   parts.each { |part| s.accumulate(part) }
+    #   s.apply!
+    #
+    # Freezing and `checkpoint!` refuse while parts are waiting, because
+    # one moves what a gradient is for and the other does not hold them.
+    def accumulate(batch)
+      atomically do
+        loss = @native.accumulate(Batch.pack(batch))
+        @journal&.observe(step: @native.step, accumulated: @native.accumulated, loss:)
+        loss
+      end
+    end
+
+    # Takes the step the accumulated gradients ask for, and returns the
+    # mean of the losses they came from. Refuses when nothing is waiting.
+    def apply!
+      parts = @native.accumulated
+      loss = atomically do
+        value = @native.apply
+        @journal&.span(steps: 1, loss: value, step: @native.step, parts:,
+                       batches_digest: nil)
+        value
+      end
+      @hooks.fire(:step, step: @native.step, loss:)
+      loss
+    end
+
+    # How many parts are waiting for a step.
+    def accumulated = @native.accumulated
+
+    # Throws away what is waiting. Returns how many parts went.
+    def discard = @native.discard
+
     # A span: one step per batch, driven from here.
     #
     # One native call per step, not one per span. The boundary costs a
