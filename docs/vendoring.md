@@ -94,15 +94,29 @@ What `mlx-sys` wants from `MLX_PREBUILT_PATH` is `libmlx.a`, `libmlxc.a`,
 is mlx-c, a separate project that is in no MLX wheel. So the official
 artifact is not a substitute for OminiX's tarball as things stand.
 
-What it *is* good for is the expensive half. The metallib is the part
-that needs the Metal compiler and the part that is 130 MB, and Apple
-publishes it, versioned and hashed. Anyone building the rest has to
-answer one question first: **can a Metal-capable `libmlx.a` be compiled
-without the Metal toolchain when the kernels come from a prebuilt
-metallib?** If it can, a build repository needs nothing but clang. If it
-cannot, its runner needs `xcodebuild -downloadComponent MetalToolchain`,
-which GitHub's macOS runners can do. Either way the MLX version stops
-being a thing read out of a binary with `strings`.
+What it *is* good for is the expensive half: the metallib needs the Metal
+compiler and is 130 MB, and Apple publishes it, versioned and hashed.
+
+**But a prebuilt metallib does not buy a build without the toolchain**,
+which was worth checking before planning around it. MLX asks for the
+Metal compiler twice, and `MLX_METAL_PATH` is not a way past either:
+
+```cmake
+# CMakeLists.txt, when MLX_BUILD_METAL=ON on Darwin: fatal at configure
+execute_process(COMMAND zsh -c "echo __METAL_VERSION__ | xcrun -sdk macosx metal ..."
+                COMMAND_ERROR_IS_FATAL ANY)
+
+# mlx/backend/metal/kernels/CMakeLists.txt: every .metal compiled and linked
+add_custom_command(OUTPUT ${MLX_METAL_PATH}/mlx.metallib
+                   COMMAND xcrun -sdk macosx metal ...)
+add_dependencies(mlx mlx-metallib)   # the mlx target depends on it
+```
+
+`MLX_METAL_PATH` moves where the metallib is written and looked for; it
+does not skip building it, and `add_subdirectory(kernels)` is
+unconditional. So anyone building MLX with Metal needs the toolchain
+(`xcodebuild -downloadComponent MetalToolchain`), which is a thing a
+GitHub macOS runner can install and this machine cannot.
 
 ## Which one to point at
 
