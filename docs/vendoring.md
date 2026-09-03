@@ -137,7 +137,7 @@ the two that installs without Xcode, and that is not a preference.
 | what | state |
 |---|---|
 | mlx-rs / mlx-sys / mlx-c | **git dependency on `https://github.com/OminiX-ai/OminiX-MLX.git`, pinned to `4988a3fcfa48b8cb5d0780a501b92c6a41401523`.** Cargo.lock records the same commit; cargo resolves the mlx-c submodule itself |
-| MLX core | **not built from source here**: there is no Metal compiler on this machine, so a pre-built archive is used instead. `ext/torobi/mlx_prebuilt.rb` names it, and it states its own contents: **MLX v0.30.1 with mlx-c v0.4.1**, which is the pair upstream tagged together |
+| MLX core | **not built from source here**: there is no Metal compiler on this machine, so a pre-built archive is used instead. Since 2026-09-03 that archive is `takahashim/mlx-prebuilt`, built from stated inputs on a runner with the toolchain rather than taken from a third party's release. It says what is in it: **MLX v0.30.1 with mlx-c v0.4.1**, the pair upstream tagged together, built with Xcode 16.4 on macOS 15.7.7. `ext/torobi/mlx_prebuilt.rb` fetches it and refuses any other bytes |
 | mlx.metallib | 105 MB. MLX locates it through `dladdr`, i.e. **beside whichever library holds the MLX symbols**: `target/release/` for the CLI, the install directory for the extension. `ext/torobi/extconf.rb` appends a Makefile rule that installs it beside the bundle; `rake metallib` does the same for a checkout. Any distribution must ship it beside the bundle |
 
 ## Licences
