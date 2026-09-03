@@ -179,8 +179,10 @@ impl Op {
             },
             "cross_entropy" => Op::CrossEntropy,
             other => anyhow::bail!(
-                "op {other:?} is not in this engine's vocabulary (config/ops.yml \
-                 declares it, or it is a typo)"
+                "op {other:?} is not in this engine's vocabulary. The manifest is \
+                 Ruby's (config/ops.yml) and this list is compiled, so if the \
+                 manifest declares it, what is stale is the extension: build it \
+                 again (rake compile). Otherwise it is a typo."
             ),
         })
     }
