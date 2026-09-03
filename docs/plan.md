@@ -674,7 +674,7 @@ M0 と M1 の一部(§9.1 の M1 のうち single-step とその境界の初期�
 | `close` がなく、GPU 資源の解放が GC 任せ | — | 冪等な `close` と `Closed` 状態、block 形式の `ensure`。device memory の観測(`Torobi::Memory`: active / cache / peak / limit、`clear_cache!`、`limit=`)。「開いて閉じた 20 session が MB 単位を残さない」ことをテスト |
 
 **残る推奨**: 長時間学習を `Process.spawn` した専用 runner で走らせることを正式経路にする
-(§11.4 の配布方針と同じ判断の裏表)。engine CLI が既にあるので発展は容易。M3a の前後で決める。
+(§11.4 の配布方針と同じ判断の裏表)。→ **済**(§15.8、`Torobi::Runner`)。
 
 ### 15.3 M2 の進捗(2026-09-03)
 
@@ -701,7 +701,6 @@ digest・path・shape・optimizer 種別を読み戻しで検証し、不一致�
 **残る作業**(M3a の前に片付けるか、並行するか):
 
 - rollback ノブ、損失重みノブ
-- 長時間学習のための `Process.spawn` runner(§11.4 の配布方針と同じ判断)
 
 ### 15.5 engine の内部整理(2026-09-03)
 
@@ -788,3 +787,30 @@ fork guard も native へ移した。Ruby の `Preflight` は新しい `open` �
 順序が重要である)。子での `close` は engine を drop せず `forget` する。
 
 この時点で Ruby 154 件 / Rust 74 件。
+
+### 15.8 専用 training process(2026-09-03)
+
+§11.4 と review #3 が繰り返し求めていた「長時間学習は `Process.spawn` した専用 runner
+で」を `Torobi::Runner` として形にした。spec §9.4 が契約である。
+
+**両者が共有するのはディレクトリだけ**にした。子は journal と checkpoint をそこへ書き、
+親はその両方を読む。開いたままのパイプも、版を上げるプロトコルも要らない。進捗を子に
+尋ねないのが要点で、子は step の中かもしれず既に居ないかもしれないが、ディスク上の
+記録はどちらでも答える(journal が entry ごとに flush しているのが効く)。
+
+| | |
+| --- | --- |
+| 起動 | `Process.spawn` で exec。fork ではないので Metal device はついて来ない。run ディレクトリは `TOROBI_RUN_DIR` |
+| 停止 | 親が TERM。子の handler はフラグを立てるだけで、ループが step 境界で見る。入っている step を終え、最後の checkpoint を書いて 0 で終わる。猶予後に KILL |
+| 終了 | 0 = 完走または停止(journal 最後の note が区別)、69 = EngineUnavailable、70 = 例外、**signal = 落下**。signal を番号に混ぜないのは、それがこの仕組みの存在理由だから |
+| resume | 既にある checkpoint を消さない。消さないことが resume の経路である |
+
+落下は `Process.kill("ABRT")` をテスト用スクリプトに仕込んで固定した。親が `crashed?`
+と見分けられること、**その時点の checkpoint がそのまま読めて resume できる**ことまで
+確かめている(checkpoint は rename で置くので半端が残らない)。
+
+作っている途中で `Runner#running?` のバグが 1 つ出た。`waitpid(WNOHANG)` は終了
+ステータスを刈り取るので、捨てると `wait` が報告するものを失う。問い合わせが状態を
+変える操作だった。
+
+この時点で Ruby 162 件 / Rust 74 件。
