@@ -13,8 +13,8 @@ use mlx_rs::error::Exception;
 use mlx_rs::transforms::{eval, value_and_grad_with_argnums};
 use mlx_rs::Array;
 
-use crate::graph::Graph;
 use crate::interp::{self, Stat};
+use crate::op::Program;
 use crate::plan::{Model, Plan};
 use crate::state::Pass;
 
@@ -43,8 +43,13 @@ pub fn forward(
     // One key per graph, split from the step's, so a model and the
     // objective never draw the same numbers.
     let mut key = rng.cloned();
-    for Model { name, graph, slice } in &plan.models {
-        let inputs = resolve(graph, fields, &outputs, name)?;
+    for Model {
+        name,
+        program,
+        slice,
+    } in &plan.models
+    {
+        let inputs = resolve(program, fields, &outputs, name)?;
         let mine = match &key {
             Some(current) => {
                 let (next, mine) = mlx_rs::random::split(current, 2)?;
@@ -54,7 +59,7 @@ pub fn forward(
             None => None,
         };
         let produced = interp::evaluate_tapped(
-            graph,
+            program,
             &params[slice.clone()],
             &inputs,
             mine.as_ref(),
@@ -85,12 +90,12 @@ pub fn forward(
 
 /// One graph's inputs, each read from its declared source.
 fn resolve(
-    graph: &Graph,
+    program: &Program,
     fields: &BTreeMap<String, Array>,
     outputs: &BTreeMap<(String, String), Array>,
     where_: &str,
 ) -> std::result::Result<BTreeMap<String, Array>, Exception> {
-    graph
+    program
         .inputs
         .iter()
         .map(|spec| {

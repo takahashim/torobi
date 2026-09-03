@@ -169,6 +169,54 @@ pub fn with_dropout(p: f64) -> (String, String) {
     (config, weights)
 }
 
+/// One model that is a single named op over the batch, so a test can hold
+/// its arithmetic against a number worked out by hand.
+///
+/// `shape` is the input's, `attributes` the op's. The parameter is a
+/// scalar the run can differentiate, because a plan needs something to
+/// train; the op under test does not read it.
+pub fn one_op(op: &str, shape: Value, attributes: Value, extra_inputs: usize) -> (String, String) {
+    let mut inputs = vec![input(0, "x", shape.clone(), "f32")];
+    for i in 0..extra_inputs {
+        inputs.push(input(i + 1, &format!("v{i}"), shape.clone(), "f32"));
+    }
+    let mut under_test = node(
+        1,
+        op,
+        json!((0..=extra_inputs).map(|i| format!("input:{i}")).collect::<Vec<_>>()),
+        json!([]),
+    );
+    under_test["attributes"] = attributes;
+    under_test["name"] = json!("seen");
+    let graph = json!({
+        "inputs": inputs,
+        "parameters": [parameter(0, "w", json!([1]), true)],
+        "nodes": [
+            node(0, "parameter", json!([]), json!([0])),
+            under_test,
+            node(2, "mean", json!(["node:1"]), json!([])),
+            node(3, "mul", json!(["node:2", "node:0"]), json!([])),
+            node(4, "mean", json!(["node:3"]), json!([])),
+        ],
+        "outputs": {"loss": "node:4"},
+    });
+    let config = config(json!({"m": graph}), Value::Null, json!(["m"]));
+    let weights = json!({"params": {"m.w": {"shape": [1], "data": [1.0]}}}).to_string();
+    (config, weights)
+}
+
+/// A named batch field of any shape.
+pub fn field(name: &str, shape: &[i32], data: &[f32]) -> (String, crate::tensor::Tensor) {
+    (
+        name.to_string(),
+        crate::tensor::Tensor {
+            dtype: mlx_rs::Dtype::Float32,
+            shape: shape.to_vec(),
+            values: crate::tensor::Values::F32(data.to_vec()),
+        },
+    )
+}
+
 /// A batch of two rows for the graphs above.
 pub fn batch_x(rows: &[f32]) -> crate::tensor::Batch {
     let n = rows.len() as i32 / 2;

@@ -1022,6 +1022,48 @@ HF 配置の名前(`encoder.layer.0.attention.self.query.weight`)からの読み
 
 この時点で Ruby 175 件 / Rust 88 件。
 
+### 15.15 M3a: op を open で解決し、1 ブロックを通す(2026-09-03)
+
+**先に構造を直した。** interp は step ごとに op を文字列 match し、属性を
+`serde_json::Map` から引いていた。ここに 16 op 足すのは逆方向なので、`engine/src/op.rs`
+を作り、`Program::resolve` が open 時に `Op` enum へ落とすようにした。
+
+得たものは速さより**失敗の時期**である。今まで value_and_grad の中から MLX 例外として
+step 1 で出ていたものが、open 時の拒否になった。
+
+| 何が | いつ分かるようになったか |
+| --- | --- |
+| 語彙に無い op | open。ノード番号と op 名つき |
+| 属性が無い / 型が違う | open |
+| dropout の p が 0..1 の外 | open(乱数を引く前) |
+| 入力の数が合わない | open。`config/ops.yml` の arity と照合 |
+| 未計算のノードを読む | open。**interp の `values[id]` が範囲内なのはこの検査があるからである** |
+| 存在しない input / parameter を読む | open |
+| output が無い | open |
+
+**16 op を実装した。** neg / abs / sqrt / exp / log / gelu / relu / sigmoid / tanh /
+softmax / slice / sum / layer_norm / rms_norm / rope / sdpa。`config/ops.yml` の 32 と
+engine の解決表が**完全に一致**した(差分ゼロを機械的に確認)。
+
+gelu は erf の厳密形にした。tanh 近似ではない。M3b の parity は reference 実装との
+一致を見るので、そこで数値がずれる理由を自分で作らない。
+
+**1 ブロックの gradient を有限差分で検証した**(`test/block_test.rb`)。
+layer_norm(bias あり) → q/k/v → sdpa → 残差 → layer_norm → GeGLU → 残差 → mse。
+oracle は Python MLX ではなく中心差分にした。Python MLX は Torobi を「同じ考えの別の
+実装」と比べるが、中心差分は engine の gradient を**engine 自身の forward**と比べる。
+autodiff が一致すべき相手はそちらであり、第 2 のツールチェーンも要らず、構成上
+fail closed で、この milestone が問うている誤り(forward は正しく backward が違う op)
+をちょうど捕まえる。
+
+実測: 勾配の最大が 0.036、解析値と数値差分の最大乖離が **5.35e-06**。閾値は 1e-4 に
+した。勾配が全部ゼロでも通ってしまわないよう、勾配の大きさそのものも assert している。
+
+中心差分が捕まえないのは「forward と backward が同じように間違っている」場合で、
+それは Python MLX oracle の仕事であり M3b である。
+
+この時点で Ruby 178 件 / Rust 107 件。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

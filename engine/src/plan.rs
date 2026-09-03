@@ -18,7 +18,8 @@ use mlx_rs::transforms::eval;
 use mlx_rs::Array;
 use serde::Deserialize;
 
-use crate::graph::{Graph, GraphConfig, ParameterSpec};
+use crate::graph::{GraphConfig, ParameterSpec};
+use crate::op::Program;
 use crate::tensor::{dtype_named, Tensor};
 
 /// Where a run's initial parameters come from.
@@ -40,11 +41,13 @@ pub enum Weights<'a> {
     File(&'a Path),
 }
 
-/// One model as the plan holds it: its graph, and where its parameters sit
-/// in the run's flat parameter vector.
+/// One model as the plan holds it: its program, and where its parameters
+/// sit in the run's flat parameter vector.
 pub struct Model {
     pub name: String,
-    pub graph: Graph,
+    /// Resolved when the plan opened, so a step reads values rather than
+    /// JSON (`crate::op`).
+    pub program: Program,
     /// Range into the parameter vector, in the order the config declared.
     pub slice: Range<usize>,
 }
@@ -66,9 +69,9 @@ struct WeightsJson {
 /// The shape of a run: everything settled before the first step.
 pub struct Plan {
     pub models: Vec<Model>,
-    /// The graph that reaches the loss. When a config declares none, the
+    /// The program that reaches the loss. When a config declares none, the
     /// single model's own output is the loss.
-    pub objective: Option<Graph>,
+    pub objective: Option<Program>,
     /// Qualified paths ("student.head.weight"), parallel to the parameter
     /// vector. This order is the contract checkpoints follow.
     pub paths: Vec<String>,
@@ -120,7 +123,12 @@ impl Plan {
                 paths.push(path);
             }
             let slice = start..params.len();
-            models.push(Model { name, graph, slice });
+            let program = Program::resolve(graph, slice.len(), &name)?;
+            models.push(Model {
+                name,
+                program,
+                slice,
+            });
         }
         anyhow::ensure!(
             !candidates.is_empty(),
@@ -130,9 +138,13 @@ impl Plan {
         // One evaluation for the lot: a file's arrays are lazy until asked.
         eval(params.iter())?;
 
+        let objective = config
+            .objective
+            .map(|graph| Program::resolve(graph, 0, "objective"))
+            .transpose()?;
         let mut plan = Self {
             models,
-            objective: config.objective,
+            objective,
             paths,
             candidates,
             config_digest,
@@ -146,9 +158,12 @@ impl Plan {
         Ok((plan, params))
     }
 
-    /// Every graph a run evaluates, models first.
-    pub fn graphs(&self) -> impl Iterator<Item = &Graph> {
-        self.models.iter().map(|m| &m.graph).chain(self.objective.iter())
+    /// Every program a run evaluates, models first.
+    pub fn programs(&self) -> impl Iterator<Item = &Program> {
+        self.models
+            .iter()
+            .map(|m| &m.program)
+            .chain(self.objective.iter())
     }
 
     /// Every batch field the run reads.
@@ -163,8 +178,8 @@ impl Plan {
 
     fn derive_input_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
-            .graphs()
-            .flat_map(|g| g.inputs.iter().filter_map(|i| i.batch_field()))
+            .programs()
+            .flat_map(|p| p.inputs.iter().filter_map(|i| i.batch_field()))
             .map(str::to_string)
             .collect();
         names.sort();
@@ -173,8 +188,8 @@ impl Plan {
     }
 
     fn derive_node_names(&self) -> Vec<String> {
-        self.graphs()
-            .flat_map(|g| g.nodes.iter().filter_map(|n| n.name.clone()))
+        self.programs()
+            .flat_map(|p| p.node_names().cloned())
             .collect()
     }
 
@@ -210,8 +225,8 @@ impl Plan {
         }
 
         let mut fields = BTreeMap::new();
-        for graph in self.graphs() {
-            for spec in &graph.inputs {
+        for program in self.programs() {
+            for spec in &program.inputs {
                 let Some(field) = spec.batch_field() else {
                     continue;
                 };

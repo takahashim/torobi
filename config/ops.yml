@@ -69,6 +69,9 @@
   inputs: 1
   shape_rule: same_as_input
   handle: true
+# The exact form, 0.5x(1 + erf(x/sqrt2)), not the tanh approximation: the
+# reference implementations of the models this has to match use erf, and a
+# parity check against them is the point (docs/plan.md 9.2).
 - name: gelu
   inputs: 1
   shape_rule: same_as_input

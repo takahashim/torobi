@@ -12,6 +12,7 @@ mod fixtures;
 pub mod graph;
 pub mod interp;
 pub mod memory;
+pub mod op;
 pub mod optimizer;
 pub mod plan;
 pub mod runtime;

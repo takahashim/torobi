@@ -79,6 +79,7 @@ pub struct NodeSpec {
 }
 
 /// "input:3" -> (Input, 3); "node:7" -> (Node, 7).
+#[derive(Clone, Copy, Debug)]
 pub enum Ref {
     Input(usize),
     Node(usize),
