@@ -34,6 +34,57 @@ module Torobi
         end
       end
 
+      # Lets a number lead: `1.0 - x`, `2.0 * x`.
+      #
+      # Ruby asks the right-hand side to coerce when the left does not know
+      # what to do with it, and the pair it returns is sent the operator
+      # again. Returning `[Scalar.new(number), self]` puts the number in
+      # something that knows how to fold itself into the graph, which is
+      # what makes a loss read the way it is written on paper.
+      def coerce(other)
+        unless other.is_a?(Numeric)
+          raise ConfigError, "cannot combine a #{other.class} with a graph value"
+        end
+
+        [Scalar.new(self, other), self]
+      end
+
+      # A number waiting to meet a graph value, and nothing else.
+      #
+      # It is what `coerce` returns, never something to build: it has no
+      # meaning apart from the operator Ruby is about to send it. Kept
+      # under Handle for that reason.
+      class Scalar
+        def initialize(handle, value)
+          @handle = handle
+          @value = value
+          freeze
+        end
+
+        # Addition and multiplication do not care which side they are on.
+        def +(other) = other + @value
+        def *(other) = other * @value
+
+        # Subtraction and division do, so these are the reversed forms:
+        # `1.0 - x` is `-(x - 1.0)`, and `1.0 / x` needs the graph to
+        # divide the other way round.
+        def -(other) = (other - @value) * -1.0
+        def /(other) = @handle.builder.emit("div", inputs: [filled(other), other])
+
+        def inspect = "#<Torobi::DSL::Handle::Scalar #{@value}>"
+        alias to_s inspect
+
+        private
+
+        # The number as a graph value of the same shape, so `div` has two
+        # sides. Made from the handle rather than beside it, because a
+        # scalar has no shape of its own.
+        def filled(other)
+          ones = @handle.builder.emit("mul_scalar", inputs: [other], attrs: { "value" => 0.0 })
+          @handle.builder.emit("add_scalar", inputs: [ones], attrs: { "value" => @value })
+        end
+      end
+
       # Splits into `count` equal parts along `axis`, as slice nodes.
       def split(count, axis: -1)
         normalized = Shape.axis!(axis, shape.size, where: "split")

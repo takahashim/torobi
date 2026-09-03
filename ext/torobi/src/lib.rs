@@ -698,20 +698,39 @@ fn json_to_ruby(ruby: &Ruby, value: serde_json::Value) -> Result<Value, Error> {
         .and_then(|json| json.funcall("parse", (value.to_string(),)))
 }
 
+/// Runs work that touches no MLX, catching a panic rather than letting it
+/// reach Ruby as a `fatal` no `rescue` can hold.
+///
+/// Everything the extension exposes goes through one of three doors:
+/// `Session::with_engine` for a session, `global` for the process-wide MLX
+/// calls, and this for the rest. Each of them catches, because a panic
+/// that crosses the C boundary ends the process (burn-rb reached the same
+/// rule from the same place: every public function of an extension needs
+/// a net under it).
+fn plainly<T>(ruby: &Ruby, work: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+    match catch_unwind(AssertUnwindSafe(work)) {
+        Ok(result) => result,
+        Err(panic) => Err(poisoned(ruby, &gvl::describe(panic))),
+    }
+}
+
 /// What the engine was built from, as a Ruby Hash. A journal records it,
 /// so a run can say which build produced it.
 fn build_info(ruby: &Ruby) -> Result<Value, Error> {
-    json_to_ruby(ruby, torobi_engine::build_info())
+    plainly(ruby, || json_to_ruby(ruby, torobi_engine::build_info()))
 }
 
 /// What a checkpoint says about itself, without opening it into a session.
 /// For a caller deciding which one to resume from, and for anyone asking
 /// what a directory on disk actually holds.
 fn checkpoint_manifest(ruby: &Ruby, dir: String) -> Result<Value, Error> {
-    let json = torobi_engine::checkpoint::read_manifest_json(&dir).map_err(|e| to_error(ruby, e))?;
-    ruby.class_object()
-        .const_get::<_, magnus::RModule>("JSON")
-        .and_then(|module| module.funcall("parse", (json,)))
+    plainly(ruby, || {
+        let json =
+            torobi_engine::checkpoint::read_manifest_json(&dir).map_err(|e| to_error(ruby, e))?;
+        ruby.class_object()
+            .const_get::<_, magnus::RModule>("JSON")
+            .and_then(|module| module.funcall("parse", (json,)))
+    })
 }
 
 #[magnus::init]

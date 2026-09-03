@@ -1363,6 +1363,44 @@ kohagi との数値 parity は 3 例とも**まったく同じ**まま(cos 0.999
 
 この時点で Ruby 198 件 / Rust 109 件。
 
+### 15.23 burn-rb を読み直して 3 つ取り入れた(2026-09-03)
+
+`lib/burn/` と `ext/burn/src/` を通して読み、Torobi に無いものを探した。
+
+**取り入れたもの**
+
+1. **「拡張のあらゆる公開関数は net を通る」**(`ext/burn/src/error.rs` の
+   `boundary`)。Torobi は session の口と process-global な MLX の口は panic を
+   捕まえていたが、**`build_info` と `checkpoint_manifest` は素通しだった**。panic が
+   C 境界を越えると magnus が `fatal` にし、どの `rescue` も拾えずプロセスが終わる。
+   `plainly` を足して、公開の口を 3 つ(`with_engine` / `global` / `plainly`)に
+   揃えた。
+
+2. **左辺がスカラーの式**(`lib/burn/scalar.rb`)。`1.0 - x` は損失を紙に書くときの
+   形なのに、Ruby は `Float#-` が Handle を知らないので書けなかった。burn-rb と同じく
+   `coerce` を実装し、返す `Scalar` は「Ruby が次に送る演算子と組でしか意味を持たない」
+   ものとして Handle の下に置いた。5 通り(`1.0 - x` / `x - 1.0` / `2.0 * x` /
+   `1.0 / x` / `x / 2.0`)を実物の値で検証した。
+
+3. **例外階層を 1 箇所に木で書く**(`lib/burn/errors.rb`)。Torobi の階層は
+   `Busy` / `SessionPoisoned` / `RuntimePoisoned` と育っていたのに、全体像がどこにも
+   無かった。あわせて burn-rb が明記していた**「Ctrl-C は Ruby の `Interrupt` のまま
+   上げる」**を Torobi でも保証として書き、テストで固めた(`rescue => e` が握り潰す
+   形にしてはいけない。止められない学習ループは失敗する学習ループより悪い)。
+
+**取り入れなかったもの、とその理由**
+
+| burn-rb | Torobi | なぜ |
+| --- | --- | --- |
+| unblock function(`without_interruptible`) | 持たない | burn-rb は学習ループ全体を Rust で回すので要る。Torobi は Ruby が step 単位で駆動するので、Ruby のループ自体が中断点になる(`SESSION_CONCURRENCY_SPEC` §2.1) |
+| `stash` / `take_pending`(Ruby 例外を Rust フレーム越しに運ぶ) | 持たない | 計算の中に Ruby の callback が入らない設計(§4)なので、そこで Ruby 例外が起きない |
+| 例外クラスを Rust 側で `define_error` | Ruby 側で定義し Rust が引く | 純 Ruby の半分(DSL と IR)が拡張なしで同じ階層を持つ必要がある |
+| 拡張が生やすメソッドの `@!method` スタブ | 不要 | burn-rb の `Tensor` は拡張クラスそのもの。Torobi は Ruby の `Session` が公開面で、`Native::Session` は内部 |
+| in-process の `Device#probe` | subprocess の `Preflight.probe!` | Torobi の失敗様式は例外ではなく abort なので、同じプロセスで聞けない |
+| `Train::Config`(宣言してから launch) | `Session#run` | ループの所有権が逆。§15.2 で決めた |
+
+この時点で Ruby 200 件 / Rust 109 件。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

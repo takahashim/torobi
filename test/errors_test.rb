@@ -68,6 +68,38 @@ class ErrorsTest < Minitest::Test
     end
   end
 
+  # An interrupt is not one of ours, and must not become one: `rescue => e`
+  # would swallow it, and a run that cannot be stopped is worse than one
+  # that fails.
+  def test_an_interrupt_stays_ruby_s_own
+    refute_operator Interrupt, :<, Torobi::Error
+    refute_operator Interrupt, :<, StandardError
+
+    skip "extension not compiled" unless defined?(Torobi::Session)
+
+    model = Torobi.graph do |g|
+      x = g.input :x, [nil, 2]
+      g.output :loss, g.mean(g.linear(x, 1, name: "l"))
+    end
+    config = Torobi::GraphConfig.new(models: { m: model })
+    weights = { params: { "m.l.weight" => { shape: [1, 2], data: [0.1, 0.2] },
+                          "m.l.bias" => { shape: [1], data: [0.0] } } }
+    batch = { x: { shape: [1, 2], data: [1.0, 2.0] } }
+
+    Torobi::Session.open(config, weights:) do |s|
+      target = Thread.current
+      killer = Thread.new { sleep 0.05; target.raise(Interrupt, "stop") }
+      raised = assert_raises(Interrupt) do
+        100_000.times { s.step!(batch) }
+      end
+      killer.join
+
+      assert_equal "stop", raised.message
+      # And the session is still usable, which is the other half.
+      s.step!(batch)
+    end
+  end
+
   def test_engine_unavailable_is_raised_before_the_engine_is_touched
     skip "extension not compiled" unless defined?(Torobi::Session)
     # Preflight's contract; the abort it prevents is pinned in

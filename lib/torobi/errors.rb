@@ -3,6 +3,21 @@
 module Torobi
   # Base class for everything Torobi raises.
   #
+  #   StandardError
+  #   └── Torobi::Error
+  #       ├── ConfigError       a description that is wrong, found at build time
+  #       ├── StepError         the engine refused; the session is still yours
+  #       │   └── Busy          it is serving another thread. Retry.
+  #       ├── SessionPoisoned   the engine panicked under this session
+  #       ├── RuntimePoisoned   it panicked holding MLX; no session here is usable
+  #       └── EngineUnavailable MLX cannot run here at all
+  #
+  # Ctrl-C stays Ruby's own `Interrupt`, and `Timeout::Error` stays
+  # `Timeout::Error`. Neither is translated into anything above: turning an
+  # interrupt into a StandardError would have `rescue => e` swallow it, and
+  # a training loop that cannot be stopped by Ctrl-C is worse than one that
+  # fails (notes/SESSION_CONCURRENCY_SPEC.md section 7).
+  #
   # The hierarchy is the error contract of docs/plan.md section 5A.4, and it
   # is a contract about *when* a failure is found and *what survives it*:
   #

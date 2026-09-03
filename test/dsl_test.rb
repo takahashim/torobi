@@ -129,6 +129,21 @@ class DslTest < Minitest::Test
     assert_includes graph.parameters.map(&:path), "layers.0.mlp_norm.weight"
   end
 
+  # A number may lead: `1.0 - x` is how a loss is written on paper, and
+  # Ruby's coerce is what lets it be written that way here.
+  def test_a_number_may_lead_an_expression
+    graph = Torobi.graph do |g|
+      x = g.input :x, [nil, 2]
+      g.output :loss, g.mean(2.0 * (1.0 - x))
+    end
+
+    assert_operator graph.nodes.size, :>, 2
+    # And nothing but a number may.
+    assert_raises(TypeError) do
+      Torobi.graph { |g| g.output :loss, g.mean("two" * g.input(:x, [nil, 2])) }
+    end
+  end
+
   def test_the_manifest_and_the_ruby_side_agree
     Torobi::Ops::REGISTRY.each_value do |spec|
       assert_includes Torobi::Shape::RULES, spec.shape_rule,
