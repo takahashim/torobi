@@ -98,7 +98,9 @@ pub fn teacher_and_student() -> (String, String) {
             "parameters": [parameter(0, path, json!([2]), true)],
             "nodes": [
                 node(0, "parameter", json!([]), json!([0])),
-                node(1, "mul", json!(["input:0", "node:0"]), json!([])),
+                // Named, and named the same in both models, which is what
+                // two models of one architecture look like.
+                named(1, "mul", json!(["input:0", "node:0"]), json!([]), "scaled"),
             ],
             "outputs": {"out": "node:1"},
         })

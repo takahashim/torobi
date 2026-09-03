@@ -201,9 +201,9 @@ class ModernBertTest < Minitest::Test
     )
     Torobi::Session.open(session_config,
                          pretrained: { m: File.join(dir, "model.safetensors") }) do |s|
-      s.tap("hidden", stat: :full)
+      s.tap("m.hidden", stat: :full)
       s.evaluate(Torobi::Models::ModernBERT.batch(config, [ids], seq:))
-      rows = s.tapped.fetch("hidden").to_a.each_slice(dim).to_a
+      rows = s.tapped.fetch("m.hidden").to_a.each_slice(dim).to_a
       pooled = Array.new(dim) { |j| rows.sum { |row| row[j] } / rows.size }
       length = Math.sqrt(pooled.sum { |v| v * v })
       pooled.map { |v| v / length }

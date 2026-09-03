@@ -264,6 +264,19 @@ impl Program {
     }
 }
 
+/// What the objective's own nodes and inputs are named by, since it is a
+/// graph without being a model.
+pub const OBJECTIVE: &str = "objective";
+
+/// How a tap names a node: the graph it belongs to, then the node.
+///
+/// The same shape as a parameter path ("student.head.weight"), and for
+/// the same reason: two models of one architecture share every name
+/// inside them.
+pub fn qualified(graph: &str, node: &str) -> String {
+    format!("{graph}.{node}")
+}
+
 /// That a reference names something that exists, and that a node reference
 /// names one already computed.
 ///

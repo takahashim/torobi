@@ -1629,6 +1629,44 @@ provenance** を持つ)、そして `experiments/records/2026-09-03-esci-jp.json
 
 この時点で Ruby 203 件 / Rust 109 + 28 件。
 
+### 15.29 観測の窓を 2 つ直す。名前の衝突と、柵を回った試験(2026-09-03)
+
+M4 まで書き切った状態で見直して、2 つ出た。どちらも実在した。
+
+**1. tap の名前がモデル間で衝突していた。** パラメータは `student.head.weight` と
+名前空間化されるのに、**node 名はされていなかった**。同じ node 名を持つモデルが
+2 つある構成 (student と teacher が同じアーキテクチャ、つまり蒸留の典型形) では:
+
+    {node_names: ["l", "l"]}        # 重複したまま返る
+    {tapped: {"l" => [10.0]}}       # b の値。a の 2.0 は黙って消える
+
+`interp::evaluate_tapped` が node 名だけで tap を引き、`Tapped` が node 名で
+keyed だったため、**後に走ったモデルが前のものを上書き**していた。教師の中間層を
+見ようとした人は、学生の値を教師の値だと思って読むことになる。
+
+qualifier (モデル名、objective は `"objective"`) を通し、`node_names` /
+`tap` / `untap` / `taps` / `tapped` のすべてを `student.hidden` の形に揃えた。
+パラメータ path と同じ形であり、同じ理由による。
+
+**2. facade テストが柵を回っていて、8 回中 6 回プロセスを落としていた。**
+`rust_test:facade` は「runtime が制約の在り処である」ことの証拠として並列で走らせて
+いるもので(§15.11)、その証拠自身が落ちていた。
+
+    failed assertion `A command encoder is already encoding to this command buffer'
+    process didn't exit successfully (signal: 6, SIGABRT)
+
+原因はテスト専用の `rng_for_test` が `&Array` を返し、**テストが `to_tensor` を
+自分のスレッドで呼んでいた**こと。`to_tensor` は array を評価してデバイスから
+copy するので、これは MLX への submit である。他のテストの step が飛んでいる最中に
+別スレッドから submit すれば、まさにこの runtime が防ぐために在る事故が起きる。
+
+`rng_for_test` が `runtime().execute` を通して host の `Tensor` を返すようにした。
+**10 回連続で 0 回**になった (前は 8 回中 6 回)。
+
+製品コードの経路は元から全て柵を通っていたので §15.11 の主張自体は生きているが、
+**それを証明するはずのテストが例外だった**。「公開の経路は必ず execute を通り、
+呼ぶ側は分類しない」は `#[cfg(test)]` の口にも同じく適用される。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

@@ -19,6 +19,7 @@ use mlx_rs::Array;
 use serde::Deserialize;
 
 use crate::graph::{GraphConfig, ParameterSpec};
+use crate::op::{qualified, OBJECTIVE};
 use crate::op::Program;
 use crate::tensor::{dtype_named, Tensor};
 
@@ -173,7 +174,7 @@ impl Plan {
 
         let objective = config
             .objective
-            .map(|graph| Program::resolve(graph, 0, "objective"))
+            .map(|graph| Program::resolve(graph, 0, OBJECTIVE))
             .transpose()?;
         let mut plan = Self {
             models,
@@ -220,9 +221,20 @@ impl Plan {
         names
     }
 
+    /// Every name a tap may ask for, qualified by the graph it is in.
+    ///
+    /// Qualified for the same reason a parameter path is: a distillation
+    /// runs two models of one architecture, so "hidden" names a node in
+    /// both of them and "student.hidden" names one.
     fn derive_node_names(&self) -> Vec<String> {
-        self.programs()
-            .flat_map(|p| p.node_names().cloned())
+        self.models
+            .iter()
+            .flat_map(|m| m.program.node_names().map(|n| qualified(&m.name, n)))
+            .chain(
+                self.objective
+                    .iter()
+                    .flat_map(|o| o.node_names().map(|n| qualified(OBJECTIVE, n))),
+            )
             .collect()
     }
 
@@ -612,7 +624,7 @@ mod tests {
     fn node_names_are_what_a_tap_may_ask_for() {
         let (config, weights) = fixtures::scaled_mean();
         let (plan, _) = open(&config, &weights).unwrap();
-        assert_eq!(plan.node_names(), vec!["scaled"]);
+        assert_eq!(plan.node_names(), vec!["m.scaled"]);
     }
 
     fn tensor(shape: Vec<i32>, values: Values) -> Tensor {

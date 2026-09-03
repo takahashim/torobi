@@ -80,10 +80,10 @@ def child(run, dir, rows, steps)
     # The loss is a number about the run; this is the claim itself. A tap
     # reads the head's output on a forward that takes no step, and the
     # sigmoid of it is what a cross-encoder reports.
-    s.tap("classifier", stat: :full)
+    s.tap("student.classifier", stat: :full)
     s.evaluate(batch)
     puts "row  student  teacher"
-    s.tapped.fetch("classifier").to_a.each_with_index do |logit, i|
+    s.tapped.fetch("student.classifier").to_a.each_with_index do |logit, i|
       puts format("%3d  %7.4f  %7.4f", i, 1 / (1 + Math.exp(-logit)), rows[i].fetch("teacher"))
     end
   end

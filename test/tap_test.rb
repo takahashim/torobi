@@ -35,9 +35,12 @@ class TapTest < Minitest::Test
 
   def batch = { x: { shape: [ROWS, DIM], data: Array.new(ROWS * DIM, 1.0) } }
 
-  def test_the_names_a_tap_can_ask_for_are_the_ones_the_dsl_gave
+  # The names the DSL gave, each under the model it is in. Qualified for
+  # the same reason a parameter path is: a distillation runs two models of
+  # one architecture, and "first" would name a node in both of them.
+  def test_the_names_a_tap_can_ask_for_are_the_dsl_names_under_their_model
     Torobi::Session.open(config, weights: weights) do |s|
-      assert_equal %w[first second], s.node_names
+      assert_equal %w[m.first m.second], s.node_names
     end
   end
 
@@ -45,17 +48,17 @@ class TapTest < Minitest::Test
   # every one of ROWS x DIM places after the first layer.
   def test_a_tap_reduces_on_the_device
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
-      s.tap("first", stat: :mean)
+      s.tap("m.first", stat: :mean)
       s.step!(batch)
-      assert_in_delta 0.4, s.tapped.fetch("first"), 1e-6
+      assert_in_delta 0.4, s.tapped.fetch("m.first"), 1e-6
 
-      s.tap("first", stat: :norm)
+      s.tap("m.first", stat: :norm)
       s.step!(batch)
-      assert_in_delta Math.sqrt(ROWS * DIM * 0.4**2), s.tapped.fetch("first"), 1e-5
+      assert_in_delta Math.sqrt(ROWS * DIM * 0.4**2), s.tapped.fetch("m.first"), 1e-5
 
-      s.tap("first", stat: :extent)
+      s.tap("m.first", stat: :extent)
       s.step!(batch)
-      extent = s.tapped.fetch("first")
+      extent = s.tapped.fetch("m.first")
       assert_equal [2], extent.shape
       assert_in_delta 0.4, extent.to_a.first, 1e-6
       assert_in_delta 0.4, extent.to_a.last, 1e-6
@@ -64,9 +67,9 @@ class TapTest < Minitest::Test
 
   def test_a_full_tap_brings_the_tensor_back
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
-      s.tap("second", stat: :full)
+      s.tap("m.second", stat: :full)
       s.step!(batch)
-      value = s.tapped.fetch("second")
+      value = s.tapped.fetch("m.second")
       assert_equal [ROWS, 1], value.shape
       assert_equal ROWS, value.size
       assert(value.to_a.all? { |v| (v - 0.16).abs < 1e-6 })
@@ -75,15 +78,15 @@ class TapTest < Minitest::Test
 
   def test_several_taps_at_once_and_untapping
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
-      s.tap("first").tap("second", stat: :mean)
-      assert_equal %w[first second], s.taps
+      s.tap("m.first").tap("m.second", stat: :mean)
+      assert_equal %w[m.first m.second], s.taps
       s.step!(batch)
-      assert_equal %w[first second], s.tapped.keys
+      assert_equal %w[m.first m.second], s.tapped.keys
 
-      assert s.untap("first")
-      refute s.untap("first"), "untapping twice reports that there was nothing to untap"
+      assert s.untap("m.first")
+      refute s.untap("m.first"), "untapping twice reports that there was nothing to untap"
       s.step!(batch)
-      assert_equal %w[second], s.tapped.keys
+      assert_equal %w[m.second], s.tapped.keys
     end
   end
 
@@ -95,7 +98,7 @@ class TapTest < Minitest::Test
       s.fetch("m.second.weight").to_a
     end
     with = Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
-      s.tap("first", stat: :norm)
+      s.tap("m.first", stat: :norm)
       s.run([batch] * 5)
       s.fetch("m.second.weight").to_a
     end
@@ -108,7 +111,7 @@ class TapTest < Minitest::Test
       assert_match(/no value is named "third"/, e.message)
       assert_match(/first/, e.message, "the refusal should say what there is")
 
-      e = assert_raises(Torobi::StepError) { s.tap("first", stat: :median) }
+      e = assert_raises(Torobi::StepError) { s.tap("m.first", stat: :median) }
       assert_match(/is not a statistic/, e.message)
     end
   end
@@ -118,8 +121,8 @@ class TapTest < Minitest::Test
   def test_a_hook_reads_what_the_tap_saw
     seen = []
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
-      s.tap("first", stat: :norm)
-      s.on(:step) { |e| seen << e.session.tapped.fetch("first") }
+      s.tap("m.first", stat: :norm)
+      s.on(:step) { |e| seen << e.session.tapped.fetch("m.first") }
       s.run([batch] * 3)
     end
     assert_equal 3, seen.size

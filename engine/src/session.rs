@@ -464,11 +464,20 @@ impl Session {
         runtime().execute(|| core.restore(dir))
     }
 
-    /// The RNG key, for the tests that watch it move. Test-only: a key is
-    /// state, and nothing outside has a use for it.
+    /// The RNG key as host values, for the tests that watch it move.
+    ///
+    /// Test-only: a key is state, and nothing outside has a use for it. It
+    /// goes through the runtime like everything else, because reading an
+    /// array evaluates it and copies it off the device. A test that took
+    /// the short way here would be submitting to MLX from a thread of its
+    /// own while another test's step was in flight, which is what this
+    /// crate's whole runtime exists to prevent.
     #[cfg(test)]
-    pub(crate) fn rng_for_test(&self) -> &mlx_rs::Array {
-        self.core.as_ref().expect("open").state.pass().rng
+    pub(crate) fn rng_for_test(&self) -> Tensor {
+        let core = self.core.as_ref().expect("open");
+        runtime()
+            .execute(|| crate::tensor::to_tensor(core.state.pass().rng))
+            .expect("reading the RNG key")
     }
 
     fn core(&self) -> Outcome<&SessionCore> {
@@ -587,31 +596,56 @@ mod tests {
     #[test]
     fn a_tap_reports_what_the_step_computed() {
         let mut session = session(fixtures::scaled_mean());
-        assert_eq!(session.node_names().unwrap(), vec!["scaled"]);
+        assert_eq!(session.node_names().unwrap(), vec!["m.scaled"]);
         assert!(session.tapped().unwrap().is_empty());
 
-        session.tap("scaled", "mean").unwrap();
-        assert_eq!(session.taps().unwrap(), vec!["scaled"]);
+        session.tap("m.scaled", "mean").unwrap();
+        assert_eq!(session.taps().unwrap(), vec!["m.scaled"]);
         // x * w with x = [[1, 1]] and w = [1, 2] is [[1, 2]], mean 1.5.
         session.run_step(&fixtures::batch_x(&[1.0, 1.0])).unwrap();
         let seen = session.tapped().unwrap();
         assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].0, "scaled");
+        assert_eq!(seen[0].0, "m.scaled");
         close(&values(&seen[0].1), &[1.5]);
 
-        assert!(session.untap("scaled").unwrap());
-        assert!(!session.untap("scaled").unwrap());
+        assert!(session.untap("m.scaled").unwrap());
+        assert!(!session.untap("m.scaled").unwrap());
         assert!(session.taps().unwrap().is_empty());
     }
 
     #[test]
     fn a_full_tap_brings_back_the_tensor_and_a_reduction_a_scalar() {
         let mut session = session(fixtures::scaled_mean());
-        session.tap("scaled", "full").unwrap();
+        session.tap("m.scaled", "full").unwrap();
         session.run_step(&fixtures::batch_x(&[1.0, 1.0])).unwrap();
         let seen = session.tapped().unwrap();
         assert_eq!(seen[0].1.shape, vec![1, 2]);
         close(&values(&seen[0].1), &[1.0, 2.0]);
+    }
+
+    /// The name a tap asks for carries the model, so a distillation can
+    /// watch the student and the teacher at once. Unqualified, both models
+    /// answer to "scaled" and one of them silently wins.
+    #[test]
+    fn two_models_of_one_shape_are_tapped_apart() {
+        let mut session = session(fixtures::teacher_and_student());
+        assert_eq!(
+            session.node_names().unwrap(),
+            vec!["student.scaled", "teacher.scaled"]
+        );
+
+        session.tap("student.scaled", "full").unwrap();
+        session.tap("teacher.scaled", "full").unwrap();
+        session.evaluate(&fixtures::batch_x(&[1.0, 1.0])).unwrap();
+
+        let seen = session.tapped().unwrap();
+        assert_eq!(seen.len(), 2);
+        // The student's scale is [1, 1] and the teacher's is [3, 4]: each
+        // tap reports its own model rather than whichever ran last.
+        assert_eq!(seen[0].0, "student.scaled");
+        close(&values(&seen[0].1), &[1.0, 1.0]);
+        assert_eq!(seen[1].0, "teacher.scaled");
+        close(&values(&seen[1].1), &[3.0, 4.0]);
     }
 
     #[test]
@@ -619,7 +653,7 @@ mod tests {
         let mut session = session(fixtures::scaled_mean());
         let e = session.tap("nowhere", "mean").unwrap_err().to_string();
         assert!(e.contains("no value is named"), "{e}");
-        let e = session.tap("scaled", "median").unwrap_err().to_string();
+        let e = session.tap("m.scaled", "median").unwrap_err().to_string();
         assert!(e.contains("is not a statistic"), "{e}");
         assert!(session.taps().unwrap().is_empty());
     }
@@ -629,7 +663,7 @@ mod tests {
         let batch = fixtures::batch_x(&[1.0, 2.0, 3.0, 4.0]);
         let mut quiet = session(fixtures::scaled_mean());
         let mut watched = session(fixtures::scaled_mean());
-        watched.tap("scaled", "norm").unwrap();
+        watched.tap("m.scaled", "norm").unwrap();
         for _ in 0..3 {
             quiet.run_step(&batch).unwrap();
             watched.run_step(&batch).unwrap();
@@ -745,9 +779,9 @@ mod evaluation_tests {
         // count exactly as it would have. A resumed run has to agree.
         let (config, weights) = fixtures::divides_by_zero();
         let mut session = Session::open(&config, Weights::Inline(&weights)).unwrap();
-        let before = crate::tensor::to_tensor(&session.rng_for_test()).unwrap();
+        let before = session.rng_for_test();
         session.run_step(&fixtures::batch_x(&[1.0, 2.0])).unwrap();
-        let after = crate::tensor::to_tensor(&session.rng_for_test()).unwrap();
+        let after = session.rng_for_test();
 
         assert_ne!(values(&before), values(&after));
     }
@@ -760,7 +794,7 @@ mod evaluation_tests {
         session.run_step(&batch).unwrap();
         let (step, loss) = (session.step().unwrap(), session.loss().unwrap());
         let w = values(&session.fetch("m.w").unwrap());
-        let rng = values(&crate::tensor::to_tensor(&session.rng_for_test()).unwrap());
+        let rng = values(&session.rng_for_test());
 
         let seen = session.evaluate(&batch).unwrap();
         assert!(seen.is_finite());
@@ -768,7 +802,7 @@ mod evaluation_tests {
         assert_eq!(session.loss().unwrap(), loss, "the training loss is not an evaluation");
         close(&values(&session.fetch("m.w").unwrap()), &w);
         assert_eq!(
-            values(&crate::tensor::to_tensor(&session.rng_for_test()).unwrap()),
+            values(&session.rng_for_test()),
             rng
         );
     }
@@ -811,7 +845,7 @@ mod evaluation_tests {
     fn a_tap_reports_the_evaluation_it_watched() {
         let (config, weights) = fixtures::with_dropout(0.0);
         let mut session = Session::open(&config, Weights::Inline(&weights)).unwrap();
-        session.tap("scaled", "mean").unwrap();
+        session.tap("m.scaled", "mean").unwrap();
         session.evaluate(&fixtures::batch_x(&[1.0, 3.0])).unwrap();
 
         let seen = session.tapped().unwrap();

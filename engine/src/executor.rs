@@ -14,7 +14,7 @@ use mlx_rs::transforms::{eval, value_and_grad_with_argnums};
 use mlx_rs::Array;
 
 use crate::interp::{self, Stat};
-use crate::op::Program;
+use crate::op::{Program, OBJECTIVE};
 use crate::plan::{Model, Plan};
 use crate::state::Pass;
 
@@ -63,6 +63,7 @@ pub fn forward(
             &params[slice.clone()],
             &inputs,
             mine.as_ref(),
+            name,
             taps,
             collected,
         )?;
@@ -79,9 +80,16 @@ pub fn forward(
             .ok_or_else(|| fail("the model produced no output".into()));
     };
 
-    let inputs = resolve(objective, fields, &outputs, "objective")?;
-    let produced =
-        interp::evaluate_tapped(objective, &[], &inputs, key.as_ref(), taps, collected)?;
+    let inputs = resolve(objective, fields, &outputs, OBJECTIVE)?;
+    let produced = interp::evaluate_tapped(
+        objective,
+        &[],
+        &inputs,
+        key.as_ref(),
+        OBJECTIVE,
+        taps,
+        collected,
+    )?;
     produced
         .into_values()
         .next()

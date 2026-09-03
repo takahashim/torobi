@@ -12,7 +12,7 @@ use mlx_rs::error::Exception;
 use mlx_rs::Array;
 
 use crate::graph::Ref;
-use crate::op::{Node, Op, Program};
+use crate::op::{qualified, Node, Op, Program};
 
 type Result<T> = std::result::Result<T, Exception>;
 
@@ -67,11 +67,18 @@ impl Stat {
 /// adds an output, it does not change one. What it costs is that the value
 /// must be kept rather than fused away, which is why a standing tap should
 /// reduce (docs/plan.md section 8.3).
+///
+/// `qualifier` is which graph this is (a model's name, or "objective"),
+/// and a tap names a node through it: "student.hidden" rather than
+/// "hidden". Two models of the same architecture have the same node names,
+/// which is the ordinary shape of a distillation, so an unqualified tap
+/// would report one of them and drop the other without saying so.
 pub fn evaluate_tapped(
     program: &Program,
     params: &[Array],
     inputs: &BTreeMap<String, Array>,
     rng: Option<&Array>,
+    qualifier: &str,
     taps: &BTreeMap<String, Stat>,
     collected: &mut BTreeMap<String, Array>,
 ) -> Result<BTreeMap<String, Array>> {
@@ -88,9 +95,14 @@ pub fn evaluate_tapped(
             .map(|r| read(r, program, inputs, &values))
             .collect::<Result<_>>()?;
         let out = apply(node, &ins, params, &mut key)?;
-        if let Some(name) = &node.name {
-            if let Some(stat) = taps.get(name) {
-                collected.insert(name.clone(), stat.apply(&out)?);
+        // Only when something is watching: this is a step's inner loop,
+        // and the usual answer is that nothing is.
+        if !taps.is_empty() {
+            if let Some(name) = &node.name {
+                let watched = qualified(qualifier, name);
+                if let Some(stat) = taps.get(&watched) {
+                    collected.insert(watched, stat.apply(&out)?);
+                }
             }
         }
         values.push(out);
@@ -313,7 +325,7 @@ mod tests {
         let extra = inputs.len() - 1;
         let (config, weights) = fixtures::one_op(op, serde_json::json!(shape), attributes, extra);
         let mut session = Session::open(&config, Weights::Inline(&weights)).unwrap();
-        session.tap("seen", "full").unwrap();
+        session.tap("m.seen", "full").unwrap();
 
         let batch: Batch = inputs
             .iter()

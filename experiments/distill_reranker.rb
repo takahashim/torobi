@@ -75,12 +75,12 @@ end
 # The tap goes on for the evaluation and comes off again: a standing tap
 # costs a forward per training step, and this needs it a few times a run.
 def measure(session, config, rows)
-  session.tap("classifier", stat: :full)
+  session.tap("student.classifier", stat: :full)
   seen = rows.each_slice(EVALUATION_BATCH).map do |slice|
     loss = session.evaluate(batch_of(config, slice))
-    [loss, slice.size, session.tapped.fetch("classifier").to_a]
+    [loss, slice.size, session.tapped.fetch("student.classifier").to_a]
   end
-  session.untap("classifier")
+  session.untap("student.classifier")
   { loss: seen.sum { |loss, n, _| loss * n } / rows.size.to_f,
     ndcg: mean_ndcg(rows, seen.flat_map(&:last)) }
 end
