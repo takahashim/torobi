@@ -116,7 +116,8 @@ class BoundaryTest < Minitest::Test
       config, weights, batch = build
       begin
         Torobi::Native::Session.open(config.canonical_json, JSON.generate(weights),
-                                     JSON.generate(Torobi::Session::DEFAULT_OPTIMIZER))
+                                     JSON.generate(Torobi::Session::DEFAULT_OPTIMIZER),
+                                     Torobi::Session::DEFAULT_SEED)
         puts "OPENED"
       rescue Torobi::EngineUnavailable => e
         puts "RESCUED \#{e.class}"

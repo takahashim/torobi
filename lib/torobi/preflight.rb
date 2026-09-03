@@ -73,7 +73,8 @@ module Torobi
                               "m.probe.bias" => { shape: [1], data: [0.0] } } }
         native = Torobi::Native::Session.open(
           config.canonical_json, JSON.generate(weights),
-          JSON.generate(Torobi::Session::DEFAULT_OPTIMIZER)
+          JSON.generate(Torobi::Session::DEFAULT_OPTIMIZER),
+          Torobi::Session::DEFAULT_SEED
         )
         native.run_step({ "x" => ["f32", [1, 1], [1.0].pack("f*")] })
         print "ok"

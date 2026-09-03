@@ -60,11 +60,13 @@ impl SessionCore {
         graph_json: &str,
         weights: Weights<'_>,
         optimizer: OptimizerConfig,
+        seed: u64,
     ) -> Result<Self> {
-        // Zero is where a run's RNG starts, so a parameter built from its
-        // declaration is drawn from the same place a step would draw from.
-        let (plan, params) = Plan::open_seeded(graph_json, weights, 0)?;
-        let state = TrainState::new(&plan, params, optimizer)?;
+        // One seed, used twice: a parameter built from its declaration is
+        // drawn from where the run's first step will draw from, so what a
+        // run does is a function of its seed and nothing else.
+        let (plan, params) = Plan::open_seeded(graph_json, weights, seed)?;
+        let state = TrainState::new(&plan, params, optimizer, seed)?;
         Ok(Self {
             plan,
             state,
@@ -290,18 +292,25 @@ impl Session {
     /// by qualified path ("student.head.weight"), which is also the order
     /// the engine keeps them in. Data comes later, one batch per step.
     pub fn open(graph_json: &str, weights: Weights<'_>) -> Outcome<Self> {
-        Self::open_with(graph_json, weights, OptimizerConfig::Sgd { lr: 0.1 })
+        Self::open_with(graph_json, weights, OptimizerConfig::Sgd { lr: 0.1 }, 0)
     }
 
-    /// The same, with the update rule named.
+    /// The same, with the update rule named and the run's seed given.
+    ///
+    /// The seed is where every draw this run makes comes from: the
+    /// parameters a `fresh:` pattern builds at open, and the ops that draw
+    /// at each step. A run is reproducible from its graph, its parameters
+    /// and this.
     pub fn open_with(
         graph_json: &str,
         weights: Weights<'_>,
         optimizer: OptimizerConfig,
+        seed: u64,
     ) -> Outcome<Self> {
         // Opening builds every parameter, an RNG key and the optimizer's
         // slots, so it waits its turn like any other MLX work.
-        let core = runtime().execute(|| SessionCore::open_with(graph_json, weights, optimizer))?;
+        let core =
+            runtime().execute(|| SessionCore::open_with(graph_json, weights, optimizer, seed))?;
         Ok(Self { core: Some(core) })
     }
 

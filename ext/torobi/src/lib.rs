@@ -243,8 +243,15 @@ impl Session {
         graph_json: String,
         weights_json: String,
         optimizer_json: String,
+        seed: u64,
     ) -> Result<Self, Error> {
-        Self::opened(ruby, &graph_json, Weights::Inline(&weights_json), &optimizer_json)
+        Self::opened(
+            ruby,
+            &graph_json,
+            Weights::Inline(&weights_json),
+            &optimizer_json,
+            seed,
+        )
     }
 
     /// Opens with the parameters read from a safetensors file.
@@ -258,12 +265,14 @@ impl Session {
         graph_json: String,
         path: String,
         optimizer_json: String,
+        seed: u64,
     ) -> Result<Self, Error> {
         Self::opened(
             ruby,
             &graph_json,
             Weights::File(std::path::Path::new(&path)),
             &optimizer_json,
+            seed,
         )
     }
 
@@ -281,6 +290,7 @@ impl Session {
         files_json: String,
         fresh_json: String,
         optimizer_json: String,
+        seed: u64,
     ) -> Result<Self, Error> {
         let files: std::collections::BTreeMap<String, std::path::PathBuf> =
             serde_json::from_str(&files_json).map_err(|e| {
@@ -297,6 +307,7 @@ impl Session {
                 fresh: &fresh,
             },
             &optimizer_json,
+            seed,
         )
     }
 
@@ -305,6 +316,7 @@ impl Session {
         graph_json: &str,
         weights: Weights<'_>,
         optimizer_json: &str,
+        seed: u64,
     ) -> Result<Self, Error> {
         let optimizer = serde_json::from_str(optimizer_json).map_err(|e| {
             Error::new(ruby.exception_arg_error(), format!("bad optimizer: {e}"))
@@ -313,7 +325,7 @@ impl Session {
         // slots. That it is MLX work, and therefore waits its turn, is the
         // engine's to know.
         let opened = match gvl::released(
-            || EngineSession::open_with(graph_json, weights, optimizer),
+            || EngineSession::open_with(graph_json, weights, optimizer, seed),
             OnRefusal::AskRuby,
         )? {
             Outcome::Done(opened) => opened,
@@ -776,9 +788,9 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     native.define_singleton_method("memory_limit=", function!(set_memory_limit, 1))?;
     native.define_singleton_method("reset_peak_memory", function!(reset_peak_memory, 0))?;
     let class = native.define_class("Session", ruby.class_object())?;
-    class.define_singleton_method("open", function!(Session::open, 3))?;
-    class.define_singleton_method("open_from_file", function!(Session::open_from_file, 3))?;
-    class.define_singleton_method("open_pretrained", function!(Session::open_pretrained, 4))?;
+    class.define_singleton_method("open", function!(Session::open, 4))?;
+    class.define_singleton_method("open_from_file", function!(Session::open_from_file, 4))?;
+    class.define_singleton_method("open_pretrained", function!(Session::open_pretrained, 5))?;
     class.define_method("run_step", method!(Session::run_step, 1))?;
     class.define_method("evaluate", method!(Session::evaluate, 1))?;
     class.define_method("save", method!(Session::save, 2))?;

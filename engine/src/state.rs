@@ -68,10 +68,14 @@ pub struct TrainState {
 impl TrainState {
     /// The state a plan starts in: the given parameters, everything the
     /// plan declared trainable differentiated, and fresh optimizer slots.
-    pub fn new(plan: &Plan, params: Vec<Array>, optimizer: OptimizerConfig) -> Result<Self> {
+    pub fn new(
+        plan: &Plan,
+        params: Vec<Array>,
+        optimizer: OptimizerConfig,
+        seed: u64,
+    ) -> Result<Self> {
         let argnums = plan.candidates.clone();
         let optimizer = Optimizer::new(optimizer, &params, &argnums)?;
-        let seed = 0;
         Ok(Self {
             params,
             argnums,
@@ -441,7 +445,7 @@ mod tests {
     fn open(which: (String, String), optimizer: OptimizerConfig) -> (Plan, TrainState) {
         let (config, weights) = which;
         let (plan, params) = Plan::open(&config, Weights::Inline(&weights)).unwrap();
-        let state = TrainState::new(&plan, params, optimizer).unwrap();
+        let state = TrainState::new(&plan, params, optimizer, 0).unwrap();
         (plan, state)
     }
 

@@ -25,6 +25,11 @@ module Torobi
     # has no state to restore and is the right default for a spike.
     DEFAULT_OPTIMIZER = { kind: :sgd, lr: 0.1 }.freeze
 
+    # Where a run's randomness starts when the caller names no seed. Zero
+    # rather than something drawn: a run that did not choose its seed
+    # should still be the same run twice.
+    DEFAULT_SEED = 0
+
     # Opens a session over `config` (a GraphConfig).
     #
     # Where the parameters come from is said by keyword, because there is
@@ -67,6 +72,13 @@ module Torobi
     # `optimizer` is data, so that a journal and a checkpoint can record
     # exactly what ran: {kind: :adamw, lr: 1e-3, weight_decay: 0.01}.
     #
+    # `seed:` is where every draw this run makes comes from: the parameters
+    # a `fresh:` pattern builds here, and the ops that draw at each step.
+    # It is the axis an experiment varies to ask whether a result was the
+    # method or the luck, so it belongs at open, where the first draw
+    # happens. `adjust(seed:)` moves it afterwards, which is a different
+    # question (docs/plan.md section 11.1).
+    #
     # `journal:` records what happened, for the replay of docs/plan.md
     # section 8.6. Pass a Journal, or `io:` to have one made against this
     # config's provenance; without either, nothing is recorded and the
@@ -87,7 +99,8 @@ module Torobi
     #              tokenizer: "cl-nagoya/ruri-v3-130m",
     #              tokenizer_revision: "e3114c6...", max_seq_length: 512 }
     def self.open(config, weights: nil, weights_file: nil, pretrained: nil, fresh: [],
-                  optimizer: DEFAULT_OPTIMIZER, journal: nil, io: nil, dataset: nil)
+                  optimizer: DEFAULT_OPTIMIZER, seed: DEFAULT_SEED,
+                  journal: nil, io: nil, dataset: nil)
       if !fresh.empty? && pretrained.nil?
         raise ArgumentError, "fresh: names what no file holds, so it goes with pretrained:"
       end
@@ -106,23 +119,25 @@ module Torobi
       native =
         if weights_file
           Native::Session.open_from_file(config.canonical_json, weights_file.to_s,
-                                         JSON.generate(optimizer))
+                                         JSON.generate(optimizer), seed)
         elsif pretrained
           files = pretrained.to_h { |model, path| [model.to_s, path.to_s] }
           Native::Session.open_pretrained(config.canonical_json, JSON.generate(files),
                                           JSON.generate(Array(fresh).map(&:to_s)),
-                                          JSON.generate(optimizer))
+                                          JSON.generate(optimizer), seed)
         else
           Native::Session.open(config.canonical_json, JSON.generate(inline(weights)),
-                               JSON.generate(optimizer))
+                               JSON.generate(optimizer), seed)
         end
       # Gathered whether or not anything is journalling: a checkpoint
       # records it too, so that what it holds can be identified later
       # (docs/plan.md section 11.2).
-      provenance = Provenance.of(config, dataset:, extra: { "optimizer" => optimizer })
+      provenance = Provenance.of(config, dataset:,
+                                 extra: { "optimizer" => optimizer, "seed" => seed })
       journal ||= Journal.new(provenance, io:) if io
       session = new(native, journal:, provenance:)
-      journal&.note(step: 0, event: "opened", optimizer: optimizer.transform_keys(&:to_s))
+      journal&.note(step: 0, event: "opened", seed:,
+                    optimizer: optimizer.transform_keys(&:to_s))
       return session unless block_given?
 
       begin

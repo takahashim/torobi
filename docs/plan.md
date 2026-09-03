@@ -1667,6 +1667,26 @@ copy するので、これは MLX への submit である。他のテストの s
 **それを証明するはずのテストが例外だった**。「公開の経路は必ず execute を通り、
 呼ぶ側は分類しない」は `#[cfg(test)]` の口にも同じく適用される。
 
+### 15.30 seed を open で渡せるようにした(2026-09-03)
+
+M4 を書いていて詰まったところ。**`Session.open` に `seed:` が無かった**。
+
+run の seed は state が既定 0 で持ち、`adjust(seed:)` で後から動かせる。しかし
+**`fresh:` のパラメータは open 時にその seed から引かれる**ので、後から seed を
+変えても引き直されない。つまり「seed だけが違う 2 つの run」が作れなかった。
+実験が最初に振る軸がこれなので、これは穴である。
+
+`Session.open(..., seed: 0)` を足し、engine の `Session::open_with` と
+`TrainState::new` にも通した。open が 1 つの seed を 2 か所に使う
+(パラメータの初期値と、step の draw の出発点) ので、**run は graph と
+パラメータとこの数だけの関数**になる。
+
+journal の `opened` エントリと provenance にも入れた。checkpoint の manifest は
+元から seed を持っていたので、これで記録の 3 か所が揃った。
+
+M4 のスクリプトは順序のシャッフルにだけ seed を使っていたが、今は同じ数を
+`open(seed:)` にも渡している。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

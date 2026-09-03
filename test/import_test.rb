@@ -138,17 +138,7 @@ class ImportTest < Minitest::Test
   # Fine-tuning is a mixed source: the body comes from a published
   # checkpoint, and what is put on top of it exists in no file.
   def test_what_no_file_holds_can_be_named_and_built_from_its_declaration
-    model = Torobi.graph do |g|
-      x = g.input :x, [nil, DIM]
-      y = g.input :y, [nil, 1]
-      body = g.linear(x, DIM, name: "body", bias: false)
-      g.output :loss, g.mse(g.linear(body, 1, name: "head", bias: false), y)
-    end
-    config = Torobi::GraphConfig.new(models: { m: model })
-    file = File.join(@dir, "body.safetensors")
-    IO.binwrite(file, safetensors({
-      "body.weight" => { shape: [DIM, DIM], data: Array.new(DIM * DIM, 0.1) }
-    }))
+    config, file = model_with_a_body_on_file
 
     Torobi::Session.open(config, pretrained: { m: file }, fresh: ["m.head.*"]) do |s|
       assert_equal %w[m.body.weight m.head.weight], s.parameter_paths.sort
@@ -165,6 +155,25 @@ class ImportTest < Minitest::Test
       s.step!(batch)
       assert_predicate s.loss, :finite?
     end
+  end
+
+  # A fresh parameter is drawn at open, so the seed that decides what it is
+  # has to be given there. The axis an experiment varies first is this one:
+  # the same run twice, and two runs that differ only in their luck.
+  def test_a_fresh_parameter_is_drawn_from_the_run_seed
+    config, file = model_with_a_body_on_file
+
+    head = lambda do |seed|
+      Torobi::Session.open(config, pretrained: { m: file }, fresh: ["m.head.*"],
+                           seed:) do |s|
+        [s.seed, s.fetch("m.head.weight").to_a]
+      end
+    end
+
+    assert_equal head.call(11), head.call(11), "one seed is one run"
+    refute_equal head.call(11).last, head.call(12).last,
+                 "a different seed should draw a different parameter"
+    assert_equal 0, head.call(Torobi::Session::DEFAULT_SEED).first
   end
 
   # Naming what is new is the point: a parameter missing because it was
@@ -230,6 +239,22 @@ class ImportTest < Minitest::Test
       # The high half of each f32, little-endian, is the bf16.
       values.map { |v| [v].pack("e").unpack("S<2").last }.pack("S<*")
     end
+  end
+
+  # A body that a file holds and a head that no file does: the mixed
+  # source fine-tuning is, and the shape both the drawing tests need.
+  def model_with_a_body_on_file
+    model = Torobi.graph do |g|
+      x = g.input :x, [nil, DIM]
+      y = g.input :y, [nil, 1]
+      body = g.linear(x, DIM, name: "body", bias: false)
+      g.output :loss, g.mse(g.linear(body, 1, name: "head", bias: false), y)
+    end
+    file = File.join(@dir, "body.safetensors")
+    IO.binwrite(file, safetensors({
+      "body.weight" => { shape: [DIM, DIM], data: Array.new(DIM * DIM, 0.1) }
+    }))
+    [Torobi::GraphConfig.new(models: { m: model }), file]
   end
 
   # A minimal safetensors writer, so this test can build a file the engine

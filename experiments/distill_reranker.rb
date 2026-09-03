@@ -28,9 +28,10 @@ $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
 require "torobi"
 require "json"
 
-# The order the training rows are visited in. The run's own seed (what the
-# fresh head was drawn from, and what any random op would draw from) is
-# the session's, and it is recorded beside this one.
+# The run's luck, in both places it enters: the head the encoder does not
+# have is drawn from it at open, and the training rows are visited in an
+# order shuffled from it. Two runs that differ only here differ only in
+# their luck, which is the question a seed is varied to ask.
 SEED = 20260903
 SEQ = 128
 BATCH = 8
@@ -125,7 +126,7 @@ def child(run, encoder_dir, train, validation, epochs)
   Torobi::Session.open(graph,
                        pretrained: { student: File.join(encoder_dir, "model.safetensors") },
                        fresh: ["student.head.*", "student.classifier.*"],
-                       optimizer: { kind: :adamw, lr: LEARNING_RATE },
+                       optimizer: { kind: :adamw, lr: LEARNING_RATE }, seed: SEED,
                        io: run.journal, dataset: DATASET.merge(rows: train.size)) do |s|
     puts format("%d parameters, %d train rows, %d validation rows over %d queries",
                 s.parameter_paths.size, train.size, validation.size,
@@ -161,7 +162,7 @@ def child(run, encoder_dir, train, validation, epochs)
     File.write(File.join(run.dir, "metrics.json"),
                JSON.pretty_generate(dataset: DATASET, epochs:, batch: BATCH,
                                     learning_rate: LEARNING_RATE,
-                                    seed: s.seed, order_seed: SEED,
+                                    seed: s.seed,
                                     teacher_ndcg: teacher, measurements:))
     puts format("best: nDCG@10 %.4f at step %d (teacher %.4f, started %.4f)",
                 best[:ndcg], best[:step], teacher, measurements.first[:ndcg])
