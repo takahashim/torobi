@@ -10,26 +10,54 @@ module Torobi
     # handle. Layers apply immediately: `g.linear(x, 512, name: "wo")`
     # creates the parameters and the nodes in one call.
     class Builder
-      def initialize
+      # `models` is the set an objective may read outputs from; a model
+      # graph is built with none.
+      def initialize(models: {})
+        @models = models.to_h { |name, graph| [name.to_s, graph] }
         @inputs = []
         @parameters = []
         @nodes = []
-        @outputs = []
+        @outputs = {}
         @scopes = []
       end
 
       # --- graph boundary ---
 
+      # An input fed from the batch, by field name.
       def input(name, shape, dtype: :f32)
-        spec = IR::InputSpec.new(id: @inputs.size, name: name.to_s, shape:, dtype:)
-        @inputs << spec
-        Handle.new(builder: self, ref: IR::Ref.input(spec.id), shape: spec.shape,
-                   dtype: spec.dtype)
+        declare_input(name, shape, dtype, IR::Source.batch(name))
       end
 
-      def output(handle)
-        own!(handle, where: "output")
-        @outputs << handle.ref
+      # An input fed from the batch under a different field name than the
+      # one it is known by here.
+      def from_batch(name, shape, dtype: :f32, field: name)
+        declare_input(name, shape, dtype, IR::Source.batch(field))
+      end
+
+      # An input fed from a model's named output. The shape and dtype come
+      # from that model's declaration, so the two halves cannot disagree.
+      def from_model(model, output, as: nil)
+        graph = @models.fetch(model.to_s) do
+          known = @models.keys.map(&:inspect).join(", ")
+          raise ConfigError,
+                "no model named #{model.to_s.inspect} here; this objective was " \
+                "given #{known.empty? ? "none" : known}"
+        end
+        shape, dtype = graph.output_signature(output)
+        declare_input(as || "#{model}.#{output}", shape, dtype,
+                      IR::Source.model_output(model, output))
+      end
+
+      # Names one of this graph's outputs. An objective's loss and a model's
+      # logits are both named this way.
+      def output(name, handle)
+        own!(handle, where: "output #{name.to_s.inspect}")
+        name = name.to_s
+        if @outputs.key?(name)
+          raise ConfigError, "output #{name.inspect} is declared twice"
+        end
+
+        @outputs[name] = handle.ref
         handle
       end
 
@@ -122,6 +150,10 @@ module Torobi
 
       def mse(a, b) = mean((a - b).square)
 
+      # Values whose gradient does not flow back. A teacher's output goes
+      # through this (docs/plan.md section 5A.3).
+      def stop_gradient(x) = emit("stop_gradient", inputs: [x])
+
       # --- core ---
 
       # Adds one node: checks ownership, arity and attributes against the
@@ -143,6 +175,13 @@ module Torobi
       end
 
       private
+
+      def declare_input(name, shape, dtype, source)
+        spec = IR::InputSpec.new(id: @inputs.size, name: name.to_s, shape:, dtype:, source:)
+        @inputs << spec
+        Handle.new(builder: self, ref: IR::Ref.input(spec.id), shape: spec.shape,
+                   dtype: spec.dtype)
+      end
 
       def scoped(name) = (@scopes + [name.to_s]).join(".")
 

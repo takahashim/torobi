@@ -3,13 +3,16 @@
 module Torobi
   module IR
     # One computation graph: inputs, parameters, nodes in topological order,
-    # and the references that are its outputs. Construction validates the
-    # structure, so an invalid graph is never representable:
+    # and its named outputs. Construction validates the structure, so an
+    # invalid graph is never representable:
     #
     # - ids are consecutive from 0 within each kind
     # - input names and parameter paths are unique
     # - a node references only inputs and earlier nodes (no forward references)
     # - every node is reachable from an output (no dead nodes)
+    #
+    # Outputs are named because that is what an objective graph refers to
+    # (docs/plan.md section 5A.3): {"logits" => "node:12"}.
     class Graph < Data.define(:inputs, :parameters, :nodes, :outputs)
       def initialize(inputs:, parameters:, nodes:, outputs:)
         inputs = sequential!(inputs, InputSpec, "input")
@@ -33,6 +36,22 @@ module Torobi
           "nodes" => nodes.map(&:to_h),
           "outputs" => outputs
         }
+      end
+
+      # The shape and dtype behind one named output, for whoever consumes it.
+      def output_signature(name)
+        ref = outputs.fetch(name.to_s) do
+          raise ConfigError,
+                "this graph has no output #{name.to_s.inspect}; it has " \
+                "#{outputs.keys.map(&:inspect).join(", ")}"
+        end
+        kind, id = Ref.parse(ref)
+        spec = kind == :input ? inputs[id] : nodes[id]
+        [spec.shape, spec.dtype]
+      end
+
+      def input_named(name)
+        inputs.find { |i| i.name == name.to_s }
       end
 
       def self.from_h(h)
@@ -88,19 +107,22 @@ module Torobi
       end
 
       def check_outputs(outputs, inputs, nodes)
-        if !outputs.is_a?(Array) || outputs.empty?
-          raise ConfigError, "a graph must declare at least one output"
+        unless outputs.is_a?(Hash) && !outputs.empty?
+          raise ConfigError, "a graph must declare at least one named output"
         end
 
-        outputs = outputs.map { |ref| -ref.to_s }
-        outputs.each do |ref|
+        named = outputs.to_h do |name, ref|
+          name = name.to_s
+          raise ConfigError, "an output name must not be empty" if name.empty?
+
           kind, id = Ref.parse(ref)
           limit = kind == :input ? inputs.size : nodes.size
           unless id < limit
-            raise ConfigError, "output references unknown #{kind}:#{id}"
+            raise ConfigError, "output #{name.inspect} references unknown #{kind}:#{id}"
           end
+          [-name, -ref.to_s]
         end
-        Freeze.deep(outputs)
+        Freeze.deep(named.sort.to_h)
       end
 
       # Every node must contribute to an output. A dead node is almost always
@@ -108,7 +130,10 @@ module Torobi
       # the digest depend on code that does nothing.
       def check_reachability(nodes, outputs)
         alive = []
-        queue = outputs.filter_map { |ref| (kind, id = Ref.parse(ref); kind == :node ? id : nil) }
+        queue = outputs.each_value.filter_map do |ref|
+          kind, id = Ref.parse(ref)
+          kind == :node ? id : nil
+        end
         until queue.empty?
           id = queue.pop
           next if alive[id]

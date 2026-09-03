@@ -24,7 +24,7 @@ module Torobi
         IR::NodeSpec.new(id: 0, op: "matmul", inputs: [IR::Ref.input(0)], parameters: [0]),
         IR::NodeSpec.new(id: 1, op: "add", inputs: [IR::Ref.node(0)], parameters: [1])
       ]
-      IR::Graph.new(inputs:, parameters:, nodes:, outputs: [IR::Ref.node(1)])
+      IR::Graph.new(inputs:, parameters:, nodes:, outputs: { "y" => IR::Ref.node(1) })
     end
 
     # The same initializer built in two different key orders.

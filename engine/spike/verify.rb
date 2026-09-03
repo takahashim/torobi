@@ -9,7 +9,8 @@
 require "json"
 
 dir = __dir__
-engine = File.expand_path("../target/release/torobi-engine", dir)
+# The workspace shares one target directory (see the root Cargo.toml).
+engine = File.expand_path("../../target/release/torobi-engine", dir)
 graph = File.join(dir, "graph.json")
 bindings_path = File.join(dir, "bindings.json")
 abort "run gen.rb first" unless File.exist?(bindings_path)
@@ -19,8 +20,8 @@ b = JSON.parse(File.read(bindings_path))
 rows = ->(t) { t["data"].each_slice(t["shape"][1] || 1).to_a }
 x = rows.(b["inputs"]["x"])
 y = rows.(b["inputs"]["y"])
-w = rows.(b["params"]["linear.weight"])
-bias = b["params"]["linear.bias"]["data"]
+w = rows.(b["params"]["spike.linear.weight"])
+bias = b["params"]["spike.linear.bias"]["data"]
 n, d_out = y.size, y.first.size
 
 pred = x.map { |row| w.map { |wo| row.zip(wo).sum { |a, c| a * c } + bias[w.index(wo)] } }
@@ -41,8 +42,8 @@ check = lambda do |name, want, got|
   raise "#{name}: mismatch (#{worst})" if worst > 1e-4
 end
 check.("loss", [loss], [engine_out["loss"]])
-check.("weight grad", dw.flatten, engine_out.dig("grads", "linear.weight", "data"))
-check.("bias grad", db, engine_out.dig("grads", "linear.bias", "data"))
+check.("weight grad", dw.flatten, engine_out.dig("grads", "spike.linear.weight", "data"))
+check.("bias grad", db, engine_out.dig("grads", "spike.linear.bias", "data"))
 
 lines = `#{engine} train #{graph} #{bindings_path} 200 0.5`.lines.map { JSON.parse(_1) }
 raise "engine train failed" unless $?.success?

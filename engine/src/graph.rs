@@ -11,8 +11,9 @@ pub struct GraphConfig {
     #[allow(dead_code)]
     pub schema_version: u32,
     pub models: BTreeMap<String, Graph>,
-    #[allow(dead_code)]
     pub objective: Option<Graph>,
+    /// Which models are differentiated. Everything else is frozen.
+    pub train: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -20,23 +21,41 @@ pub struct Graph {
     pub inputs: Vec<InputSpec>,
     pub parameters: Vec<ParameterSpec>,
     pub nodes: Vec<NodeSpec>,
-    pub outputs: Vec<String>,
+    /// Named: {"logits": "node:12"}.
+    pub outputs: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
 pub struct InputSpec {
     pub name: String,
+    /// Where the data comes from: {"batch": field} or
+    /// {"model": name, "output": name}.
+    pub source: BTreeMap<String, String>,
     /// A null dimension is symbolic: it may differ from batch to batch.
     pub shape: Vec<Option<i32>>,
+    #[allow(dead_code)]
     pub dtype: String,
+}
+
+impl InputSpec {
+    /// The batch field this input reads, if it reads one.
+    pub fn batch_field(&self) -> Option<&str> {
+        self.source.get("batch").map(String::as_str)
+    }
+
+    /// The model and output this input reads, if it reads one.
+    pub fn model_output(&self) -> Option<(&str, &str)> {
+        match (self.source.get("model"), self.source.get("output")) {
+            (Some(model), Some(output)) => Some((model, output)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Deserialize)]
 pub struct ParameterSpec {
     pub path: String,
     pub shape: Vec<i32>,
-    /// Read but not yet honoured: M1 differentiates every parameter.
-    #[allow(dead_code)]
     pub trainable: bool,
 }
 

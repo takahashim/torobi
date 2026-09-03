@@ -86,6 +86,13 @@
   shape_rule: same_as_input
   handle: true
 
+# Semantic op, kept whole: the backend decides how to realize it, and the
+# IR says what it means. Gradients do not flow through it.
+- name: stop_gradient
+  inputs: 1
+  shape_rule: same_as_input
+  handle: true
+
 - name: softmax
   inputs: 1
   attributes: { axis: int }

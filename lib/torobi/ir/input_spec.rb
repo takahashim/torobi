@@ -2,25 +2,30 @@
 
 module Torobi
   module IR
-    # One model input: a name the caller binds data to, a shape whose nil
-    # dimensions are symbolic (batch, sequence), and a dtype.
-    class InputSpec < Data.define(:id, :name, :shape, :dtype)
-      def initialize(id:, name:, shape:, dtype:)
+    # One graph input: a name, where its data comes from ([`Source`]), a
+    # shape whose nil dimensions are symbolic (batch, sequence), and a dtype.
+    class InputSpec < Data.define(:id, :name, :source, :shape, :dtype)
+      def initialize(id:, name:, shape:, dtype:, source: nil)
         name = name.to_s
         raise ConfigError, "input #{id}: name must not be empty" if name.empty?
 
         shape = check_shape(id, shape)
         Dtype.check!(dtype, where: "input #{name.inspect}")
-        super(id: Integer(id), name: -name, shape:, dtype:)
+        source = Source.check!(source || Source.batch(name), where: "input #{name.inspect}")
+        super(id: Integer(id), name: -name, source:, shape:, dtype:)
       end
 
+      def from_batch? = Source.batch?(source)
+      def from_model? = Source.model?(source)
+
       def to_h
-        { "id" => id, "name" => name, "shape" => shape, "dtype" => dtype.to_s }
+        { "id" => id, "name" => name, "source" => source, "shape" => shape,
+          "dtype" => dtype.to_s }
       end
 
       def self.from_h(h)
-        new(id: h.fetch("id"), name: h.fetch("name"), shape: h.fetch("shape"),
-            dtype: h.fetch("dtype").to_sym)
+        new(id: h.fetch("id"), name: h.fetch("name"), source: h["source"],
+            shape: h.fetch("shape"), dtype: h.fetch("dtype").to_sym)
       end
 
       private

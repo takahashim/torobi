@@ -27,11 +27,11 @@ class BoundaryTest < Minitest::Test
         model = Torobi.graph do |g|
           x = g.input(:x, [nil, 2])
           y = g.input(:y, [nil, 1])
-          g.output g.mse(g.linear(x, 1, name: "l"), y)
+          g.output :loss, g.mse(g.linear(x, 1, name: "l"), y)
         end
         config = Torobi::GraphConfig.new(models: { "spike" => model })
-        weights = { params: { "l.weight" => { shape: [1, 2], data: [0.0, 0.0] },
-                              "l.bias" => { shape: [1], data: [0.0] } } }
+        weights = { params: { "spike.l.weight" => { shape: [1, 2], data: [0.0, 0.0] },
+                              "spike.l.bias" => { shape: [1], data: [0.0] } } }
         batch = { x: { shape: [1, 2], data: [1.0, 2.0] },
                   y: { shape: [1, 1], data: [3.0] } }
         [config, weights, batch]

@@ -8,14 +8,14 @@ class GraphTest < Minitest::Test
   def test_a_well_formed_graph_is_representable
     graph = Torobi::TestGraphs.linear_graph
     assert_equal 2, graph.nodes.size
-    assert_equal ["node:1"], graph.outputs
+    assert_equal({ "y" => "node:1" }, graph.outputs)
   end
 
   def test_ids_must_be_consecutive_from_zero
     e = assert_raises(Torobi::ConfigError) do
       IR::Graph.new(
         inputs: [IR::InputSpec.new(id: 1, name: "x", shape: [2], dtype: :f32)],
-        parameters: [], nodes: [], outputs: ["input:0"]
+        parameters: [], nodes: [], outputs: { "y" => "input:0" }
       )
     end
     assert_match(/consecutive from 0/, e.message)
@@ -30,7 +30,7 @@ class GraphTest < Minitest::Test
           IR::NodeSpec.new(id: 0, op: "add", inputs: ["node:1", "input:0"]),
           IR::NodeSpec.new(id: 1, op: "abs", inputs: ["input:0"])
         ],
-        outputs: ["node:0"]
+        outputs: { "y" => "node:0" }
       )
     end
     assert_match(/forward references/, e.message)
@@ -42,7 +42,7 @@ class GraphTest < Minitest::Test
     e = assert_raises(Torobi::ConfigError) do
       IR::Graph.new(inputs:, parameters: [],
                     nodes: [IR::NodeSpec.new(id: 0, op: "abs", inputs: ["input:7"])],
-                    outputs: ["node:0"])
+                    outputs: { "y" => "node:0" })
     end
     assert_match(/unknown input:7/, e.message)
 
@@ -50,14 +50,14 @@ class GraphTest < Minitest::Test
       IR::Graph.new(inputs:, parameters: [],
                     nodes: [IR::NodeSpec.new(id: 0, op: "abs", inputs: ["input:0"],
                                              parameters: [3])],
-                    outputs: ["node:0"])
+                    outputs: { "y" => "node:0" })
     end
     assert_match(/unknown parameter 3/, e.message)
 
     e = assert_raises(Torobi::ConfigError) do
-      IR::Graph.new(inputs:, parameters: [], nodes: [], outputs: ["node:0"])
+      IR::Graph.new(inputs:, parameters: [], nodes: [], outputs: { "y" => "node:0" })
     end
-    assert_match(/output references unknown node:0/, e.message)
+    assert_match(/output "y" references unknown node:0/, e.message)
   end
 
   def test_duplicate_names_and_paths_are_rejected
@@ -65,7 +65,7 @@ class GraphTest < Minitest::Test
       IR::Graph.new(
         inputs: [IR::InputSpec.new(id: 0, name: "x", shape: [2], dtype: :f32),
                  IR::InputSpec.new(id: 1, name: "x", shape: [2], dtype: :f32)],
-        parameters: [], nodes: [], outputs: ["input:0"]
+        parameters: [], nodes: [], outputs: { "y" => "input:0" }
       )
     end
     assert_match(/duplicate input name "x"/, e.message)
@@ -78,7 +78,7 @@ class GraphTest < Minitest::Test
         parameters: [],
         nodes: [IR::NodeSpec.new(id: 0, op: "abs", inputs: ["input:0"]),
                 IR::NodeSpec.new(id: 1, op: "neg", inputs: ["input:0"])],
-        outputs: ["node:1"]
+        outputs: { "y" => "node:1" }
       )
     end
     assert_match(/unreachable from any output: node 0 \(abs\)/, e.message)
@@ -86,9 +86,9 @@ class GraphTest < Minitest::Test
 
   def test_a_graph_needs_at_least_one_output
     e = assert_raises(Torobi::ConfigError) do
-      IR::Graph.new(inputs: [], parameters: [], nodes: [], outputs: [])
+      IR::Graph.new(inputs: [], parameters: [], nodes: [], outputs: {})
     end
-    assert_match(/at least one output/, e.message)
+    assert_match(/at least one named output/, e.message)
   end
 
   def test_spec_level_mistakes_are_rejected_where_they_are_made

@@ -14,7 +14,7 @@ rng = Random.new(42)
 model = Torobi.graph do |g|
   x = g.input :x, [nil, D_IN]
   y = g.input :y, [nil, D_OUT]
-  g.output g.mse(g.linear(x, D_OUT, name: "linear"), y)
+  g.output :loss, g.mse(g.linear(x, D_OUT, name: "linear"), y)
 end
 config = Torobi::GraphConfig.new(models: { "spike" => model },
                                  metadata: { "purpose" => "M1 linear-regression spike" })
@@ -35,7 +35,7 @@ File.write(File.join(dir, "graph.json"), config.canonical_json)
 File.write(File.join(dir, "bindings.json"), JSON.generate(
   inputs: { x: { shape: [N, D_IN], data: x.flatten },
             y: { shape: [N, D_OUT], data: y.flatten } },
-  params: { "linear.weight" => { shape: [D_OUT, D_IN], data: w0.flatten },
-            "linear.bias" => { shape: [D_OUT], data: b0 } }
+  params: { "spike.linear.weight" => { shape: [D_OUT, D_IN], data: w0.flatten },
+            "spike.linear.bias" => { shape: [D_OUT], data: b0 } }
 ))
 puts "graph digest=#{config.digest}"

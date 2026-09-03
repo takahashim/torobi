@@ -12,11 +12,14 @@ use crate::graph::{parse_ref, Graph, Ref};
 
 type Result<T> = std::result::Result<T, Exception>;
 
+/// Evaluates one graph and returns its outputs by name. `params` is this
+/// graph's slice of the run's parameters, in declaration order; `inputs` is
+/// keyed by input name (the caller resolved each input's source).
 pub fn evaluate(
     graph: &Graph,
     params: &[Array],
     inputs: &BTreeMap<String, Array>,
-) -> Result<Vec<Array>> {
+) -> Result<BTreeMap<String, Array>> {
     let mut values: Vec<Array> = Vec::with_capacity(graph.nodes.len());
     let resolve = |text: &str, values: &Vec<Array>| -> Result<Array> {
         match parse_ref(text).map_err(|e| Exception::custom(e.to_string()))? {
@@ -55,6 +58,7 @@ pub fn evaluate(
             "mul_scalar" => ins[0].multiply(Array::from_f32(number(node, "value")?))?,
             "div_scalar" => ins[0].divide(Array::from_f32(number(node, "value")?))?,
             "square" => ins[0].square()?,
+            "stop_gradient" => mlx_rs::stop_gradient(&ins[0])?,
             "mean" => {
                 if !node.attributes.get("axes").is_none_or(|v| v.is_null()) {
                     return Err(fail("mean over specific axes is not implemented in M1"));
@@ -69,7 +73,7 @@ pub fn evaluate(
     graph
         .outputs
         .iter()
-        .map(|r| resolve(r, &values))
+        .map(|(name, r)| Ok((name.clone(), resolve(r, &values)?)))
         .collect()
 }
 

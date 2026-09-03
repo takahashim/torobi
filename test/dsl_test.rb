@@ -6,7 +6,7 @@ class DslTest < Minitest::Test
   def linear_model
     Torobi.graph do |g|
       x = g.input :x, [nil, 4]
-      g.output g.linear(x, 2, name: "linear")
+      g.output :out, g.linear(x, 2, name: "linear")
     end
   end
 
@@ -31,7 +31,7 @@ class DslTest < Minitest::Test
       2.times do |i|
         g.scope("layers.#{i}") { h = h + g.linear(h, 8, name: "ff", bias: false) }
       end
-      g.output h
+      g.output :out, h
     end
     assert_equal %w[layers.0.ff.weight layers.1.ff.weight], graph.parameters.map(&:path)
   end
@@ -41,7 +41,7 @@ class DslTest < Minitest::Test
       Torobi.graph do |g|
         a = g.input :a, [nil, 3]
         b = g.input :b, [4, 5]
-        g.output g.matmul(a, b)
+        g.output :out, g.matmul(a, b)
       end
     end
     assert_match(/node 0 \(matmul\)/, e.message)
@@ -52,10 +52,10 @@ class DslTest < Minitest::Test
     stray = nil
     Torobi.graph do |g|
       stray = g.input :x, [2]
-      g.output stray.neg
+      g.output :out, stray.neg
     end
     e = assert_raises(Torobi::ConfigError) do
-      Torobi.graph { |g| g.output stray.gelu }
+      Torobi.graph { |g| g.output :out, stray.gelu }
     end
     assert_match(/belongs to a different graph/, e.message)
   end
@@ -64,7 +64,7 @@ class DslTest < Minitest::Test
     graph = Torobi.graph do |g|
       x = g.input :x, [nil, 6]
       a, b, c = x.split(3, axis: -1)
-      g.output a + b + c
+      g.output :out, a + b + c
     end
     slices = graph.nodes.select { |n| n.op == "slice" }
     assert_equal [0, 2, 4], slices.map { |n| n.attributes["start"] }
@@ -79,14 +79,14 @@ class DslTest < Minitest::Test
   def test_embedding_gathers_by_i32_ids
     graph = Torobi.graph do |g|
       ids = g.input :ids, [nil, nil], dtype: :i32
-      g.output g.embedding(ids, vocab: 100, dim: 16, name: "emb")
+      g.output :out, g.embedding(ids, vocab: 100, dim: 16, name: "emb")
     end
     assert_equal [nil, nil, 16], graph.nodes.last.shape
 
     e = assert_raises(Torobi::ConfigError) do
       Torobi.graph do |g|
         ids = g.input :ids, [nil], dtype: :f32
-        g.output g.embedding(ids, vocab: 10, dim: 4, name: "emb")
+        g.output :out, g.embedding(ids, vocab: 10, dim: 4, name: "emb")
       end
     end
     assert_match(/indices must be i32/, e.message)
@@ -97,7 +97,7 @@ class DslTest < Minitest::Test
       s = g.input :student_logits, [nil]
       t = g.input :teacher_logits, [nil]
       labels = g.input :label_loss, [nil]
-      g.output g.mean(g.mse(s, t) * 0.7 + g.mean(labels) * 0.3)
+      g.output :out, g.mean(g.mse(s, t) * 0.7 + g.mean(labels) * 0.3)
     end
     assert_equal [], graph.nodes.last.shape
   end
@@ -113,7 +113,7 @@ class DslTest < Minitest::Test
         h = h + g.linear(a, dim, name: "wo", bias: false)
         h = h + g.geglu(g.layer_norm(h, name: "mlp_norm"), dim * 2, name: "mlp")
       end
-      g.output h
+      g.output :out, h
     end
     assert_equal [nil, nil, dim], graph.nodes.last.shape
     assert_includes graph.parameters.map(&:path), "layers.0.mlp.wi.weight"

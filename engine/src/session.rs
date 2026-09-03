@@ -81,50 +81,83 @@ struct Weights {
     params: BTreeMap<String, Tensor>,
 }
 
-pub struct Session {
+/// One model as the session holds it: its graph, and where its parameters
+/// sit in the run's flat parameter vector.
+struct Model {
+    name: String,
     graph: Graph,
+    /// Range into `params`, in the order the config declared.
+    slice: std::ops::Range<usize>,
+}
+
+pub struct Session {
+    models: Vec<Model>,
+    /// The graph that reaches the loss. When a config declares none, the
+    /// single model's own output is the loss.
+    objective: Option<Graph>,
+    /// Every parameter of every model, model by model in name order. This
+    /// order is the contract the Ruby side also follows.
     params: Vec<Array>,
+    /// Qualified paths ("student.head.weight"), parallel to `params`.
+    paths: Vec<String>,
+    /// Positions in `params` that autodiff differentiates.
+    argnums: Vec<i32>,
     step: usize,
     last_loss: f32,
     lr: f32,
 }
 
 impl Session {
-    /// Loads a graph and its initial parameters. `graph_json` is the
-    /// canonical JSON of a GraphConfig; the model named "spike", or the only
-    /// model, is taken. Data comes later, one batch per step.
+    /// Loads a GraphConfig and its initial parameters. Parameters are given
+    /// by qualified path ("student.head.weight"), which is also the order
+    /// the engine keeps them in. Data comes later, one batch per step.
     pub fn open(graph_json: &str, weights_json: &str) -> Result<Self> {
         let config: GraphConfig = serde_json::from_str(graph_json).context("parsing the graph")?;
-        let mut models = config.models;
-        let graph = models
-            .remove("spike")
-            .or_else(|| models.pop_first().map(|(_, g)| g))
-            .context("the graph has no models")?;
-
+        anyhow::ensure!(!config.models.is_empty(), "the graph has no models");
         let weights: Weights =
             serde_json::from_str(weights_json).context("parsing the initial parameters")?;
-        let params = graph
-            .parameters
-            .iter()
-            .map(|p| {
+
+        let mut models = Vec::new();
+        let mut params = Vec::new();
+        let mut paths = Vec::new();
+        let mut argnums = Vec::new();
+        // BTreeMap iterates in name order, which is the declared order.
+        for (name, graph) in config.models {
+            let trained = config.train.contains(&name);
+            let start = params.len();
+            for spec in &graph.parameters {
+                let path = format!("{name}.{}", spec.path);
                 let t = weights
                     .params
-                    .get(&p.path)
-                    .with_context(|| format!("missing parameter {:?}", p.path))?;
+                    .get(&path)
+                    .with_context(|| format!("missing parameter {path:?}"))?;
                 anyhow::ensure!(
-                    t.shape == p.shape,
-                    "parameter {:?}: given shape {:?} is not the declared {:?}",
-                    p.path,
+                    t.shape == spec.shape,
+                    "parameter {path:?}: given shape {:?} is not the declared {:?}",
                     t.shape,
-                    p.shape
+                    spec.shape
                 );
-                Ok(t.to_array())
-            })
-            .collect::<Result<Vec<_>>>()?;
+                if trained && spec.trainable {
+                    argnums.push(params.len() as i32);
+                }
+                params.push(t.to_array());
+                paths.push(path);
+            }
+            let slice = start..params.len();
+            models.push(Model { name, graph, slice });
+        }
+        anyhow::ensure!(
+            !argnums.is_empty(),
+            "nothing to train: no model in {:?} has trainable parameters",
+            config.train
+        );
 
         Ok(Self {
-            graph,
+            models,
+            objective: config.objective,
             params,
+            paths,
+            argnums,
             step: 0,
             last_loss: f32::NAN,
             lr: 0.1,
@@ -148,19 +181,31 @@ impl Session {
         self.lr = lr;
     }
 
+    /// Qualified parameter paths, in the order the engine keeps them.
     pub fn parameter_paths(&self) -> Vec<String> {
-        self.graph.parameters.iter().map(|p| p.path.clone()).collect()
+        self.paths.clone()
     }
 
+    /// Every batch field the run reads, across the models and the objective.
     pub fn input_names(&self) -> Vec<String> {
-        self.graph.inputs.iter().map(|i| i.name.clone()).collect()
+        let mut names: Vec<String> = self
+            .models
+            .iter()
+            .map(|m| &m.graph)
+            .chain(self.objective.iter())
+            .flat_map(|g| g.inputs.iter().filter_map(|i| i.batch_field()))
+            .map(str::to_string)
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// One step on `batch`: forward, backward, SGD update. Long-running and
     /// free of any Ruby, so the extension calls it with the GVL released.
     pub fn run_step(&mut self, batch: &Batch) -> Result<f32> {
-        let inputs = self.bind(batch)?;
-        self.update(&inputs)
+        let fields = self.bind(batch)?;
+        self.update(&fields)
     }
 
     /// `n` steps, each on its own batch. The batches are given up front, so
@@ -168,64 +213,69 @@ impl Session {
     pub fn run_steps(&mut self, batches: &[Batch]) -> Result<f32> {
         anyhow::ensure!(!batches.is_empty(), "a span needs at least one batch");
         for batch in batches {
-            let inputs = self.bind(batch)?;
-            self.update(&inputs)?;
+            let fields = self.bind(batch)?;
+            self.update(&fields)?;
         }
         Ok(self.last_loss)
     }
 
-    /// The loss and one gradient per parameter for `batch`, without updating
-    /// anything.
+    /// The loss and one gradient per differentiated parameter for `batch`,
+    /// without updating anything.
     pub fn loss_and_grads(&self, batch: &Batch) -> Result<(Array, Vec<Array>)> {
-        let inputs = self.bind(batch)?;
-        self.differentiate(&inputs)
+        let fields = self.bind(batch)?;
+        self.differentiate(&fields)
     }
 
-    /// Gradients as copies, by parameter path, in declaration order.
+    /// Gradients as copies, by qualified parameter path. Only differentiated
+    /// parameters appear: a frozen model's have none.
     pub fn gradients(&self, batch: &Batch) -> Result<Vec<(String, Tensor)>> {
         let (_, grads) = self.loss_and_grads(batch)?;
-        self.graph
-            .parameters
+        self.argnums
             .iter()
             .zip(grads)
-            .map(|(spec, grad)| Ok((spec.path.clone(), to_tensor(&grad)?)))
+            .map(|(&i, grad)| Ok((self.paths[i as usize].clone(), to_tensor(&grad)?)))
             .collect()
     }
 
-    /// A copy of one parameter, by path. Copies, not handles: nothing that
-    /// lives on the device escapes this crate.
+    /// A copy of one parameter, by qualified path. Copies, not handles:
+    /// nothing that lives on the device escapes this crate.
     pub fn fetch(&self, path: &str) -> Result<Tensor> {
         let index = self
-            .graph
-            .parameters
+            .paths
             .iter()
-            .position(|p| p.path == path)
+            .position(|p| p == path)
             .with_context(|| format!("no parameter named {path:?}"))?;
         to_tensor(&self.params[index])
     }
 
-    /// Binds a batch to the graph's inputs, refusing anything the graph did
-    /// not declare and anything it declared but the batch omits. Shapes are
-    /// checked against the declaration, where a null dimension is symbolic
-    /// and may differ from step to step (docs/plan.md section 6.2).
+    /// Turns a batch into the fields the run reads, refusing anything no
+    /// graph declared and anything a graph declared but the batch omits.
+    /// Shapes are checked against the declaration, where a null dimension is
+    /// symbolic and may differ from step to step (docs/plan.md 6.2).
     fn bind(&self, batch: &Batch) -> Result<BTreeMap<String, Array>> {
+        let wanted = self.input_names();
         for name in batch.keys() {
             anyhow::ensure!(
-                self.graph.inputs.iter().any(|i| &i.name == name),
-                "the graph has no input named {name:?}"
+                wanted.iter().any(|w| w == name),
+                "no input named {name:?} is read here (this run reads {wanted:?})"
             );
         }
-        self.graph
-            .inputs
-            .iter()
-            .map(|spec| {
+
+        let mut fields = BTreeMap::new();
+        for graph in self.models.iter().map(|m| &m.graph).chain(self.objective.iter()) {
+            for spec in &graph.inputs {
+                let Some(field) = spec.batch_field() else {
+                    continue;
+                };
+                if fields.contains_key(field) {
+                    continue;
+                }
                 let t = batch
-                    .get(&spec.name)
-                    .with_context(|| format!("the batch is missing input {:?}", spec.name))?;
+                    .get(field)
+                    .with_context(|| format!("the batch is missing input {field:?}"))?;
                 anyhow::ensure!(
                     t.shape.len() == spec.shape.len(),
-                    "input {:?}: rank {} does not match the declared {}",
-                    spec.name,
+                    "input {field:?}: rank {} does not match the declared {}",
                     t.shape.len(),
                     spec.shape.len()
                 );
@@ -233,51 +283,122 @@ impl Session {
                     if let Some(declared) = declared {
                         anyhow::ensure!(
                             given == declared,
-                            "input {:?}: dimension {axis} is {given}, declared {declared}",
-                            spec.name
+                            "input {field:?}: dimension {axis} is {given}, declared {declared}"
                         );
                     }
                 }
                 let expected: usize = t.shape.iter().map(|d| *d as usize).product();
                 anyhow::ensure!(
                     t.data.len() == expected,
-                    "input {:?}: {} values for shape {:?}",
-                    spec.name,
+                    "input {field:?}: {} values for shape {:?}",
                     t.data.len(),
                     t.shape
                 );
-                Ok((spec.name.clone(), t.to_array()))
+                fields.insert(field.to_string(), t.to_array());
+            }
+        }
+        Ok(fields)
+    }
+
+    /// Runs every model, then the objective over their outputs, and returns
+    /// the loss. A model output feeding several places is computed once
+    /// (docs/plan.md 5A.3).
+    fn forward(
+        models: &[Model],
+        objective: Option<&Graph>,
+        params: &[Array],
+        fields: &BTreeMap<String, Array>,
+    ) -> std::result::Result<Array, mlx_rs::error::Exception> {
+        let fail = |what: String| mlx_rs::error::Exception::custom(what);
+        let mut outputs: BTreeMap<(String, String), Array> = BTreeMap::new();
+
+        for model in models {
+            let inputs = Self::resolve(&model.graph, fields, &outputs, &model.name)?;
+            let produced = interp::evaluate(&model.graph, &params[model.slice.clone()], &inputs)?;
+            for (name, value) in produced {
+                outputs.insert((model.name.clone(), name), value);
+            }
+        }
+
+        let Some(objective) = objective else {
+            // No objective: a single model's only output is the loss.
+            let mut values = outputs.into_values();
+            let loss = values
+                .next()
+                .ok_or_else(|| fail("the model produced no output".into()))?;
+            return Ok(loss);
+        };
+
+        let inputs = Self::resolve(objective, fields, &outputs, "objective")?;
+        let produced = interp::evaluate(objective, &[], &inputs)?;
+        let mut values = produced.into_values();
+        let loss = values
+            .next()
+            .ok_or_else(|| fail("the objective produced no output".into()))?;
+        Ok(loss)
+    }
+
+    /// One graph's inputs, each read from its declared source.
+    fn resolve(
+        graph: &Graph,
+        fields: &BTreeMap<String, Array>,
+        outputs: &BTreeMap<(String, String), Array>,
+        where_: &str,
+    ) -> std::result::Result<BTreeMap<String, Array>, mlx_rs::error::Exception> {
+        graph
+            .inputs
+            .iter()
+            .map(|spec| {
+                let value = if let Some(field) = spec.batch_field() {
+                    fields.get(field).cloned().ok_or_else(|| {
+                        mlx_rs::error::Exception::custom(format!(
+                            "{where_}: no batch field {field:?}"
+                        ))
+                    })?
+                } else {
+                    let (model, output) = spec.model_output().ok_or_else(|| {
+                        mlx_rs::error::Exception::custom(format!(
+                            "{where_}: input {:?} has no source",
+                            spec.name
+                        ))
+                    })?;
+                    outputs
+                        .get(&(model.to_string(), output.to_string()))
+                        .cloned()
+                        .ok_or_else(|| {
+                            mlx_rs::error::Exception::custom(format!(
+                                "{where_}: {model}.{output} has not been produced; \
+                                 a model must be declared before what reads it"
+                            ))
+                        })?
+                };
+                Ok((spec.name.clone(), value))
             })
             .collect()
     }
 
-    fn differentiate(&self, inputs: &BTreeMap<String, Array>) -> Result<(Array, Vec<Array>)> {
-        let argnums: Vec<i32> = (0..self.params.len() as i32).collect();
-        let graph = &self.graph;
+    fn differentiate(&self, fields: &BTreeMap<String, Array>) -> Result<(Array, Vec<Array>)> {
+        let models = &self.models;
+        let objective = self.objective.as_ref();
         let fun = |ps: &[Array]| -> std::result::Result<Vec<Array>, mlx_rs::error::Exception> {
-            interp::evaluate(graph, ps, inputs)
+            Self::forward(models, objective, ps, fields).map(|loss| vec![loss])
         };
-        let mut vg = value_and_grad_with_argnums(fun, &argnums[..]);
+        let mut vg = value_and_grad_with_argnums(fun, &self.argnums[..]);
         let (mut values, grads) = vg(&self.params)?;
-        anyhow::ensure!(
-            values.len() == 1,
-            "the graph must output exactly one value (the loss), got {}",
-            values.len()
-        );
         let loss = values.remove(0);
         eval(std::iter::once(&loss).chain(grads.iter()))?;
         Ok((loss, grads))
     }
 
-    fn update(&mut self, inputs: &BTreeMap<String, Array>) -> Result<f32> {
-        let (loss, grads) = self.differentiate(inputs)?;
+    /// SGD on the differentiated parameters. A frozen model's are left
+    /// exactly as they were.
+    fn update(&mut self, fields: &BTreeMap<String, Array>) -> Result<f32> {
+        let (loss, grads) = self.differentiate(fields)?;
         let lr = Array::from_f32(self.lr);
-        self.params = self
-            .params
-            .iter()
-            .zip(&grads)
-            .map(|(p, g)| Ok(p.subtract(g.multiply(&lr)?)?))
-            .collect::<Result<Vec<_>>>()?;
+        for (&i, grad) in self.argnums.iter().zip(&grads) {
+            let i = i as usize;
+            self.params[i] = self.params[i].subtract(grad.multiply(&lr)?)?;
+        }
         eval(self.params.iter())?;
         self.last_loss = loss.item::<f32>();
         self.step += 1;
