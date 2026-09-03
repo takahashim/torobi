@@ -30,13 +30,11 @@ class BoundaryTest < Minitest::Test
           g.output g.mse(g.linear(x, 1, name: "l"), y)
         end
         config = Torobi::GraphConfig.new(models: { "spike" => model })
-        bindings = {
-          inputs: { x: { shape: [1, 2], data: [1.0, 2.0] },
-                    y: { shape: [1, 1], data: [3.0] } },
-          params: { "l.weight" => { shape: [1, 2], data: [0.0, 0.0] },
-                    "l.bias" => { shape: [1], data: [0.0] } }
-        }
-        [config, bindings]
+        weights = { params: { "l.weight" => { shape: [1, 2], data: [0.0, 0.0] },
+                              "l.bias" => { shape: [1], data: [0.0] } } }
+        batch = { x: { shape: [1, 2], data: [1.0, 2.0] },
+                  y: { shape: [1, 1], data: [3.0] } }
+        [config, weights, batch]
       end
       #{body}
     RUBY
@@ -52,14 +50,17 @@ class BoundaryTest < Minitest::Test
     File.unlink(file) if file && File.exist?(file)
   end
 
+  # Symbolic dimensions are exactly what neither the build-time inference
+  # nor the bind check can settle: x and y both declare a null batch
+  # dimension, so only MLX, at run time, sees that they disagree. It reports
+  # it through its error handler, and that must reach Ruby as an exception.
   def test_errors_mlx_reports_become_ruby_exceptions
-    # A shape the build-time inference cannot catch: the bound data does not
-    # match the declared input. MLX reports it through its error handler.
     body = <<~RUBY
-      config, bindings = build
-      bindings[:inputs][:x] = { shape: [1, 3], data: [1.0, 2.0, 3.0] }
+      config, weights, batch = build
+      batch[:x] = { shape: [4, 2], data: Array.new(8, 1.0) }
+      batch[:y] = { shape: [3, 1], data: Array.new(3, 1.0) }
       begin
-        Torobi::Session.open(config, bindings).run(steps: 1)
+        Torobi::Session.open(config, weights).step!(batch)
         puts "NO ERROR"
       rescue => e
         puts "RESCUED \#{e.class}: \#{e.message}"
@@ -68,14 +69,32 @@ class BoundaryTest < Minitest::Test
     output, status = run_isolated(body)
     assert_predicate status, :success?, output
     assert_match(/RESCUED RuntimeError/, output)
-    assert_match(/matmul/i, output, "the message should name what MLX objected to")
+    assert_match(/shapes|broadcast|\(4,1\)/i, output, "the message should say what MLX objected to")
+  end
+
+  # The bind check is the layer in front of it: what it can settle, it
+  # settles before MLX is asked, with a better message.
+  def test_the_bind_check_refuses_before_mlx_is_asked
+    body = <<~RUBY
+      config, weights, batch = build
+      batch[:x] = { shape: [1, 3], data: [1.0, 2.0, 3.0] }
+      begin
+        Torobi::Session.open(config, weights).step!(batch)
+        puts "NO ERROR"
+      rescue => e
+        puts "RESCUED \#{e.message}"
+      end
+    RUBY
+    output, status = run_isolated(body)
+    assert_predicate status, :success?, output
+    assert_match(/dimension 1 is 3, declared 2/, output)
   end
 
   def test_a_missing_metallib_is_refused_before_mlx_is_touched
     body = <<~RUBY
-      config, bindings = build
+      config, weights, batch = build
       begin
-        Torobi::Session.open(config, bindings)
+        Torobi::Session.open(config, weights)
         puts "OPENED"
       rescue Torobi::EngineUnavailable => e
         puts "REFUSED"
@@ -90,9 +109,9 @@ class BoundaryTest < Minitest::Test
   # the process. Documented as a test so it cannot quietly change.
   def test_without_the_refusal_a_missing_metallib_ends_the_process
     body = <<~RUBY
-      config, bindings = build
+      config, weights, batch = build
       begin
-        Torobi::Native::Session.open(config.canonical_json, JSON.generate(bindings))
+        Torobi::Native::Session.open(config.canonical_json, JSON.generate(weights))
         puts "OPENED"
       rescue => e
         puts "RESCUED \#{e.class}"
@@ -107,11 +126,11 @@ class BoundaryTest < Minitest::Test
 
   def test_a_session_survives_forced_gc_and_repeated_spans
     body = <<~RUBY
-      config, bindings = build
-      s = Torobi::Session.open(config, bindings)
+      config, weights, batch = build
+      s = Torobi::Session.open(config, weights)
       s.adjust(lr: 0.1)
       50.times do
-        s.run(steps: 4)
+        s.repeat(batch, steps: 4)
         GC.start
       end
       puts "STEPS \#{s.step}"
@@ -125,8 +144,8 @@ class BoundaryTest < Minitest::Test
 
   def test_many_sessions_are_opened_and_dropped_without_growth
     body = <<~RUBY
-      config, bindings = build
-      100.times { Torobi::Session.open(config, bindings).run(steps: 1) }
+      config, weights, batch = build
+      100.times { Torobi::Session.open(config, weights).step!(batch) }
       GC.start
       puts "SURVIVED"
     RUBY

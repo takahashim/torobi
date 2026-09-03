@@ -26,6 +26,9 @@ pub struct Graph {
 #[derive(Deserialize)]
 pub struct InputSpec {
     pub name: String,
+    /// A null dimension is symbolic: it may differ from batch to batch.
+    pub shape: Vec<Option<i32>>,
+    pub dtype: String,
 }
 
 #[derive(Deserialize)]

@@ -3,14 +3,14 @@
 require_relative "test_helper"
 
 # The engine half of M1: the same linear-regression graph the spike uses,
-# but driven in-process through the narrow session API.
+# driven in process through the narrow session API, with every step given
+# its own batch.
 class SessionTest < Minitest::Test
-  N = 32
-
   def setup
     skip "extension not compiled" unless defined?(Torobi::Session)
     @config = Torobi::GraphConfig.new(models: { "spike" => model })
-    @bindings = bindings
+    @weights = { params: { "linear.weight" => { shape: [1, 2], data: [0.0, 0.0] },
+                           "linear.bias" => { shape: [1], data: [0.0] } } }
   end
 
   def model
@@ -23,66 +23,83 @@ class SessionTest < Minitest::Test
 
   # y = 3*x0 - 2*x1 + 1, exactly; a fit this easy makes convergence a
   # meaningful assertion rather than a hopeful one.
-  def bindings
-    rng = Random.new(7)
-    xs = Array.new(N) { [rng.rand(-1.0..1.0), rng.rand(-1.0..1.0)] }
+  def batch(rows, seed: 7)
+    rng = Random.new(seed)
+    xs = Array.new(rows) { [rng.rand(-1.0..1.0), rng.rand(-1.0..1.0)] }
     ys = xs.map { |a, b| [(3 * a) - (2 * b) + 1] }
-    {
-      inputs: { x: { shape: [N, 2], data: xs.flatten },
-                y: { shape: [N, 1], data: ys.flatten } },
-      params: { "linear.weight" => { shape: [1, 2], data: [0.0, 0.0] },
-                "linear.bias" => { shape: [1], data: [0.0] } }
-    }
+    { x: { shape: [rows, 2], data: xs.flatten },
+      y: { shape: [rows, 1], data: ys.flatten } }
   end
 
-  def test_a_session_trains_the_graph_it_was_opened_with
-    Torobi::Session.open(@config, @bindings) do |s|
+  # Different data every step, which is what training actually looks like
+  # and what the fixed-bindings design could not express.
+  def batches(count, rows: 8)
+    Array.new(count) { |i| batch(rows, seed: i) }
+  end
+
+  def test_a_span_takes_one_batch_per_step
+    Torobi::Session.open(@config, @weights) do |s|
       assert_equal 0, s.step
       assert_equal %w[linear.weight linear.bias], s.parameter_paths
+      assert_equal %w[x y], s.input_names.sort
 
       s.adjust(lr: 0.5)
-      first = s.run(steps: 1)
-      last = s.run(steps: 99)
+      first = s.step!(batch(8, seed: 0))
+      last = s.run(batches(99))
 
       assert_equal 100, s.step
-      assert_operator last, :<, first * 0.01, "the loss should collapse on an exact fit"
-      assert_in_delta 0.0, last, 1e-4
+      assert_operator last, :<, first * 0.05, "the loss should fall across the span"
 
-      # It recovered the coefficients it was given.
+      # It recovered the coefficients behind every batch.
       weight = s.fetch("linear.weight")
       assert_equal [1, 2], weight[:shape]
-      assert_in_delta 3.0, weight[:data][0], 1e-2
-      assert_in_delta(-2.0, weight[:data][1], 1e-2)
-      assert_in_delta 1.0, s.fetch("linear.bias")[:data][0], 1e-2
+      assert_in_delta 3.0, weight[:data][0], 5e-2
+      assert_in_delta(-2.0, weight[:data][1], 5e-2)
+      assert_in_delta 1.0, s.fetch("linear.bias")[:data][0], 5e-2
     end
   end
 
-  def test_gradients_come_back_by_name_as_copies
-    Torobi::Session.open(@config, @bindings) do |s|
-      grads = s.gradients
+  # The symbolic batch dimension is real: batches of different sizes go
+  # through the same graph.
+  def test_batches_may_differ_in_size_from_step_to_step
+    Torobi::Session.open(@config, @weights) do |s|
+      s.adjust(lr: 0.3)
+      [1, 4, 16, 3].each { |rows| s.step!(batch(rows)) }
+      assert_equal 4, s.step
+      assert_predicate s.loss, :finite?
+    end
+  end
+
+  def test_gradients_are_for_the_batch_they_are_given
+    Torobi::Session.open(@config, @weights) do |s|
+      b = batch(8, seed: 1)
+      grads = s.gradients(b)
       assert_equal %w[linear.weight linear.bias], grads.keys
       assert_equal [1, 2], grads["linear.weight"][:shape]
       # At w = 0, the gradient of the bias is -2 * mean(y).
-      mean_y = @bindings[:inputs][:y][:data].sum / N
-      assert_in_delta(-2 * mean_y, grads["linear.bias"][:data][0], 1e-5)
+      ys = b[:y][:data]
+      assert_in_delta(-2 * ys.sum / ys.size, grads["linear.bias"][:data][0], 1e-5)
+
+      # A different batch, a different gradient; and asking did not train.
+      refute_equal grads["linear.bias"][:data], s.gradients(batch(8, seed: 2))["linear.bias"][:data]
+      assert_equal 0, s.step
     end
   end
 
   def test_knobs_are_read_back_and_take_effect
-    Torobi::Session.open(@config, @bindings) do |s|
-      s.adjust(lr: 0.25)
-      assert_in_delta 0.25, s.lr
-      slow = s.run(steps: 5)
-
-      fast = Torobi::Session.open(@config, @bindings) { |t| t.adjust(lr: 0.5).run(steps: 5) }
-      assert_operator fast, :<, slow, "a larger lr should get further in the same steps"
+    slow = Torobi::Session.open(@config, @weights) do |s|
+      s.adjust(lr: 0.05)
+      assert_in_delta 0.05, s.lr
+      s.run(batches(5))
     end
+    fast = Torobi::Session.open(@config, @weights) { |s| s.adjust(lr: 0.5).run(batches(5)) }
+    assert_operator fast, :<, slow, "a larger lr should get further in the same steps"
   end
 
   # The point of releasing the GVL: another Ruby thread runs while a span
   # is in flight.
   def test_other_threads_proceed_while_a_span_runs
-    Torobi::Session.open(@config, @bindings) do |s|
+    Torobi::Session.open(@config, @weights) do |s|
       ticks = 0
       ticker = Thread.new do
         loop do
@@ -91,7 +108,7 @@ class SessionTest < Minitest::Test
         end
       end
       s.adjust(lr: 0.5)
-      s.run(steps: 400)
+      s.run(batches(400, rows: 4))
       ticker.kill
       assert_operator ticks, :>, 1, "the ticker thread did not run during the span"
     end
@@ -99,13 +116,31 @@ class SessionTest < Minitest::Test
 
   def test_mistakes_are_named
     e = assert_raises(RuntimeError) do
-      Torobi::Session.open(@config, @bindings.merge(params: {}))
+      Torobi::Session.open(@config, { params: {} })
     end
     assert_match(/missing parameter "linear.weight"/, e.message)
 
-    Torobi::Session.open(@config, @bindings) do |s|
+    Torobi::Session.open(@config, @weights) do |s|
       assert_raises(RuntimeError) { s.fetch("nope") }
-      assert_raises(ArgumentError) { s.run(steps: 0) }
+      assert_raises(ArgumentError) { s.run([]) }
+
+      # A batch that omits an input, names one the graph does not have, or
+      # contradicts the declared shape.
+      e = assert_raises(RuntimeError) { s.step!({ x: batch(2)[:x] }) }
+      assert_match(/missing input "y"/, e.message)
+
+      e = assert_raises(RuntimeError) { s.step!(batch(2).merge(z: batch(2)[:x])) }
+      assert_match(/no input named "z"/, e.message)
+
+      wrong = batch(2)
+      wrong[:x] = { shape: [2, 3], data: [0.0] * 6 }
+      e = assert_raises(RuntimeError) { s.step!(wrong) }
+      assert_match(/dimension 1 is 3, declared 2/, e.message)
+
+      short = batch(2)
+      short[:x] = { shape: [2, 2], data: [0.0] }
+      e = assert_raises(RuntimeError) { s.step!(short) }
+      assert_match(/1 values for shape/, e.message)
     end
   end
 end

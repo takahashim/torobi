@@ -754,6 +754,7 @@ dependencies = [
  "anyhow",
  "magnus",
  "rb-sys",
+ "serde_json",
  "torobi-engine",
 ]
 

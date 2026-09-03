@@ -10,7 +10,7 @@ mod gvl;
 use std::cell::RefCell;
 
 use magnus::{function, method, prelude::*, Error, RArray, Ruby};
-use torobi_engine::session::Tensor;
+use torobi_engine::session::{Batch, Tensor};
 use torobi_engine::Session as EngineSession;
 
 /// The engine's session, owned by one Ruby object.
@@ -26,8 +26,8 @@ fn to_error(ruby: &Ruby, error: anyhow::Error) -> Error {
 }
 
 impl Session {
-    fn open(ruby: &Ruby, graph_json: String, bindings_json: String) -> Result<Self, Error> {
-        EngineSession::open(&graph_json, &bindings_json)
+    fn open(ruby: &Ruby, graph_json: String, weights_json: String) -> Result<Self, Error> {
+        EngineSession::open(&graph_json, &weights_json)
             .map(|session| Self(RefCell::new(session)))
             .map_err(|e| to_error(ruby, e))
     }
@@ -41,11 +41,25 @@ impl Session {
         })
     }
 
-    /// Runs `n` steps with the GVL released.
-    fn run_steps(ruby: &Ruby, rb_self: &Self, n: usize) -> Result<f32, Error> {
+    /// One step on one batch, with the GVL released.
+    ///
+    /// The batch arrives as JSON, which is a copy and a parse per step. That
+    /// is the cost the plan says to measure rather than assume (docs/plan.md
+    /// section 5A.2); `bench/boundary.rb` reports it.
+    fn run_step(ruby: &Ruby, rb_self: &Self, batch_json: String) -> Result<f32, Error> {
+        let batch = parse_batch(ruby, &batch_json)?;
         let mut session = rb_self.borrow_mut(ruby)?;
         // No Ruby API is touched inside: the engine only sees its own data.
-        gvl::without_gvl(|| session.run_steps(n)).map_err(|e| to_error(ruby, e))
+        gvl::without_gvl(|| session.run_step(&batch)).map_err(|e| to_error(ruby, e))
+    }
+
+    /// A span: one step per batch, all of them handed over before the GVL
+    /// is released, so the engine never asks anyone for data mid-span.
+    fn run_steps(ruby: &Ruby, rb_self: &Self, batches_json: String) -> Result<f32, Error> {
+        let batches: Vec<Batch> = serde_json::from_str(&batches_json)
+            .map_err(|e| Error::new(ruby.exception_arg_error(), format!("bad batches: {e}")))?;
+        let mut session = rb_self.borrow_mut(ruby)?;
+        gvl::without_gvl(|| session.run_steps(&batches)).map_err(|e| to_error(ruby, e))
     }
 
     fn step(&self) -> usize {
@@ -69,6 +83,10 @@ impl Session {
         ruby.ary_from_vec(rb_self.0.borrow().parameter_paths())
     }
 
+    fn input_names(ruby: &Ruby, rb_self: &Self) -> RArray {
+        ruby.ary_from_vec(rb_self.0.borrow().input_names())
+    }
+
     fn fetch(ruby: &Ruby, rb_self: &Self, path: String) -> Result<(RArray, RArray), Error> {
         let tensor = rb_self
             .0
@@ -78,10 +96,11 @@ impl Session {
         Ok(tensor_to_ruby(ruby, tensor))
     }
 
-    fn gradients(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
+    fn gradients(ruby: &Ruby, rb_self: &Self, batch_json: String) -> Result<RArray, Error> {
+        let batch = parse_batch(ruby, &batch_json)?;
         let grads = {
             let session = rb_self.0.borrow();
-            gvl::without_gvl(|| session.gradients()).map_err(|e| to_error(ruby, e))?
+            gvl::without_gvl(|| session.gradients(&batch)).map_err(|e| to_error(ruby, e))?
         };
         let out = ruby.ary_new_capa(grads.len());
         for (path, tensor) in grads {
@@ -90,6 +109,11 @@ impl Session {
         }
         Ok(out)
     }
+}
+
+fn parse_batch(ruby: &Ruby, json: &str) -> Result<Batch, Error> {
+    serde_json::from_str(json)
+        .map_err(|e| Error::new(ruby.exception_arg_error(), format!("bad batch: {e}")))
 }
 
 /// A tensor leaves as two plain Ruby arrays: its shape and its flat data.
@@ -106,13 +130,15 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let native = torobi.define_module("Native")?;
     let class = native.define_class("Session", ruby.class_object())?;
     class.define_singleton_method("open", function!(Session::open, 2))?;
+    class.define_method("run_step", method!(Session::run_step, 1))?;
     class.define_method("run_steps", method!(Session::run_steps, 1))?;
     class.define_method("step", method!(Session::step, 0))?;
     class.define_method("loss", method!(Session::loss, 0))?;
     class.define_method("lr", method!(Session::lr, 0))?;
     class.define_method("lr=", method!(Session::set_lr, 1))?;
     class.define_method("parameter_paths", method!(Session::parameter_paths, 0))?;
+    class.define_method("input_names", method!(Session::input_names, 0))?;
     class.define_method("fetch", method!(Session::fetch, 1))?;
-    class.define_method("gradients", method!(Session::gradients, 0))?;
+    class.define_method("gradients", method!(Session::gradients, 1))?;
     Ok(())
 }
