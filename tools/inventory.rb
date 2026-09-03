@@ -30,7 +30,10 @@ end
 
 File.write(out, "#{JSON.pretty_generate({
   "schema_version" => 1,
-  "source" => "cl-nagoya/ruri-v3-130m",
+  # The Hub cache spells a repo "models--owner--name"; say it the way a
+  # person would.
+  "source" => File.basename(File.dirname(File.dirname(dir)))
+               .delete_prefix("models--").sub("--", "/"),
   "revision" => File.basename(dir),
   "generated_at" => Time.now.utc.iso8601,
   "config" => config,

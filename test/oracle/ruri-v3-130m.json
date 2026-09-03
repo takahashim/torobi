@@ -2,7 +2,7 @@
   "schema_version": 1,
   "source": "cl-nagoya/ruri-v3-130m",
   "revision": "e3114c6ee10dbab8b4b235fbc6dcf9dd4d5ac1a6",
-  "generated_at": "2026-09-03T06:05:57Z",
+  "generated_at": "2026-09-03T06:44:52Z",
   "config": {
     "_name_or_path": "outputs/ft/vanilla/cl-nagoya__ruri-v3-pt-130m/B512E1LR1e-05L8192Temp0.01/default14",
     "architectures": [
@@ -28,7 +28,7 @@
     "initializer_cutoff_factor": 2.0,
     "initializer_range": 0.02,
     "intermediate_size": 2048,
-    "layer_norm_eps": 1.0e-05,
+    "layer_norm_eps": 0.00001,
     "local_attention": 128,
     "local_rope_theta": 10000.0,
     "max_position_embeddings": 8192,
@@ -36,7 +36,7 @@
     "mlp_dropout": 0.0,
     "model_type": "modernbert",
     "norm_bias": false,
-    "norm_eps": 1.0e-05,
+    "norm_eps": 0.00001,
     "num_attention_heads": 8,
     "num_hidden_layers": 19,
     "pad_token_id": 3,

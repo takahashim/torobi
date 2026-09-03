@@ -299,6 +299,58 @@ class ModernBertTest < Minitest::Test
     end
   end
 
+  # The teacher this project distils from: ModernBertForSequenceClassification,
+  # 25 layers, a pooled head and a one-label classifier.
+  RERANKER = File.expand_path("oracle/ruri-v3-reranker-310m.json", __dir__)
+
+  def reranker_oracle = @reranker_oracle ||= JSON.parse(File.read(RERANKER))
+
+  def reranker_config = Torobi::Models::ModernBERT.from_hash(reranker_oracle.fetch("config"))
+
+  def test_the_classifier_declares_what_the_reranker_holds
+    c = reranker_config
+
+    assert_equal 768, c.hidden_size
+    assert_equal 25, c.num_hidden_layers
+    assert_equal :cls, c.classifier_pooling
+    assert_equal 1, c.num_labels
+
+    declared = Torobi::Models::ModernBERT.classifier(c, seq: 32)
+                                         .parameters.to_h { |s| [s.path, s.shape] }
+    held = reranker_oracle.fetch("parameters").transform_values { |t| t.fetch("shape") }
+
+    assert_empty declared.keys - held.keys, "this graph declares what the checkpoint lacks"
+    mismatched = declared.filter_map do |path, shape|
+      "#{path}: declares #{shape.inspect}, holds #{held[path].inspect}" if held[path] != shape
+    end
+
+    assert_empty mismatched
+    # The encoder sits under `model.`, as the checkpoint has it.
+    assert_includes declared.keys, "model.layers.24.attn.Wqkv.weight"
+    assert_includes declared.keys, "head.dense.weight"
+    assert_includes declared.keys, "classifier.weight"
+  end
+
+  # One tensor in the file is not part of the model, and that is correct.
+  #
+  # `config.json` says `classifier_bias: false`, and HF builds the head from
+  # the flag rather than from what the file happens to carry, so
+  # `from_pretrained` leaves this one unloaded. kohagi follows the flag for
+  # the same reason (its `rerank::bias` says so, and warns). Torobi agrees:
+  # a checkpoint and its config can disagree, and the config wins.
+  def test_a_tensor_the_config_does_not_declare_is_left_alone
+    declared = Torobi::Models::ModernBERT.classifier(reranker_config, seq: 32)
+                                         .parameters.map(&:path)
+    held = reranker_oracle.fetch("parameters").keys
+
+    assert_equal ["classifier.bias"], held - declared
+    refute reranker_oracle.dig("config", "classifier_bias"),
+           "the config says no classifier bias, which is why the tensor is unused"
+    # Which the import path allows: a file may hold more than a graph wants.
+    assert_equal 155, declared.size
+    assert_equal 156, held.size
+  end
+
   def test_a_hidden_size_that_does_not_divide_into_heads_is_refused
     raw = oracle.fetch("config").merge("num_attention_heads" => 7)
     e = assert_raises(Torobi::ConfigError) { Torobi::Models::ModernBERT.from_hash(raw) }

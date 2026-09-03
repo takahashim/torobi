@@ -24,7 +24,8 @@ module Torobi
       Config = Data.define(
         :vocab_size, :hidden_size, :intermediate_size, :num_hidden_layers,
         :num_attention_heads, :norm_eps, :global_attn_every_n_layers,
-        :global_rope_theta, :local_rope_theta, :local_attention, :pad_token_id
+        :global_rope_theta, :local_rope_theta, :local_attention, :pad_token_id,
+        :num_labels, :classifier_pooling, :classifier_bias
       ) do
         def head_dim = hidden_size / num_attention_heads
 
@@ -64,8 +65,56 @@ module Torobi
           global_rope_theta: raw.fetch("global_rope_theta", 160_000.0),
           local_rope_theta: raw.fetch("local_rope_theta", 10_000.0),
           local_attention: raw.fetch("local_attention", 128),
-          pad_token_id: raw.fetch("pad_token_id", 0)
+          pad_token_id: raw.fetch("pad_token_id", 0),
+          num_labels: raw.fetch("num_labels", 1),
+          classifier_pooling: raw.fetch("classifier_pooling", "cls").to_sym,
+          classifier_bias: raw.fetch("classifier_bias", false)
         ).check!
+      end
+
+      # A sequence classifier: token ids in, one logit per label out.
+      #
+      # What the published rerankers are (`ModernBertForSequenceClassification`),
+      # and what this project is distilling: a cross-encoder scores a
+      # (query, text) pair with one number. The encoder sits under
+      # `model.`, as the checkpoint has it, with a pooled head above.
+      #
+      # The score a caller compares against is the sigmoid of this logit,
+      # which is what a CrossEncoder reports for a one-label model. Whether
+      # to distil against the logit or its sigmoid is the recipe's, so this
+      # emits the logit and stops.
+      def classifier(config, seq:)
+        config.check!
+        Torobi.graph do |g|
+          x = g.scope("model") { encode(g, config, seq:) }
+          pooled = pool(g, x, config, seq:)
+          # ModernBERT's head: a dense, gelu, a norm, then the classifier.
+          pooled = norm(g, g.linear(pooled, config.hidden_size, name: "head.dense",
+                                    bias: false).gelu,
+                        config, name: "head.norm")
+          # `linear` names the node after the parameter scope, so this is
+          # already called "classifier"; the output name is separate.
+          g.output :logits, g.linear(pooled, config.num_labels, name: "classifier",
+                                     bias: config.classifier_bias)
+        end
+      end
+
+      # One vector per row, the way `classifier_pooling` asks for.
+      #
+      # `cls` is the first position, which for these tokenizers is the
+      # sentence-start token: [batch, seq, hidden] keeping only seq 0.
+      # `mean` is over the sequence, and takes no account of padding here,
+      # so a caller pooling that way should pass rows of equal length.
+      def pool(g, x, config, seq:)
+        case config.classifier_pooling
+        when :cls
+          x.slice(axis: 1, start: 0, length: 1).reshape(shape: [-1, config.hidden_size])
+        when :mean
+          g.mean(x, axes: [1])
+        else
+          raise ConfigError,
+                "unknown classifier_pooling #{config.classifier_pooling.inspect}"
+        end
       end
 
       # The encoder as a graph: token ids in, hidden states out.
@@ -86,24 +135,29 @@ module Torobi
       def graph(config, seq:)
         config.check!
         Torobi.graph do |g|
-          ids = g.input(:input_ids, [nil, seq], dtype: :i32)
-          global = g.input(:mask, [nil, 1, seq, seq])
-          local = g.input(:local_mask, [nil, 1, seq, seq])
-
-          x = g.embedding(ids, vocab: config.vocab_size, dim: config.hidden_size,
-                          name: "embeddings.tok_embeddings")
-          x = norm(g, x, config, name: "embeddings.norm")
-
-          config.num_hidden_layers.times do |i|
-            mask = config.global?(i) ? global : local
-            x = g.scope("layers.#{i}") { layer(g, x, config, i, mask, seq:) }
-          end
-
           # Named as well as declared an output, so a tap can read it: an
           # output is what the objective consumes, and a tap is how a
           # caller sees a value without a second graph to see it with.
-          g.output :hidden, g.name("hidden", norm(g, x, config, name: "final_norm"))
+          g.output :hidden, g.name("hidden", encode(g, config, seq:))
         end
+      end
+
+      # The encoder body, so the bare model and the classifier are one
+      # description rather than two that must be kept in step.
+      def encode(g, config, seq:)
+        ids = g.input(:input_ids, [nil, seq], dtype: :i32)
+        global = g.input(:mask, [nil, 1, seq, seq])
+        local = g.input(:local_mask, [nil, 1, seq, seq])
+
+        x = g.embedding(ids, vocab: config.vocab_size, dim: config.hidden_size,
+                        name: "embeddings.tok_embeddings")
+        x = norm(g, x, config, name: "embeddings.norm")
+
+        config.num_hidden_layers.times do |i|
+          mask = config.global?(i) ? global : local
+          x = g.scope("layers.#{i}") { layer(g, x, config, i, mask, seq:) }
+        end
+        norm(g, x, config, name: "final_norm")
       end
 
       # One encoder block: attention with a residual, then the MLP with

@@ -134,6 +134,7 @@
   inputs: 1
   attributes: { axis: int, start: int, length: int }
   shape_rule: slice
+  handle: true
 - name: mean
   inputs: 1
   attributes: { axes: int_list_or_null, keepdims: bool }

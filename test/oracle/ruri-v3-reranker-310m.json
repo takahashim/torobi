@@ -1,0 +1,1100 @@
+{
+  "schema_version": 1,
+  "source": "cl-nagoya/ruri-v3-reranker-310m",
+  "revision": "bb46934ee9ed09f850b9fcff17501b3ef7ddb2b3",
+  "generated_at": "2026-09-03T06:44:52Z",
+  "config": {
+    "_name_or_path": "hpprc/ruri-v3-reranker-310m-default8",
+    "architectures": [
+      "ModernBertForSequenceClassification"
+    ],
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "bos_token_id": 1,
+    "classifier_activation": "gelu",
+    "classifier_bias": false,
+    "classifier_dropout": 0.0,
+    "classifier_pooling": "cls",
+    "cls_token_id": 6,
+    "decoder_bias": true,
+    "deterministic_flash_attn": false,
+    "embedding_dropout": 0.0,
+    "eos_token_id": 2,
+    "global_attn_every_n_layers": 3,
+    "global_rope_theta": 160000.0,
+    "gradient_checkpointing": false,
+    "hidden_activation": "gelu",
+    "hidden_size": 768,
+    "id2label": {
+      "0": "LABEL_0"
+    },
+    "initializer_cutoff_factor": 2.0,
+    "initializer_range": 0.02,
+    "intermediate_size": 3072,
+    "label2id": {
+      "LABEL_0": 0
+    },
+    "layer_norm_eps": 0.00001,
+    "local_attention": 128,
+    "local_rope_theta": 10000.0,
+    "max_position_embeddings": 8192,
+    "mlp_bias": false,
+    "mlp_dropout": 0.0,
+    "model_type": "modernbert",
+    "norm_bias": false,
+    "norm_eps": 0.00001,
+    "num_attention_heads": 12,
+    "num_hidden_layers": 25,
+    "pad_token_id": 3,
+    "position_embedding_type": "rope",
+    "reference_compile": false,
+    "repad_logits_with_grad": false,
+    "sep_token_id": 4,
+    "sparse_pred_ignore_index": -100,
+    "sparse_prediction": false,
+    "torch_dtype": "float32",
+    "transformers_version": "4.48.3",
+    "vocab_size": 102400
+  },
+  "parameters": {
+    "classifier.bias": {
+      "shape": [
+        1
+      ],
+      "dtype": "F32"
+    },
+    "classifier.weight": {
+      "shape": [
+        1,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "head.dense.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "head.norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.embeddings.norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.embeddings.tok_embeddings.weight": {
+      "shape": [
+        102400,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.final_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.0.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.0.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.0.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.0.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.0.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.1.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.1.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.1.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.1.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.1.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.1.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.10.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.10.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.10.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.10.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.10.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.10.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.11.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.11.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.11.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.11.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.11.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.11.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.12.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.12.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.12.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.12.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.12.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.12.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.13.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.13.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.13.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.13.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.13.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.13.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.14.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.14.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.14.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.14.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.14.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.14.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.15.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.15.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.15.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.15.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.15.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.15.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.16.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.16.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.16.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.16.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.16.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.16.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.17.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.17.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.17.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.17.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.17.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.17.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.18.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.18.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.18.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.18.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.18.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.18.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.19.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.19.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.19.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.19.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.19.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.19.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.2.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.2.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.2.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.2.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.2.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.2.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.20.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.20.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.20.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.20.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.20.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.20.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.21.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.21.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.21.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.21.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.21.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.21.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.22.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.22.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.22.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.22.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.22.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.22.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.23.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.23.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.23.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.23.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.23.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.23.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.24.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.24.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.24.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.24.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.24.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.24.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.3.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.3.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.3.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.3.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.3.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.3.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.4.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.4.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.4.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.4.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.4.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.4.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.5.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.5.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.5.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.5.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.5.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.5.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.6.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.6.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.6.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.6.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.6.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.6.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.7.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.7.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.7.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.7.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.7.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.7.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.8.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.8.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.8.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.8.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.8.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.8.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.9.attn.Wo.weight": {
+      "shape": [
+        768,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.9.attn.Wqkv.weight": {
+      "shape": [
+        2304,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.9.attn_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.9.mlp.Wi.weight": {
+      "shape": [
+        6144,
+        768
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.9.mlp.Wo.weight": {
+      "shape": [
+        768,
+        3072
+      ],
+      "dtype": "F32"
+    },
+    "model.layers.9.mlp_norm.weight": {
+      "shape": [
+        768
+      ],
+      "dtype": "F32"
+    }
+  }
+}

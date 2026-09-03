@@ -83,6 +83,10 @@ namespace :oracle do
        "#{"瑠璃も玻璃も照らせば光る".shellescape} #{"犬も歩けば棒に当たる".shellescape} #{long.shellescape}"
   end
 
+  RERANKER_310M = File.expand_path(
+    "~/.cache/huggingface/hub/models--cl-nagoya--ruri-v3-reranker-310m/snapshots"
+  )
+
   desc "record what cl-nagoya/ruri-v3-130m holds, for test/oracle"
   task :ruri do
     dir = ENV["RURI_V3_130M"] || Dir[File.join(RURI_V3_130M, "*")].max_by { File.mtime(_1) }
@@ -90,10 +94,19 @@ namespace :oracle do
 
     sh "ruby tools/inventory.rb #{dir.shellescape} test/oracle/ruri-v3-130m.json"
   end
+
+  desc "record what cl-nagoya/ruri-v3-reranker-310m holds, for test/oracle"
+  task :reranker do
+    dir = ENV["RURI_V3_RERANKER_310M"] ||
+          Dir[File.join(RERANKER_310M, "*")].max_by { File.mtime(_1) }
+    raise "no reranker checkpoint (set RURI_V3_RERANKER_310M)" unless dir && File.directory?(dir)
+
+    sh "ruby tools/inventory.rb #{dir.shellescape} test/oracle/ruri-v3-reranker-310m.json"
+  end
 end
 
 desc "regenerate every oracle artifact"
-task oracle: ["oracle:ruri", "oracle:forward"]
+task oracle: ["oracle:ruri", "oracle:reranker", "oracle:forward"]
 
 Minitest::TestTask.create
 

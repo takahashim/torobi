@@ -1218,6 +1218,42 @@ checkpoint の `run` に verbatim で入る。トークナイザの素性はそ�
 
 この時点で Ruby 191 件 / Rust 109 件。
 
+### 15.20 蒸留データは kohagi が作る。教師の構造も一致した(2026-09-03)
+
+「トークナイズは誰がやるか」の答えを実装に落とした。**kohagi**である。理由は
+`§15.19` の線ではなく、この案件固有の事情である: 蒸留データは (query, text, 教師の
+スコア) で、**kohagi はトークナイザと教師の両方を持つ唯一の道具**だからである。
+
+`kohagi/tools/dataset` を足した(kohagi 本体も公開 API も不変、`tools/reference` と
+同じ形)。`{"query":..,"text":..}` の JSONL を読み、`input_ids` と `teacher` を足して
+返す。行の他のフィールドは素通しするので、id やラベルが旅の間に消えない。
+
+**一度きりである。** student はハイパラを変えて何度も回すので、310M の forward を
+毎 step 毎 run 引き直すのは同じ答えに何度も払うことになる。教師のスコアは float 1 個。
+書く前に「この ID は教師が実際に採点したものか」をトークン数で照合する。
+
+実測(ruri-v3-reranker-310m):
+
+| query | text | teacher |
+| --- | --- | --- |
+| 自転車置き場を増やしてほしい | 駐輪場の増設要望 | **0.7182** |
+| 自転車置き場を増やしてほしい | 製品レビュー | 0.0011 |
+| 瑠璃も玻璃も…(ことわざ) | その解説 | 0.0007 |
+
+**教師の構造も検証した。** `ModernBERT.classifier` を足し(`ModernBertForSequenceClassification`:
+encoder は `model.` の下、その上に pooled head と分類器)、310M の実物と比べた。
+
+宣言 155、ファイル 156、**差は `classifier.bias` 1 つだけ**で、これは正しい。
+`config.json` が `classifier_bias: false` と言っており、HF の `from_pretrained` は
+フラグから head を組むのでこのテンソルを読まない。kohagi も同じ理由でフラグに従い、
+警告を出す(`rerank::bias` にその判断が書いてある)。**checkpoint と config が食い違う
+とき config が勝つ**、で三者が一致した。テストはこの 1 つを名指しで許している。
+
+あわせて `slice` を handle op にした(cls プーリングは位置 0 を取るだけで、それが
+書けなかった)。
+
+この時点で Ruby 193 件 / Rust 109 件。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。
