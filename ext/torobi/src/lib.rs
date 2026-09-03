@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use magnus::exception::ExceptionClass;
 use magnus::value::ReprValue;
 use magnus::{function, method, prelude::*, Error, RArray, RHash, RString, Ruby, Value};
+use torobi_engine::plan::Weights;
 use torobi_engine::tensor::{unpack, Batch, PackedBatch, PackedTensor, Tensor, Values};
 use torobi_engine::{RuntimeError, Session as EngineSession};
 
@@ -215,6 +216,8 @@ fn busy(ruby: &Ruby) -> Error {
 }
 
 impl Session {
+    /// Opens with the parameters given as values.
+    ///
     /// `optimizer_json` names the update rule, e.g.
     /// {"kind":"adamw","lr":0.001}. Data, so a journal can record it.
     fn open(
@@ -223,14 +226,43 @@ impl Session {
         weights_json: String,
         optimizer_json: String,
     ) -> Result<Self, Error> {
-        let optimizer = serde_json::from_str(&optimizer_json).map_err(|e| {
+        Self::opened(ruby, &graph_json, Weights::Inline(&weights_json), &optimizer_json)
+    }
+
+    /// Opens with the parameters read from a safetensors file.
+    ///
+    /// A second entry point rather than one that inspects its argument:
+    /// where parameters come from is a choice the caller makes, and a
+    /// choice made by what type a value happens to be is a choice nobody
+    /// wrote down.
+    fn open_from_file(
+        ruby: &Ruby,
+        graph_json: String,
+        path: String,
+        optimizer_json: String,
+    ) -> Result<Self, Error> {
+        Self::opened(
+            ruby,
+            &graph_json,
+            Weights::File(std::path::Path::new(&path)),
+            &optimizer_json,
+        )
+    }
+
+    fn opened(
+        ruby: &Ruby,
+        graph_json: &str,
+        weights: Weights<'_>,
+        optimizer_json: &str,
+    ) -> Result<Self, Error> {
+        let optimizer = serde_json::from_str(optimizer_json).map_err(|e| {
             Error::new(ruby.exception_arg_error(), format!("bad optimizer: {e}"))
         })?;
         // Opening builds every parameter, an RNG key and the optimizer's
         // slots. That it is MLX work, and therefore waits its turn, is the
         // engine's to know.
         let opened = match gvl::released(
-            || EngineSession::open_with(&graph_json, &weights_json, optimizer),
+            || EngineSession::open_with(graph_json, weights, optimizer),
             OnRefusal::AskRuby,
         )? {
             Outcome::Done(opened) => opened,
@@ -665,6 +697,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     native.define_singleton_method("reset_peak_memory", function!(reset_peak_memory, 0))?;
     let class = native.define_class("Session", ruby.class_object())?;
     class.define_singleton_method("open", function!(Session::open, 3))?;
+    class.define_singleton_method("open_from_file", function!(Session::open_from_file, 3))?;
     class.define_method("run_step", method!(Session::run_step, 1))?;
     class.define_method("evaluate", method!(Session::evaluate, 1))?;
     class.define_method("save", method!(Session::save, 2))?;

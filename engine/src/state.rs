@@ -435,11 +435,12 @@ mod tests {
     use super::*;
     use crate::executor::{self, Taps};
     use crate::fixtures;
+    use crate::plan::Weights;
     use crate::tensor::{Tensor, Values};
 
     fn open(which: (String, String), optimizer: OptimizerConfig) -> (Plan, TrainState) {
         let (config, weights) = which;
-        let (plan, params) = Plan::open(&config, &weights).unwrap();
+        let (plan, params) = Plan::open(&config, Weights::Inline(&weights)).unwrap();
         let state = TrainState::new(&plan, params, optimizer).unwrap();
         (plan, state)
     }

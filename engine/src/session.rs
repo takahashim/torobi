@@ -26,7 +26,7 @@ use anyhow::{Context, Result};
 use crate::executor::{self, Taps};
 use crate::interp::Stat;
 use crate::optimizer::Config as OptimizerConfig;
-use crate::plan::Plan;
+use crate::plan::{Plan, Weights};
 use crate::runtime::{runtime, RuntimeError};
 use crate::state::TrainState;
 use crate::tensor::{to_tensor, Batch, Tensor, Values};
@@ -58,10 +58,10 @@ pub(crate) struct SessionCore {
 impl SessionCore {
     fn open_with(
         graph_json: &str,
-        weights_json: &str,
+        weights: Weights<'_>,
         optimizer: OptimizerConfig,
     ) -> Result<Self> {
-        let (plan, params) = Plan::open(graph_json, weights_json)?;
+        let (plan, params) = Plan::open(graph_json, weights)?;
         let state = TrainState::new(&plan, params, optimizer)?;
         Ok(Self {
             plan,
@@ -287,19 +287,19 @@ impl Session {
     /// Loads a GraphConfig and its initial parameters. Parameters are given
     /// by qualified path ("student.head.weight"), which is also the order
     /// the engine keeps them in. Data comes later, one batch per step.
-    pub fn open(graph_json: &str, weights_json: &str) -> Outcome<Self> {
-        Self::open_with(graph_json, weights_json, OptimizerConfig::Sgd { lr: 0.1 })
+    pub fn open(graph_json: &str, weights: Weights<'_>) -> Outcome<Self> {
+        Self::open_with(graph_json, weights, OptimizerConfig::Sgd { lr: 0.1 })
     }
 
     /// The same, with the update rule named.
     pub fn open_with(
         graph_json: &str,
-        weights_json: &str,
+        weights: Weights<'_>,
         optimizer: OptimizerConfig,
     ) -> Outcome<Self> {
         // Opening builds every parameter, an RNG key and the optimizer's
         // slots, so it waits its turn like any other MLX work.
-        let core = runtime().execute(|| SessionCore::open_with(graph_json, weights_json, optimizer))?;
+        let core = runtime().execute(|| SessionCore::open_with(graph_json, weights, optimizer))?;
         Ok(Self { core: Some(core) })
     }
 
@@ -501,7 +501,7 @@ mod tests {
 
     pub fn session(which: (String, String)) -> Session {
         let (config, weights) = which;
-        Session::open(&config, &weights).unwrap()
+        Session::open(&config, Weights::Inline(&weights)).unwrap()
     }
 
     pub fn values(t: &Tensor) -> Vec<f32> {
@@ -654,7 +654,7 @@ mod tests {
         let (config, weights) = fixtures::teacher_and_student();
         // Train both, so there is something to freeze that leaves a rest.
         let both = config.replace(r#""train":["student"]"#, r#""train":["student","teacher"]"#);
-        let mut session = Session::open(&both, &weights).unwrap();
+        let mut session = Session::open(&both, Weights::Inline(&weights)).unwrap();
         assert_eq!(
             session.trainable().unwrap(),
             vec!["student.scale", "teacher.scale"]
@@ -699,7 +699,7 @@ mod evaluation_tests {
     #[test]
     fn a_step_whose_loss_is_not_finite_is_not_taken() {
         let (config, weights) = fixtures::divides_by_zero();
-        let mut session = Session::open(&config, &weights).unwrap();
+        let mut session = Session::open(&config, Weights::Inline(&weights)).unwrap();
         let batch = fixtures::batch_x(&[1.0, 2.0]);
 
         let loss = session.run_step(&batch).unwrap();
@@ -718,7 +718,7 @@ mod evaluation_tests {
         // What a NaN policy does now: nothing was corrupted, so putting the
         // parameter somewhere sane is enough. No checkpoint is needed.
         let (config, weights) = fixtures::divides_by_zero();
-        let mut session = Session::open(&config, &weights).unwrap();
+        let mut session = Session::open(&config, Weights::Inline(&weights)).unwrap();
         let batch = fixtures::batch_x(&[1.0, 2.0]);
         session.run_step(&batch).unwrap();
 
@@ -742,7 +742,7 @@ mod evaluation_tests {
         // The forward drew from it, so the sequence belongs to the step
         // count exactly as it would have. A resumed run has to agree.
         let (config, weights) = fixtures::divides_by_zero();
-        let mut session = Session::open(&config, &weights).unwrap();
+        let mut session = Session::open(&config, Weights::Inline(&weights)).unwrap();
         let before = crate::tensor::to_tensor(&session.rng_for_test()).unwrap();
         session.run_step(&fixtures::batch_x(&[1.0, 2.0])).unwrap();
         let after = crate::tensor::to_tensor(&session.rng_for_test()).unwrap();
@@ -753,7 +753,7 @@ mod evaluation_tests {
     #[test]
     fn evaluating_moves_nothing() {
         let (config, weights) = fixtures::scaled_mean();
-        let mut session = Session::open(&config, &weights).unwrap();
+        let mut session = Session::open(&config, Weights::Inline(&weights)).unwrap();
         let batch = fixtures::batch_x(&[1.0, 2.0, 3.0, 4.0]);
         session.run_step(&batch).unwrap();
         let (step, loss) = (session.step().unwrap(), session.loss().unwrap());
@@ -776,7 +776,7 @@ mod evaluation_tests {
         // mean(x * w) with w = [1, 2] over [[1, 2], [3, 4]] is
         // (1 + 4 + 3 + 8) / 4 = 4.
         let (config, weights) = fixtures::scaled_mean();
-        let mut session = Session::open(&config, &weights).unwrap();
+        let mut session = Session::open(&config, Weights::Inline(&weights)).unwrap();
         let seen = session.evaluate(&fixtures::batch_x(&[1.0, 2.0, 3.0, 4.0])).unwrap();
         assert!((seen - 4.0).abs() < 1e-6, "{seen}");
     }
@@ -784,7 +784,7 @@ mod evaluation_tests {
     #[test]
     fn evaluating_does_not_sample_dropout() {
         let (config, weights) = fixtures::with_dropout(0.5);
-        let mut session = Session::open(&config, &weights).unwrap();
+        let mut session = Session::open(&config, Weights::Inline(&weights)).unwrap();
         let batch = fixtures::batch_x(&[1.0, 1.0, 1.0, 1.0]);
 
         // Twice the same, because no key means no draw.
@@ -808,7 +808,7 @@ mod evaluation_tests {
     #[test]
     fn a_tap_reports_the_evaluation_it_watched() {
         let (config, weights) = fixtures::with_dropout(0.0);
-        let mut session = Session::open(&config, &weights).unwrap();
+        let mut session = Session::open(&config, Weights::Inline(&weights)).unwrap();
         session.tap("scaled", "mean").unwrap();
         session.evaluate(&fixtures::batch_x(&[1.0, 3.0])).unwrap();
 
@@ -824,7 +824,7 @@ mod checkpoint_tests {
     use crate::fixtures;
 
     fn open(which: (String, String)) -> Session {
-        Session::open(&which.0, &which.1).unwrap()
+        Session::open(&which.0, Weights::Inline(&which.1)).unwrap()
     }
 
     fn written(session: &Session, run: &str) -> (tempfile::TempDir, String) {
@@ -841,7 +841,7 @@ mod checkpoint_tests {
     #[test]
     fn a_checkpoint_carries_the_description_and_not_only_its_digest() {
         let (config, weights) = fixtures::scaled_mean();
-        let session = Session::open(&config, &weights).unwrap();
+        let session = Session::open(&config, Weights::Inline(&weights)).unwrap();
         let (_dir, path) = written(&session, "");
 
         let graph = std::fs::read_to_string(std::path::Path::new(&path).join("graph.json")).unwrap();

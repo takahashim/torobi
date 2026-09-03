@@ -27,13 +27,22 @@ module Torobi
 
     # Opens a session over `config` (a GraphConfig).
     #
-    # `weights:` is the initial parameters as values, shaped
-    # {params: {path => {shape:, data:}}}. A keyword rather than a
-    # positional, because it is one of what will be several ways to say
-    # where parameters come from: model import (M3a) adds loading from a
-    # safetensors file, and the GraphConfig already declares initializers,
-    # so a run that starts from those alone is a natural third. Keywords
-    # let the choices sit side by side without a type switch.
+    # Where the parameters come from is said by keyword, because there is
+    # more than one answer:
+    #
+    #   weights:       values, {params: {path => {shape:, data:}}}. For
+    #                  spikes and tests. Not for a real model: 130M
+    #                  parameters as JSON numbers is gigabytes of text.
+    #   weights_file:  a safetensors file, read by the engine. Its tensors
+    #                  are named the way the graph names them, which is
+    #                  also how a checkpoint writes them, so a run can
+    #                  start from what another run reached. A file in
+    #                  another precision is converted: importing is
+    #                  starting somewhere, not resuming.
+    #
+    # A third will follow: the GraphConfig already declares an initializer
+    # per parameter, so a run that starts from those and a seed needs no
+    # weights at all.
     #
     # `optimizer` is data, so that a journal and a checkpoint can record
     # exactly what ran: {kind: :adamw, lr: 1e-3, weight_decay: 0.01}.
@@ -42,18 +51,24 @@ module Torobi
     # section 8.6. Pass a Journal, or `io:` to have one made against this
     # config's provenance; without either, nothing is recorded and the
     # session is exactly as fast.
-    def self.open(config, weights: nil, optimizer: DEFAULT_OPTIMIZER, journal: nil, io: nil,
-                  dataset: nil)
-      unless weights
+    def self.open(config, weights: nil, weights_file: nil, optimizer: DEFAULT_OPTIMIZER,
+                  journal: nil, io: nil, dataset: nil)
+      if weights.nil? == weights_file.nil?
         raise ArgumentError,
-              "a session needs its parameters: pass weights: " \
-              "{params: {path => {shape:, data:}}} (loading from a file " \
-              "arrives with model import)"
+              "a session needs its parameters, from exactly one place: " \
+              "weights: {params: {path => {shape:, data:}}}, or " \
+              "weights_file: a safetensors path"
       end
 
       Preflight.check!
-      native = Native::Session.open(config.canonical_json, JSON.generate(weights),
-                                    JSON.generate(optimizer))
+      native =
+        if weights_file
+          Native::Session.open_from_file(config.canonical_json, weights_file.to_s,
+                                         JSON.generate(optimizer))
+        else
+          Native::Session.open(config.canonical_json, JSON.generate(weights),
+                               JSON.generate(optimizer))
+        end
       # Gathered whether or not anything is journalling: a checkpoint
       # records it too, so that what it holds can be identified later
       # (docs/plan.md section 11.2).

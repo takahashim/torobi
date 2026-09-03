@@ -10,6 +10,7 @@
 
 use anyhow::{bail, Result};
 use torobi_engine::tensor::{Batch, Tensor, Values};
+use torobi_engine::plan::Weights;
 use torobi_engine::Session;
 
 use mlx_rs::Dtype;
@@ -62,7 +63,7 @@ fn main() -> Result<()> {
 fn open(graph_path: &str, bindings_path: &str) -> Result<(Session, Batch)> {
     let graph_json = std::fs::read_to_string(graph_path)?;
     let bindings_json = std::fs::read_to_string(bindings_path)?;
-    let session = Session::open(&graph_json, &bindings_json)?;
+    let session = Session::open(&graph_json, Weights::Inline(&bindings_json))?;
     let bindings: Bindings = serde_json::from_str(&bindings_json)?;
     Ok((session, to_batch(bindings.inputs)))
 }

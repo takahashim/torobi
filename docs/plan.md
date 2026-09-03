@@ -990,6 +990,38 @@ checkpoint の restore と同じく、パスを渡して engine が safetensors 
 
 この時点で Ruby 169 件 / Rust 83 件。
 
+### 15.14 M3a の入口: safetensors からパラメータを読む(2026-09-03)
+
+M3a の出口条件は「safetensors ロード」と「1 ブロックの forward / gradient parity」。
+その前者を入れた。
+
+**パラメータの出どころを型にした。** `Weights::Inline(json)` と `Weights::File(path)`。
+engine が enum で受け、Ruby は `weights:` と `weights_file:` の 2 キーワードで言う。
+呼び出し側が型で分岐する形にはしていない(§15.13 の判断のとおり)。
+
+ファイルの tensor 名は **graph が名付けるとおりの qualified path**(`m.l.weight`)
+とする。これは checkpoint が書く名前でもあるので、**ある run が到達したパラメータから
+別の run を始められる**。蒸留がまさに要る形である: パラメータだけ持ってきて、
+optimizer slot も counter も RNG も持ってこない。resume は今までどおり `restore` で、
+そちらは全部持ってくる。テストで両者を並べて固定した。
+
+| 検査 | import | restore |
+| --- | --- | --- |
+| shape | 一致必須。形が違えば別のパラメータである | 一致必須 |
+| dtype | **変換する**。bf16 で公開されたモデルは f32 の run を始めるのに何の問題も無い | 一致必須。resume は同じ run でなければならない |
+| 欠け | 拒否。どの path が無いか、名前はどう付けるべきかを言う | 拒否 |
+| 余り | 無視。大きなモデルの一部を取り込むのは正当 | 該当なし |
+
+HF 配置の名前(`encoder.layer.0.attention.self.query.weight`)からの読み替えは**入れて
+いない**。呼び出し側の仕事とし、エラーメッセージにそう書いてある。マッピングを engine
+に持たせるのは、実際に読み替えたいレイアウトが 1 つ以上見えてからにする。
+
+残る M3a: 1 ブロックの forward / gradient parity。これは op が足りない
+(`config/ops.yml` に 32、`interp.rs` に 20)。layer_norm / softmax / gelu / sdpa が
+要る。§15.12 で保留にした「op の事前解決」は、この作業と同じ波でやるのが自然である。
+
+この時点で Ruby 175 件 / Rust 88 件。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

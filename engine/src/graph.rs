@@ -61,6 +61,9 @@ impl InputSpec {
 pub struct ParameterSpec {
     pub path: String,
     pub shape: Vec<i32>,
+    /// What the graph says this parameter is. An imported file may hold
+    /// another precision; this is the one the run trains in.
+    pub dtype: String,
     pub trainable: bool,
 }
 

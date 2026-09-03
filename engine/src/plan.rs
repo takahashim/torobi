@@ -11,13 +11,34 @@
 
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::path::Path;
 
 use anyhow::{Context, Result};
+use mlx_rs::transforms::eval;
 use mlx_rs::Array;
 use serde::Deserialize;
 
-use crate::graph::{Graph, GraphConfig};
-use crate::tensor::Tensor;
+use crate::graph::{Graph, GraphConfig, ParameterSpec};
+use crate::tensor::{dtype_named, Tensor};
+
+/// Where a run's initial parameters come from.
+///
+/// Named rather than inferred from a type, because there will be more than
+/// two: a GraphConfig already declares an initializer per parameter, so a
+/// run that starts from those and a seed is a natural third.
+pub enum Weights<'a> {
+    /// Values, as JSON: {"params": {path => {"shape": [..], "data": [..]}}}.
+    /// What a spike and a test use, and what the boundary carried when
+    /// there was nothing else. Not for a real model: 130M parameters as
+    /// JSON numbers is gigabytes of text on a path that is measured in
+    /// milliseconds per step.
+    Inline(&'a str),
+    /// A safetensors file, read by the engine. Its keys are the qualified
+    /// paths the graph declares ("student.linear.weight"), which is also
+    /// how a checkpoint names them, so a run can start from what another
+    /// run reached.
+    File(&'a Path),
+}
 
 /// One model as the plan holds it: its graph, and where its parameters sit
 /// in the run's flat parameter vector.
@@ -38,7 +59,7 @@ struct InitialTensor {
 }
 
 #[derive(Deserialize)]
-struct Weights {
+struct WeightsJson {
     params: BTreeMap<String, InitialTensor>,
 }
 
@@ -73,15 +94,14 @@ pub struct Plan {
 impl Plan {
     /// Reads a GraphConfig and its initial parameters, returning the plan
     /// and the parameters in the order the plan names them.
-    pub fn open(graph_json: &str, weights_json: &str) -> Result<(Self, Vec<Array>)> {
+    pub fn open(graph_json: &str, weights: Weights<'_>) -> Result<(Self, Vec<Array>)> {
         let config_digest = {
             use sha2::{Digest, Sha256};
             format!("{:x}", Sha256::digest(graph_json.as_bytes()))
         };
         let config: GraphConfig = serde_json::from_str(graph_json).context("parsing the graph")?;
         anyhow::ensure!(!config.models.is_empty(), "the graph has no models");
-        let weights: Weights =
-            serde_json::from_str(weights_json).context("parsing the initial parameters")?;
+        let source = Source::read(weights)?;
 
         let mut models = Vec::new();
         let mut params = Vec::new();
@@ -93,27 +113,10 @@ impl Plan {
             let start = params.len();
             for spec in &graph.parameters {
                 let path = format!("{name}.{}", spec.path);
-                let t = weights
-                    .params
-                    .get(&path)
-                    .with_context(|| format!("missing parameter {path:?}"))?;
-                anyhow::ensure!(
-                    t.shape == spec.shape,
-                    "parameter {path:?}: given shape {:?} is not the declared {:?}",
-                    t.shape,
-                    spec.shape
-                );
-                let expected: usize = t.shape.iter().map(|d| *d as usize).product();
-                anyhow::ensure!(
-                    t.data.len() == expected,
-                    "parameter {path:?}: {} values for shape {:?}",
-                    t.data.len(),
-                    t.shape
-                );
                 if trained && spec.trainable {
                     candidates.push(params.len() as i32);
                 }
-                params.push(Array::from_slice(&t.data, &t.shape));
+                params.push(source.parameter(&path, spec)?);
                 paths.push(path);
             }
             let slice = start..params.len();
@@ -124,6 +127,8 @@ impl Plan {
             "nothing to train: no model in {:?} has trainable parameters",
             config.train
         );
+        // One evaluation for the lot: a file's arrays are lazy until asked.
+        eval(params.iter())?;
 
         let mut plan = Self {
             models,
@@ -252,6 +257,92 @@ impl Plan {
     }
 }
 
+/// Initial parameters, read and waiting to be matched to what the graph
+/// declared.
+enum Source {
+    Inline(BTreeMap<String, InitialTensor>),
+    File(std::collections::HashMap<String, Array>),
+}
+
+impl Source {
+    fn read(weights: Weights<'_>) -> Result<Self> {
+        Ok(match weights {
+            Weights::Inline(json) => {
+                let parsed: WeightsJson =
+                    serde_json::from_str(json).context("parsing the initial parameters")?;
+                Source::Inline(parsed.params)
+            }
+            Weights::File(path) => {
+                anyhow::ensure!(
+                    path.is_file(),
+                    "no parameters at {} (a safetensors file was expected)",
+                    path.display()
+                );
+                Source::File(
+                    Array::load_safetensors(path)
+                        .with_context(|| format!("reading {}", path.display()))?,
+                )
+            }
+        })
+    }
+
+    /// The one parameter a declaration asks for, checked against it.
+    ///
+    /// Shape has to match: a parameter of another shape is another
+    /// parameter. Dtype does not, and is converted. Importing is starting
+    /// somewhere, not resuming: a model published in bf16 is a perfectly
+    /// good place to start an f32 run, and refusing it would be refusing
+    /// the point of the exercise. `TrainState::restore` is the other case
+    /// and refuses, because a resumed run has to be the same run.
+    fn parameter(&self, path: &str, spec: &ParameterSpec) -> Result<Array> {
+        let declared = dtype_named(&spec.dtype)
+            .with_context(|| format!("parameter {path:?}: unknown dtype {:?}", spec.dtype))?;
+        let array = match self {
+            Source::Inline(params) => {
+                let t = params
+                    .get(path)
+                    .with_context(|| format!("missing parameter {path:?}"))?;
+                anyhow::ensure!(
+                    t.shape == spec.shape,
+                    "parameter {path:?}: given shape {:?} is not the declared {:?}",
+                    t.shape,
+                    spec.shape
+                );
+                let expected: usize = t.shape.iter().map(|d| *d as usize).product();
+                anyhow::ensure!(
+                    t.data.len() == expected,
+                    "parameter {path:?}: {} values for shape {:?}",
+                    t.data.len(),
+                    t.shape
+                );
+                Array::from_slice(&t.data, &t.shape)
+            }
+            Source::File(arrays) => {
+                let array = arrays.get(path).with_context(|| {
+                    format!(
+                        "the file has no parameter {path:?}. Its tensors are named the \
+                         way the graph names them, which is how a checkpoint writes \
+                         them; a model published under other names has to be renamed \
+                         on the way in."
+                    )
+                })?;
+                anyhow::ensure!(
+                    array.shape() == spec.shape,
+                    "parameter {path:?}: the file holds shape {:?}, the graph declares {:?}",
+                    array.shape(),
+                    spec.shape
+                );
+                array.clone()
+            }
+        };
+        Ok(if array.dtype() == declared {
+            array
+        } else {
+            array.as_dtype(declared)?
+        })
+    }
+}
+
 /// A freeze pattern: a path, or a prefix ending in `*`.
 ///
 /// Deliberately small. A path names one parameter, `student.*` names a
@@ -299,8 +390,9 @@ mod tests {
     use mlx_rs::Dtype;
     use serde_json::{json, Value};
 
+    /// The common case in these tests: parameters as JSON.
     fn open(config: &str, weights: &str) -> Result<(Plan, Vec<Array>)> {
-        Plan::open(config, weights)
+        Plan::open(config, Weights::Inline(weights))
     }
 
     /// The message from an open that should have failed. `unwrap_err`
@@ -497,6 +589,92 @@ mod tests {
         let plan = plan_for_bind();
         let e = plan.bind(&BTreeMap::new()).unwrap_err();
         assert!(e.to_string().contains("missing input \"x\""), "{e}");
+    }
+
+    /// Writes what the graph declares into a safetensors file, the way a
+    /// checkpoint does: keyed by qualified path.
+    fn write_parameters(dir: &std::path::Path, named: &[(&str, Array)]) -> std::path::PathBuf {
+        let path = dir.join("parameters.safetensors");
+        Array::save_safetensors(named.iter().map(|(n, a)| (n, a)), None, &path).unwrap();
+        path
+    }
+
+    #[test]
+    fn parameters_can_come_from_a_file_named_the_way_the_graph_names_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_parameters(
+            dir.path(),
+            &[("m.w", Array::from_slice(&[5.0f32, 6.0], &[2]))],
+        );
+
+        let (config, _) = fixtures::scaled_mean();
+        let (plan, params) = Plan::open(&config, Weights::File(&file)).unwrap();
+        assert_eq!(plan.paths, vec!["m.w"]);
+        assert_eq!(crate::tensor::to_tensor(&params[0]).unwrap().shape, vec![2]);
+    }
+
+    #[test]
+    fn a_file_missing_a_parameter_says_which_and_what_the_names_should_be() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_parameters(
+            dir.path(),
+            &[("something.else", Array::from_slice(&[0.0f32, 0.0], &[2]))],
+        );
+
+        let (config, _) = fixtures::scaled_mean();
+        let e = match Plan::open(&config, Weights::File(&file)) {
+            Ok(_) => panic!("this should not have opened"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(e.contains("m.w"), "{e}");
+        assert!(e.contains("named the way the graph names them"), "{e}");
+    }
+
+    #[test]
+    fn a_file_holding_another_shape_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_parameters(
+            dir.path(),
+            &[("m.w", Array::from_slice(&[1.0f32, 2.0, 3.0], &[3]))],
+        );
+
+        let (config, _) = fixtures::scaled_mean();
+        let e = match Plan::open(&config, Weights::File(&file)) {
+            Ok(_) => panic!("this should not have opened"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(e.contains("the graph declares"), "{e}");
+    }
+
+    #[test]
+    fn a_file_in_another_precision_is_converted_rather_than_refused() {
+        // Importing is starting somewhere, not resuming: a model published
+        // in bf16 is a fine place to start an f32 run.
+        let dir = tempfile::tempdir().unwrap();
+        let half = Array::from_slice(&[0.5f32, 2.0], &[2])
+            .as_dtype(Dtype::Bfloat16)
+            .unwrap();
+        let file = write_parameters(dir.path(), &[("m.w", half)]);
+
+        let (config, _) = fixtures::scaled_mean();
+        let (_, params) = Plan::open(&config, Weights::File(&file)).unwrap();
+        assert_eq!(params[0].dtype(), Dtype::Float32);
+        let held = crate::tensor::to_tensor(&params[0]).unwrap();
+        match held.values {
+            Values::F32(v) => assert_eq!(v, vec![0.5, 2.0]),
+            _ => panic!("a parameter is f32"),
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_not_there_says_so_rather_than_reporting_a_missing_parameter() {
+        let (config, _) = fixtures::scaled_mean();
+        let missing = std::path::Path::new("/nowhere/parameters.safetensors");
+        let e = match Plan::open(&config, Weights::File(missing)) {
+            Ok(_) => panic!("this should not have opened"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(e.contains("no parameters at"), "{e}");
     }
 
     #[test]
