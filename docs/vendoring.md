@@ -291,11 +291,43 @@ cannot get upstream:
 | with the Metal toolchain | works, building MLX itself | works |
 | without it (this machine, and most installs) | **cannot build** | works |
 
-Two things would change that. Upstream could gain the branch, and
-OminiX's `100f155` is fifty lines that show what it looks like; a patch
-sent up, with a digest check this project can now speak for, would leave
-Torobi on the published crate. Or the distribution decision could land on
-a platform gem, in which case nothing is built at install time and the
+**But there is a way through that needs no branch and no patch**, found
+by reading rather than assuming, and tried rather than argued:
+
+1. `mlx-c` has an option for exactly this. Its CMakeLists says
+   `if(MLX_C_USE_SYSTEM_MLX) find_package(MLX REQUIRED) else() FetchContent ...`,
+   so a pre-installed MLX means MLX is never fetched and never compiled.
+2. MLX's install exports a real package (`MLXTargets.cmake`,
+   `MLXConfig.cmake` into `share/cmake/MLX`), so `find_package` has
+   something to find.
+3. The `cmake` crate reads `CMAKE_TOOLCHAIN_FILE` from the environment
+   (`cmake-0.1.58/src/lib.rs:450`), so variables can be put into upstream
+   mlx-sys's cmake run the same way `MLX_PREBUILT_PATH` is put into
+   OminiX's: an exported path, no fork.
+
+Tried, with crates.io's `mlx-rs = "0.25"` unmodified and a toolchain file
+setting `MLX_C_USE_SYSTEM_MLX=ON` and `CMAKE_PREFIX_PATH`. **`metal` is a
+default feature of both crates, and MLX was still never built**: cmake
+configured, skipped the fetch, and went on to compile mlx-c's own C++
+against the MLX it was given. The Metal toolchain was never asked for.
+
+It stopped there, on the version pair rather than the mechanism:
+
+```
+mlx-prefix/include/mlx/fast.h:52:  std::optional<array> mask_arr = {},
+CMakeFiles/mlxc.dir/mlx/c/fast.cpp.o] Error 1
+```
+
+`mlx-sys 0.2.0`'s vendored mlx-c is written against **MLX v0.25.1**, and
+it was handed v0.30.1's headers. So the price of the published crate,
+today, is running MLX five minor versions back. What the archive must
+carry also changes: an install tree (lib, include, `share/cmake/MLX`)
+rather than four loose files.
+
+The exit is therefore real, and its cost is a number rather than a
+question. It falls to nothing when upstream releases against a newer
+mlx-c; their `main` already pins MLX v0.32.2. The other way out is
+unchanged: a platform gem builds nothing at install time, and the
 question dissolves.
 
 When to take the exit: if OminiX stops tracking MLX, if a patch of our own

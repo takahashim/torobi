@@ -2125,6 +2125,44 @@ mlx-sys のビルド生成物を消してから全部やり直し、**Ruby 225 �
 engine:check / kohagi との forward 一致**、すべて変化なしで通った。別のマシンで
 別の Xcode がビルドした MLX でも、閉形式との差は `2.84e-08` のまま。
 
+### 15.42 crates.io の mlx-rs で prebuilt を使えるか。使える(2026-09-03)
+
+「fork を避けて crates.io の mlx-rs を使いつつ、prebuilt を使えないか」という問い。
+**使える。機構は上流に既にあり、試して確かめた。** 止まるのは版の組み合わせで、
+それは設計ではなく数字である。
+
+**3 つが噛み合う。**
+
+1. **mlx-c 自身に口がある**:
+   `if(MLX_C_USE_SYSTEM_MLX) find_package(MLX REQUIRED) else() FetchContent(...)`。
+   前者なら **MLX は取得もビルドもされない**
+2. **MLX は find_package できる形を install する** (`MLXTargets.cmake` /
+   `MLXConfig.cmake` を `share/cmake/MLX` へ)
+3. **`cmake` クレートは `CMAKE_TOOLCHAIN_FILE` を環境変数から読む**
+   (`cmake-0.1.58/src/lib.rs:450`)。**上流に手を入れずに** cmake へ変数を
+   注入できる。いま `MLX_PREBUILT_PATH` を渡しているのと同じ形
+
+**試した。** crates.io の `mlx-rs = "0.25"` を無改造で、toolchain file に
+`MLX_C_USE_SYSTEM_MLX=ON` と `CMAKE_PREFIX_PATH` を書いて。**`metal` は両クレートの
+既定 feature なので有効なまま**で、それでも **MLX は 1 行もビルドされなかった**。
+configure を抜け、fetch を飛ばし、mlx-c の C++ をこちらの MLX に対して
+コンパイルする段まで進んだ。**Metal toolchain は一度も要求されていない。**
+
+止まったのはここ:
+
+    mlx-prefix/include/mlx/fast.h:52:  std::optional<array> mask_arr = {},
+    CMakeFiles/mlxc.dir/mlx/c/fast.cpp.o] Error 1
+
+`mlx-sys 0.2.0` が抱える mlx-c は **MLX v0.25.1** 向けに書かれており、そこへ
+v0.30.1 のヘッダを渡したための不一致である。
+
+**したがって今日の代価は「MLX を 5 マイナー版戻すこと」**である。アーカイブの中身も
+4 ファイルではなく install tree (lib / include / share/cmake/MLX) に変わる。
+
+**いまは移らない。** 公開クレートを得る代わりに MLX を 5 版戻すのは割に合わない。
+ただし**出口は実在し、費用が数字になった**。上流が新しい mlx-c に対して release
+すれば代価は消える (上流の `main` は既に MLX v0.32.2 を pin している)。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。
