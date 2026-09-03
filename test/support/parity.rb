@@ -10,16 +10,27 @@
 # `from_hash`, `causal_lm` and `batch`, which is the whole of what this
 # needs. A test that includes this says which by defining `described`.
 module Parity
+  # The artifacts live beside the tests, and this file does not: lifting
+  # it into support/ moved `__dir__` one directory down, which is how a
+  # comparison came to look for its reference somewhere it could not be
+  # and skip without saying so.
+  ORACLE = File.expand_path("../oracle", __dir__)
+
   # The weights, if this machine has them, in the layout the Hub's cache
   # uses. Unlike the inventories above, numbers cannot be compared
   # without them, and they are a gigabyte each.
+  # "Qwen/Qwen2.5-0.5B" is QWEN2_5_0_5B to say by hand, and
+  # models--Qwen--Qwen2.5-0.5B in the Hub's cache.
+  def env_var(source) = File.basename(source).upcase.gsub(/[^A-Z0-9]/, "_")
+
+  def cache_for(source)
+    File.expand_path("~/.cache/huggingface/hub/" \
+                     "models--#{source.gsub("/", "--")}/snapshots/*")
+  end
+
   def weights_for(source)
-    # "Qwen/Qwen2.5-0.5B" is QWEN2_5_0_5B to say by hand, and
-    # models--Qwen--Qwen2.5-0.5B in the Hub's cache.
-    named = File.basename(source).upcase.gsub(/[^A-Z0-9]/, "_")
-    cached = File.expand_path("~/.cache/huggingface/hub/" \
-                              "models--#{source.gsub("/", "--")}/snapshots/*")
-    dir = ENV.fetch(named, nil) || Dir[cached].max_by { |d| File.mtime(d) }
+    dir = ENV.fetch(env_var(source), nil) ||
+          Dir[cache_for(source)].max_by { |d| File.mtime(d) }
     dir if dir && File.file?(File.join(dir.to_s, "model.safetensors"))
   end
 
@@ -38,20 +49,38 @@ module Parity
   # a recorded reference: `rake oracle:qwen2_forward`, or
   # `rake oracle:sarashina_forward`.
   # Every model of this family this machine can compare, or none.
+  #
+  # A skip says which of the two halves is missing, and where it looked.
+  # A comparison that quietly does not happen is worse than one that
+  # fails: it reads as a pass.
   def compare_against_references(models)
-    compared = models.filter_map { |source, name| against_reference(source, name) }
+    missing = []
+    compared = models.filter_map do |source, name|
+      why = why_not(source, name)
+      # `next` with nothing, so filter_map drops it: `next missing << x`
+      # would hand it the array, which is not nothing.
+      if why
+        missing << "#{source}: #{why}"
+        next
+      end
 
-    skip("no reference and no weights for #{models.keys.join(", ")}") if compared.empty?
+      against_reference(source, name)
+    end
+    skip("nothing to compare. #{missing.join(". ")}") if compared.empty?
     compared
   end
 
+  def why_not(source, name)
+    forward = File.join(ORACLE, "#{name}.forward.json")
+    return "no reference at #{forward}" unless File.exist?(forward)
+    return nil if weights_for(source)
+
+    "no model.safetensors in #{ENV.fetch(env_var(source), nil) || cache_for(source)}"
+  end
+
   def against_reference(source, name)
-    forward = File.expand_path("oracle/#{name}.forward.json", __dir__)
-    return nil unless File.exist?(forward)
-
+    forward = File.join(ORACLE, "#{name}.forward.json")
     dir = weights_for(source)
-    return nil unless dir
-
     config = described.from_hash(inventory(name).fetch("config"))
     reference = JSON.parse(File.read(forward))
 
