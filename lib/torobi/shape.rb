@@ -11,7 +11,7 @@ module Torobi
     # dispatch below, so the two can be compared instead of remembered.
     RULES = %i[
       parameter same_as_input broadcast transpose reshape slice reduce
-      matmul take sdpa cross_entropy
+      matmul take sdpa cross_entropy cast
     ].freeze
 
     module_function
@@ -30,6 +30,7 @@ module Torobi
       when :take then take(inputs, where:)
       when :sdpa then sdpa(inputs, where:)
       when :cross_entropy then cross_entropy(inputs, where:)
+      when :cast then [inputs.first.shape, IR::Dtype.check!(attrs.fetch("dtype").to_sym, where:)]
       else
         raise ConfigError, "#{where}: no shape rule #{rule.inspect} (ops.yml and Shape disagree)"
       end

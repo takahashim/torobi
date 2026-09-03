@@ -98,11 +98,15 @@ module Torobi
       # than down it.
       # `adapter:` is a `Torobi::LoRA`, and adapts the linears it names
       # rather than this description having to know about it.
-      def causal_lm(config, seq:, rows: nil, adapter: nil)
+      # `dtype:` is what the model is held in. bf16 halves it, which is
+      # what a published checkpoint is stored in anyway; the loss is read
+      # as f32, so an objective over a bf16 model says where it comes
+      # back (`g.cast(logits, :f32)`).
+      def causal_lm(config, seq:, rows: nil, adapter: nil, dtype: :f32)
         config.check!
         Torobi.graph do |g|
           hidden = g.adapting(adapter) do
-            g.name("hidden", g.scope("model") { encode(g, config, seq:, rows:) })
+            g.name("hidden", g.scope("model") { encode(g, config, seq:, rows:, dtype:) })
           end
           # Not named: an untied head is a `linear`, which names its own
           # node after its parameters, and `forward` reaches an output by
@@ -130,10 +134,10 @@ module Torobi
 
       # The decoder body: ids in, hidden states out, under `model.` as the
       # checkpoint has it.
-      def encode(g, config, seq:, rows: nil)
+      def encode(g, config, seq:, rows: nil, dtype: :f32)
         ids = g.input(:input_ids, [rows, seq], dtype: :i32)
         x = g.embedding(ids, vocab: config.vocab_size, dim: config.hidden_size,
-                        name: "embed_tokens")
+                        name: "embed_tokens", dtype:)
         config.num_hidden_layers.times do |i|
           x = g.scope("layers.#{i}") { layer(g, x, config, seq:) }
         end

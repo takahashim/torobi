@@ -64,6 +64,7 @@ pub enum Op {
     Sum { axes: Option<Vec<i32>>, keepdims: bool },
     Max { axes: Option<Vec<i32>>, keepdims: bool },
 
+    Cast(String),
     Matmul,
     Take,
 
@@ -161,6 +162,7 @@ impl Op {
                 axes: optional_integers(attributes, "axes")?,
                 keepdims: boolean(attributes, "keepdims"),
             },
+            "cast" => Op::Cast(string(attributes, "dtype")?),
             "matmul" => Op::Matmul,
             "take" => Op::Take,
             "layer_norm" => Op::LayerNorm {
@@ -318,6 +320,14 @@ fn number(attributes: &Map<String, Value>, key: &str) -> Result<f32> {
         .and_then(Value::as_f64)
         .map(|v| v as f32)
         .with_context(|| format!("attribute {key:?} must be a number"))
+}
+
+fn string(attributes: &Map<String, Value>, key: &str) -> Result<String> {
+    attributes
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .with_context(|| format!("attribute {key:?} must be a string"))
 }
 
 fn optional_number(attributes: &Map<String, Value>, key: &str) -> Result<Option<f32>> {

@@ -147,6 +147,24 @@ module Torobi
         emit("sum", inputs: [x], attrs: { axes:, keepdims: })
       end
 
+      # The same numbers in another precision.
+      #
+      #   g.cast(logits, :f32)
+      #
+      # Where a model is held in bf16 and its loss is read as f32, this is
+      # the seam. Written down rather than inserted: a precision change
+      # nobody asked for is how a run quietly stops matching what it is
+      # held to.
+      # Casting to what something already is is not a node: a graph
+      # should not carry a step that does nothing, and this is what lets
+      # a model be written once and built in either precision.
+      def cast(x, dtype)
+        dtype = dtype.to_sym
+        return x if x.dtype == dtype
+
+        emit("cast", inputs: [x], attrs: { dtype: dtype.to_s })
+      end
+
       def max(x, axes: nil, keepdims: false)
         emit("max", inputs: [x], attrs: { axes:, keepdims: })
       end
@@ -222,8 +240,13 @@ module Torobi
         up * @adapter.scale
       end
 
-      def embedding(ids, vocab:, dim:, name:)
-        table = param("#{name}.weight", [vocab, dim],
+      # The table, and the lookup into it.
+      #
+      # `dtype:` is where a model's precision is decided: everything
+      # downstream takes its dtype from what it is given (`linear` and the
+      # norms use `x.dtype`), so a bf16 table makes a bf16 model.
+      def embedding(ids, vocab:, dim:, name:, dtype: :f32)
+        table = param("#{name}.weight", [vocab, dim], dtype:,
                       init: { "type" => "normal", "std" => 0.02 })
         emit("take", inputs: [table, ids])
       end

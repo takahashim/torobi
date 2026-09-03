@@ -35,6 +35,12 @@ between two versions people have.
   config that trains nothing (`train: []`) needs no loss at all, which
   is what a run opened for inference looks like. Serving is still out of
   scope: no HTTP, no tokenizer, no KV cache.
+- **A model can be held in bf16**, which is what published checkpoints
+  are stored in: `causal_lm(dtype: :bf16)` halves what a model takes
+  before anything has been computed with it (1.84 GiB to 0.92 GiB for
+  Qwen2.5-0.5B). The loss is read as f32 at the boundary, so `g.cast`
+  says where a model stops being bf16, and a config whose loss is not
+  f32 is refused where it is declared.
 - **`Torobi::LoRA`**, low-rank adaptation as something to build a graph
   with: `g.adapting(adapter) { ... }` in the model description, and
   `causal_lm(adapter:)` for whoever is doing the fine-tune. Inside the

@@ -150,6 +150,18 @@
   attributes: { axes: int_list_or_null, keepdims: bool }
   shape_rule: reduce
 
+# The one op that changes a dtype rather than a shape.
+#
+# What it is for: a model held in bf16 is half the memory of the same
+# model in f32, and the boundary reads a loss as f32 (docs/plan.md section
+# 15.51). The cast is where those two meet, and it is written down rather
+# than inserted, because a precision change nobody asked for is how a
+# training run quietly stops matching its reference.
+- name: cast
+  inputs: 1
+  attributes: { dtype: dtype }
+  shape_rule: cast
+
 - name: matmul
   inputs: 2
   shape_rule: matmul

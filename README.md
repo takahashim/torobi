@@ -116,6 +116,17 @@ What this is not is serving. No HTTP, no tokenizer, no continuous
 batching, no KV cache, no generation loop: those belong to whatever
 serves the model (docs/plan.md section 14).
 
+A model can be held in the precision its checkpoint is stored in, which
+halves what it takes:
+
+```ruby
+model = Torobi::Models::Qwen2.causal_lm(config, seq: 512, dtype: :bf16)
+```
+
+The loss is read as f32, so an objective over a bf16 model says where it
+comes back (`g.cast(logits, :f32)`); a config whose loss is not f32 is
+refused when it is built rather than on the first step.
+
 ## Fine-tuning without moving the model
 
 LoRA trains a pair of small matrices beside each weight and leaves the

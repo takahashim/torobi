@@ -166,12 +166,17 @@ pub fn dtype_spelling(dtype: Dtype) -> Option<&'static str> {
 pub fn to_tensor(array: &Array) -> Result<Tensor> {
     let array = array.contiguous()?;
     eval(std::iter::once(&array))?;
-    let dtype = array.dtype();
-    let values = match dtype {
-        Dtype::Int32 => Values::I32(array.as_slice::<i32>().to_vec()),
-        // Parameters and gradients are f32; anything else that reaches here
-        // is converted rather than reinterpreted.
-        _ => Values::F32(array.as_dtype(Dtype::Float32)?.as_slice::<f32>().to_vec()),
+    // The boundary carries two payloads, and the label says which one
+    // this is rather than what the array was. A bf16 parameter read from
+    // here is f32 numbers: they are the numbers it holds, Ruby has no
+    // bf16 to put them in, and a label that disagreed with the bytes
+    // would be a trap for whoever unpacked them.
+    let (dtype, values) = match array.dtype() {
+        Dtype::Int32 => (Dtype::Int32, Values::I32(array.as_slice::<i32>().to_vec())),
+        _ => (
+            Dtype::Float32,
+            Values::F32(array.as_dtype(Dtype::Float32)?.as_slice::<f32>().to_vec()),
+        ),
     };
     Ok(Tensor {
         dtype,
@@ -259,17 +264,27 @@ mod tests {
         }
     }
 
+    /// The boundary carries two payloads, and says which one it is
+    /// carrying rather than what the array was: a label that disagreed
+    /// with the bytes would be a trap for whoever unpacked them.
     #[test]
-    fn an_i32_array_stays_i32_and_anything_else_converts() {
+    fn the_boundary_carries_i32_or_f32_and_says_which() {
         let ids = to_tensor(&Array::from_slice(&[3i32, 4], &[2])).unwrap();
         assert_eq!(ids.dtype, Dtype::Int32);
         assert!(matches!(ids.values, Values::I32(_)));
 
-        let flags = to_tensor(&Array::from_slice(&[true, false], &[2])).unwrap();
-        assert_eq!(flags.dtype, Dtype::Bool);
-        match flags.values {
-            Values::F32(v) => assert_eq!(v, vec![1.0, 0.0]),
-            _ => panic!("bool should convert to f32, not be reinterpreted"),
+        for other in [
+            Array::from_slice(&[true, false], &[2]),
+            Array::from_slice(&[1.0f32, 0.0], &[2])
+                .as_dtype(Dtype::Bfloat16)
+                .unwrap(),
+        ] {
+            let crossed = to_tensor(&other).unwrap();
+            assert_eq!(crossed.dtype, Dtype::Float32);
+            match crossed.values {
+                Values::F32(v) => assert_eq!(v, vec![1.0, 0.0]),
+                _ => panic!("it should convert, not be reinterpreted"),
+            }
         }
     }
 

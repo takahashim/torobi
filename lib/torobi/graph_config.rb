@@ -181,6 +181,13 @@ module Torobi
               "the loss must be a scalar, and this one has shape #{shape.inspect}; " \
               "reduce it (mean or sum) before declaring it"
       end
+      # Read as an f32 at the boundary, which is the whole of why this is
+      # checked here rather than found out on the first step.
+      unless dtype == :f32
+        raise ConfigError,
+              "the loss must be f32, and this one is #{dtype}; a model held in " \
+              "another precision says where it comes back (g.cast(x, :f32))"
+      end
       return if dtype == :f32
 
       raise ConfigError, "the loss must be f32, not #{dtype}"

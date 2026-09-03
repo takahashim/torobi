@@ -213,6 +213,13 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
             Some(axes) => ins[0].max_axes(axes, *keepdims)?,
         },
 
+        // The one op that changes a dtype. Named rather than inferred:
+        // the graph says where a model's precision changes.
+        Op::Cast(dtype) => {
+            let to = crate::tensor::dtype_named(dtype)
+                .ok_or_else(|| Exception::custom(format!("cast: unknown dtype {dtype:?}")))?;
+            ins[0].as_dtype(to)?
+        }
         Op::Matmul => ins[0].matmul(&ins[1])?,
         // An embedding: rows of the table, selected by i32 ids. The
         // gradient reaches only the rows that were read.

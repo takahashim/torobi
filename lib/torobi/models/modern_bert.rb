@@ -97,16 +97,17 @@ module Torobi
       # inside it, so a classifier adapted this way trains its adapter
       # and nothing else; a head that has to be trained too is a
       # `fresh:` head on an unadapted model.
-      def classifier(config, seq:, encoder_prefix: "model", rows: nil, adapter: nil)
+      def classifier(config, seq:, encoder_prefix: "model", rows: nil, adapter: nil,
+                     dtype: :f32)
         config.check!
         Torobi.graph do |g|
-          g.adapting(adapter) { classify(g, config, seq:, rows:, encoder_prefix:) }
+          g.adapting(adapter) { classify(g, config, seq:, rows:, encoder_prefix:, dtype:) }
         end
       end
 
       # The classifier's body, so that `adapting` has something to wrap.
-      def classify(g, config, seq:, rows:, encoder_prefix:)
-        x = body(g, config, seq:, rows:, encoder_prefix:)
+      def classify(g, config, seq:, rows:, encoder_prefix:, dtype: :f32)
+        x = body(g, config, seq:, rows:, encoder_prefix:, dtype:)
         pooled = pool(g, x, config, seq:, rows:)
         # ModernBERT's head: a dense, gelu, a norm, then the classifier.
         pooled = norm(g, g.linear(pooled, config.hidden_size, name: "head.dense",
@@ -134,10 +135,10 @@ module Torobi
       # vector. `rows:` is for the objective that does read across, which
       # cannot be written against a dimension nothing knows.
       def embedder(config, seq:, pooling: :mean, encoder_prefix: "", rows: nil,
-                   normalize: true)
+                   normalize: true, dtype: :f32)
         config.check!
         Torobi.graph do |g|
-          x = g.name("hidden", body(g, config, seq:, rows:, encoder_prefix:))
+          x = g.name("hidden", body(g, config, seq:, rows:, encoder_prefix:, dtype:))
           pooled = pool(g, x, config, seq:, rows:, mode: pooling)
           pooled = normalized(g, pooled) if normalize
           g.output :embedding, g.name("embedding", pooled)
@@ -147,10 +148,10 @@ module Torobi
       # The encoder under wherever its parameters sit. Published
       # classifiers keep them under `model.` and bare encoders at the root,
       # and that is the only difference between the two graphs above.
-      def body(g, config, seq:, rows:, encoder_prefix:)
-        return encode(g, config, seq:, rows:) if encoder_prefix.to_s.empty?
+      def body(g, config, seq:, rows:, encoder_prefix:, dtype: :f32)
+        return encode(g, config, seq:, rows:, dtype:) if encoder_prefix.to_s.empty?
 
-        g.scope(encoder_prefix) { encode(g, config, seq:, rows:) }
+        g.scope(encoder_prefix) { encode(g, config, seq:, rows:, dtype:) }
       end
 
       # A vector of length one, so a dot product is a cosine.
@@ -176,7 +177,9 @@ module Torobi
         when :cls
           x.slice(axis: 1, start: 0, length: 1).reshape(shape: [-1, config.hidden_size])
         when :mean
-          weights = g.input(:tokens, [rows, seq, 1])
+          # Cast to what it is weighing: a batch carries f32, and the
+          # model may be held in something narrower.
+          weights = g.cast(g.input(:tokens, [rows, seq, 1]), x.dtype)
           g.sum(x * weights, axes: [1]) / g.sum(weights, axes: [1])
         else
           raise ConfigError, "unknown pooling #{mode.inspect}"
@@ -198,13 +201,13 @@ module Torobi
       # (`Config#local_attention`), and building them is the caller's:
       # the graph says attention, not which positions this batch has.
       # `ModernBERT.masks` builds both.
-      def graph(config, seq:, rows: nil)
+      def graph(config, seq:, rows: nil, dtype: :f32)
         config.check!
         Torobi.graph do |g|
           # Named as well as declared an output, so a tap can read it: an
           # output is what the objective consumes, and a tap is how a
           # caller sees a value without a second graph to see it with.
-          g.output :hidden, g.name("hidden", encode(g, config, seq:, rows:))
+          g.output :hidden, g.name("hidden", encode(g, config, seq:, rows:, dtype:))
         end
       end
 
@@ -217,20 +220,23 @@ module Torobi
       # objective that reads across the batch rather than down it, which
       # a contrastive loss does (its negatives are the other rows), and
       # which cannot be written against a dimension nothing knows.
-      def encode(g, config, seq:, rows: nil)
+      def encode(g, config, seq:, rows: nil, dtype: :f32)
         ids = g.input(:input_ids, [rows, seq], dtype: :i32)
-        padding = g.input(:mask, [rows, 1, 1, seq])
+        # The masks arrive as f32, which is what a batch carries, and are
+        # cast to what the model is held in. Nothing is cast when there is
+        # nothing to cast to (`g.cast`).
+        padding = g.cast(g.input(:mask, [rows, 1, 1, seq]), dtype)
         # Summed once, not in each of the local layers: both are the same
         # for every one of them. Only when there is a local layer to read
         # it, so a configuration with none asks for no window.
         local = if config.any_local?
-                  padding + g.input(:window, [1, 1, seq, seq])
+                  padding + g.cast(g.input(:window, [1, 1, seq, seq]), dtype)
                 else
                   padding
                 end
 
         x = g.embedding(ids, vocab: config.vocab_size, dim: config.hidden_size,
-                        name: "embeddings.tok_embeddings")
+                        name: "embeddings.tok_embeddings", dtype:)
         x = norm(g, x, config, name: "embeddings.norm")
 
         config.num_hidden_layers.times do |i|

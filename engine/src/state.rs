@@ -220,12 +220,10 @@ impl TrainState {
             array.shape(),
             self.params[index].shape()
         );
-        anyhow::ensure!(
-            array.dtype() == self.params[index].dtype(),
-            "parameter {path:?}: given {:?}, holds {:?}",
-            array.dtype(),
-            self.params[index].dtype()
-        );
+        // Converted rather than refused, for the reason importing is: the
+        // boundary carries f32 and a parameter may be held in something
+        // else, so what a caller can say is the numbers, not the width.
+        let array = array.as_dtype(self.params[index].dtype())?;
         eval(std::iter::once(&array))?;
         self.params[index] = array;
         Ok(())
@@ -783,12 +781,17 @@ mod tests {
         // Refused, and the parameter is still what it was.
         assert_eq!(values(&state.fetch(&plan, "m.w").unwrap()), vec![9.0, 9.0]);
 
-        let wrong_dtype = Tensor {
+        // The other payload the boundary carries is converted to what
+        // the parameter holds rather than refused: what a caller can say
+        // is the numbers, and the width is the graph's.
+        let integers = Tensor {
             dtype: mlx_rs::Dtype::Int32,
             shape: vec![2],
-            values: Values::I32(vec![0, 0]),
+            values: Values::I32(vec![7, 8]),
         };
-        assert!(state.put(&plan, "m.w", &wrong_dtype).is_err());
+        state.put(&plan, "m.w", &integers).unwrap();
+        assert_eq!(values(&state.fetch(&plan, "m.w").unwrap()), vec![7.0, 8.0]);
+
         assert!(state.put(&plan, "m.nowhere", &good).is_err());
         assert!(state.fetch(&plan, "m.nowhere").is_err());
     }
