@@ -3,15 +3,17 @@
 require_relative "test_helper"
 require "json"
 
-# Qwen2 as Torobi describes it (docs/plan.md sections 15.49 and 15.52).
+# The Llama-shaped decoder as Torobi describes it (docs/plan.md sections
+# 15.49, 15.52 and 15.53).
 #
 # Three claims, of three different kinds.
 #
-# **Structural**, against a checkpoint that exists: the graph declares
-# exactly the parameters Qwen2.5-0.5B holds, by name and by shape.
-# `test/oracle/qwen2.5-0.5b.json` records what it holds, read out of the
-# published file's own header, so this runs on a machine that has never
-# downloaded the 1GB underneath it.
+# **Structural**, against checkpoints that exist: **one description**
+# declares exactly what Qwen2.5-0.5B holds and exactly what
+# sarashina2.2-0.5b holds, by name and by shape, which is 290 tensors
+# with biases and a tied head and 219 without either. The oracles are
+# read out of the published files' own headers, so this runs on a
+# machine that has downloaded neither.
 #
 # **Behavioural**, on a model small enough to differentiate by hand: the
 # backward agrees with the forward, and the attention only looks
@@ -24,12 +26,20 @@ require "json"
 # the CPU in f32 (`rake oracle:qwen2_forward`). This one needs the
 # weights, so it says so and skips where they are not; the other two run
 # anywhere.
-class Qwen2Test < Minitest::Test
-  ORACLE = File.expand_path("oracle/qwen2.5-0.5b.json", __dir__)
+class LlamaTest < Minitest::Test
+  # What this description is held to: the two published models it says
+  # it is one description of.
+  PUBLISHED = { "Qwen/Qwen2.5-0.5B" => "qwen2.5-0.5b",
+                "sbintuitions/sarashina2.2-0.5b" => "sarashina2.2-0.5b" }.freeze
 
-  def oracle = @oracle ||= JSON.parse(File.read(ORACLE))
+  def inventory(name)
+    (@inventories ||= {})[name] ||=
+      JSON.parse(File.read(File.expand_path("oracle/#{name}.json", __dir__)))
+  end
 
-  def published = Torobi::Models::Qwen2.from_hash(oracle.fetch("config"))
+  def oracle = inventory("qwen2.5-0.5b")
+
+  def published = Torobi::Models::Llama.from_hash(oracle.fetch("config"))
 
   FORWARD = File.expand_path("oracle/qwen2.5-0.5b.forward.json", __dir__)
   SNAPSHOTS = File.expand_path("~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B/snapshots")
@@ -91,11 +101,11 @@ class Qwen2Test < Minitest::Test
   # scores at the last one, which is the position a decoder is asked
   # about.
   def run_case(dir, ids)
-    graph = Torobi::Models::Qwen2.causal_lm(published, seq: ids.size)
+    graph = Torobi::Models::Llama.causal_lm(published, seq: ids.size)
     config = Torobi::GraphConfig.new(models: { m: graph }, train: [])
     Torobi::Session.open(config, pretrained: { m: File.join(dir, "model.safetensors") }) do |s|
       s.tap("m.hidden", stat: :full)
-      produced = s.forward(Torobi::Models::Qwen2.batch(published, [ids], seq: ids.size))
+      produced = s.forward(Torobi::Models::Llama.batch(published, [ids], seq: ids.size))
       [s.tapped.fetch("m.hidden").to_a.each_slice(published.hidden_size).to_a,
        produced.fetch("m.logits").to_a.last(published.vocab_size)]
     end
@@ -158,7 +168,7 @@ class Qwen2Test < Minitest::Test
   # rather than by rounding.
   PARITY = 2e-4
 
-  def test_the_recorded_config_is_the_one_this_builder_understands
+  def test_the_recorded_configs_are_the_ones_this_builder_understands
     c = published
 
     assert_equal 896, c.hidden_size
@@ -170,38 +180,72 @@ class Qwen2Test < Minitest::Test
     assert_equal 7, c.group
     assert_equal 64, c.head_dim
     assert c.tie_word_embeddings, "0.5B ties its output projection to its embedding"
+    assert c.attention_bias, "Qwen2 puts a bias on q, k and v, and says so nowhere"
+
+    s = Torobi::Models::Llama.from_hash(inventory("sarashina2.2-0.5b").fetch("config"))
+
+    assert_equal 1280, s.hidden_size
+    assert_equal 2, s.group
+    assert_equal 80, s.head_dim
+    refute s.tie_word_embeddings, "sarashina holds its own output projection"
+    refute s.attention_bias, "and Llama's attention has no biases"
   end
 
-  # The claim that makes `pretrained:` work with no renaming.
-  def test_the_graph_declares_exactly_what_the_checkpoint_holds
-    graph = Torobi::Models::Qwen2.causal_lm(published, seq: 8)
-    declared = graph.parameters.to_h { |spec| [spec.path, spec.shape] }
-    held = oracle.fetch("parameters").transform_values { |t| t.fetch("shape") }
+  # The claim that makes `pretrained:` work with no renaming, for both of
+  # them, from one description.
+  def test_each_graph_declares_exactly_what_its_checkpoint_holds
+    counted = PUBLISHED.map do |source, name|
+      held = inventory(name).fetch("parameters").transform_values { |t| t.fetch("shape") }
+      config = Torobi::Models::Llama.from_hash(inventory(name).fetch("config"))
+      declared = Torobi::Models::Llama.causal_lm(config, seq: 8)
+                                      .parameters.to_h { |spec| [spec.path, spec.shape] }
 
-    assert_empty held.keys - declared.keys, "the checkpoint holds parameters this graph does not"
-    assert_empty declared.keys - held.keys, "this graph declares parameters the checkpoint lacks"
-    mismatched = declared.filter_map do |path, shape|
-      "#{path}: declares #{shape.inspect}, holds #{held[path].inspect}" if held[path] != shape
+      assert_empty held.keys - declared.keys, "#{source} holds parameters this graph does not"
+      assert_empty declared.keys - held.keys, "this graph declares what #{source} lacks"
+      mismatched = declared.filter_map do |path, shape|
+        "#{source} #{path}: declares #{shape.inspect}, holds #{held[path].inspect}" \
+          if held[path] != shape
+      end
+
+      assert_empty mismatched
+      declared.size
     end
 
-    assert_empty mismatched
-    assert_equal 290, declared.size
+    assert_equal [290, 219], counted, "biases and a tied head are the difference"
   end
 
-  # The tie is the reason there are 290 and not 291. A checkpoint that
-  # ties holds no output projection, and a graph that declared one would
-  # be asking for something no file has.
-  def test_a_tied_model_declares_no_output_projection
-    tied = Torobi::Models::Qwen2.causal_lm(published, seq: 4).parameters.map(&:path)
+  # The tie is the reason one has 290 and the other 219: a checkpoint
+  # that ties holds no output projection, and a graph that declared one
+  # would be asking for something no file has. Both cases are published
+  # rather than invented.
+  def test_only_the_untied_model_declares_an_output_projection
+    tied = Torobi::Models::Llama.causal_lm(published, seq: 4).parameters.map(&:path)
+    sarashina = Torobi::Models::Llama.from_hash(inventory("sarashina2.2-0.5b").fetch("config"))
+    apart = Torobi::Models::Llama.causal_lm(sarashina, seq: 4)
+                                 .parameters.to_h { |spec| [spec.path, spec.shape] }
 
     refute_includes tied, "lm_head.weight"
     assert_includes tied, "model.embed_tokens.weight"
+    assert_equal [sarashina.vocab_size, sarashina.hidden_size], apart.fetch("lm_head.weight")
+    assert_includes apart.keys, "model.embed_tokens.weight",
+                    "which it has as well as, not instead of"
+  end
 
-    apart = Torobi::Models::Qwen2.causal_lm(
-      published.with(tie_word_embeddings: false), seq: 4
-    ).parameters.to_h { |spec| [spec.path, spec.shape] }
+  # What the family does that this does not do. Refused rather than
+  # ignored: a rope that should have been scaled and was not is a model
+  # that runs, trains, and is not the one the file names.
+  def test_what_is_not_implemented_is_refused_rather_than_ignored
+    scaled = oracle.fetch("config").merge(
+      "rope_scaling" => { "rope_type" => "llama3", "factor" => 8.0 }
+    )
+    e = assert_raises(Torobi::ConfigError) { Torobi::Models::Llama.from_hash(scaled) }
 
-    assert_equal [published.vocab_size, published.hidden_size], apart.fetch("lm_head.weight")
+    assert_match(/rope_scaling/, e.message)
+
+    windowed = oracle.fetch("config").merge("use_sliding_window" => true)
+    e = assert_raises(Torobi::ConfigError) { Torobi::Models::Llama.from_hash(windowed) }
+
+    assert_match(/sliding window/, e.message)
   end
 
   # --- a model small enough to answer for itself ---
@@ -211,7 +255,7 @@ class Qwen2Test < Minitest::Test
   # Two key heads under four query heads, so the grouping is exercised
   # rather than degenerate, and three layers.
   def small
-    @small ||= Torobi::Models::Qwen2.from_hash(
+    @small ||= Torobi::Models::Llama.from_hash(
       "vocab_size" => 11, "hidden_size" => 8, "intermediate_size" => 16,
       "num_hidden_layers" => 3, "num_attention_heads" => 4,
       "num_key_value_heads" => 2, "rms_norm_eps" => 1e-6, "rope_theta" => 10_000.0,
@@ -219,7 +263,7 @@ class Qwen2Test < Minitest::Test
     )
   end
 
-  def model = @model ||= Torobi::Models::Qwen2.causal_lm(small, seq: SEQ)
+  def model = @model ||= Torobi::Models::Llama.causal_lm(small, seq: SEQ)
 
   # What a language model is trained on: what it should have said next,
   # at the positions where there is a next. Written here rather than in
@@ -258,7 +302,7 @@ class Qwen2Test < Minitest::Test
       (row[1..] + Array.new(SEQ - lengths[i] + 1, small.pad_token_id)).first(SEQ)
     end
     kept = lengths.flat_map { |n| Array.new(SEQ) { |i| i < n - 1 ? 1.0 : 0.0 } }
-    Torobi::Models::Qwen2.batch(small, rows, seq: SEQ)
+    Torobi::Models::Llama.batch(small, rows, seq: SEQ)
                          .merge(targets: Torobi::TensorData.from_a([rows.size, SEQ], targets,
                                                                    dtype: :i32),
                                 kept: Torobi::TensorData.from_a([rows.size, SEQ], kept))
@@ -333,14 +377,14 @@ class Qwen2Test < Minitest::Test
 
   def test_a_row_longer_than_the_graph_is_refused
     e = assert_raises(Torobi::ConfigError) do
-      Torobi::Models::Qwen2.batch(small, [Array.new(SEQ + 1, 1)], seq: SEQ)
+      Torobi::Models::Llama.batch(small, [Array.new(SEQ + 1, 1)], seq: SEQ)
     end
 
     assert_match(/has #{SEQ + 1} tokens and this graph was built for #{SEQ}/, e.message)
   end
 
   def test_a_batch_pads_on_the_right_with_the_configured_token
-    ids = Torobi::Models::Qwen2.batch(small, ROWS, seq: SEQ).fetch(:input_ids)
+    ids = Torobi::Models::Llama.batch(small, ROWS, seq: SEQ).fetch(:input_ids)
 
     assert_equal [ROWS.size, SEQ], ids.shape
     assert_equal :i32, ids.dtype

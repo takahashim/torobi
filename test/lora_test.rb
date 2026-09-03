@@ -31,7 +31,7 @@ class LoRATest < Minitest::Test
   end
 
   def config
-    @config ||= Torobi::Models::Qwen2.from_hash(
+    @config ||= Torobi::Models::Llama.from_hash(
       "vocab_size" => 11, "hidden_size" => DIM, "intermediate_size" => 16,
       "num_hidden_layers" => 2, "num_attention_heads" => 4,
       "num_key_value_heads" => 2, "rms_norm_eps" => 1e-6, "rope_theta" => 10_000.0,
@@ -42,7 +42,7 @@ class LoRATest < Minitest::Test
   def adapter = @adapter ||= Torobi::LoRA.new(rank: 2, alpha: 4, on: %w[q_proj v_proj])
 
   def model(with: adapter)
-    Torobi::Models::Qwen2.causal_lm(config, seq: SEQ, adapter: with)
+    Torobi::Models::Llama.causal_lm(config, seq: SEQ, adapter: with)
   end
 
   def graph_config(graph)
@@ -59,7 +59,7 @@ class LoRATest < Minitest::Test
   ROWS = [[3, 8, 5, 9], [4, 6, 1, 2]].freeze
 
   def batch
-    Torobi::Models::Qwen2.batch(config, ROWS, seq: SEQ)
+    Torobi::Models::Llama.batch(config, ROWS, seq: SEQ)
                          .merge(targets: Torobi::TensorData.from_a(
                            [ROWS.size, SEQ], ROWS.flat_map { |r| r[1..] + [config.pad_token_id] },
                            dtype: :i32
@@ -111,10 +111,10 @@ class LoRATest < Minitest::Test
   # over a width of 8 is not small, and the number that matters is the
   # one a real fine-tune would see.
   def test_the_adapter_is_a_small_share_of_what_it_adapts
-    published = Torobi::Models::Qwen2.from_hash(
+    published = Torobi::Models::Llama.from_hash(
       JSON.parse(File.read(File.expand_path("oracle/qwen2.5-0.5b.json", __dir__))).fetch("config")
     )
-    graph = Torobi::Models::Qwen2.causal_lm(
+    graph = Torobi::Models::Llama.causal_lm(
       published, seq: 8, adapter: Torobi::LoRA.new(rank: 8, alpha: 16, on: %w[q_proj v_proj])
     )
     counted = ->(specs) { specs.sum { |spec| spec.shape.reduce(1, :*) } }
@@ -183,7 +183,7 @@ class LoRATest < Minitest::Test
 
   def test_an_adapter_of_nothing_changes_nothing
     assert_equal graph_config(model(with: nil)).digest,
-                 graph_config(Torobi::Models::Qwen2.causal_lm(config, seq: SEQ)).digest
+                 graph_config(Torobi::Models::Llama.causal_lm(config, seq: SEQ)).digest
   end
 
   def test_what_an_adapter_names

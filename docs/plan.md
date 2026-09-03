@@ -2630,6 +2630,45 @@ bundle exec rake oracle:qwen2_forward           # 参照を記録する
 bundle exec ruby -Ilib -Itest test/qwen2_test.rb
 ```
 
+### 15.53 sarashina2.2 は Llama だった。一族を 1 つの記述にした(2026-09-04)
+
+「他の decoder を」という話と「sarashina2.2 を試したい」という話が、調べたら同じ話だった。
+
+**棚卸しツールで見に行った** (§15.49 で作った Hub モード。config.json と safetensors
+ヘッダのバイト範囲だけ、数十 KB)。sarashina2.2-0.5b は:
+
+```
+architectures: ["LlamaForCausalLM"], attention_bias: false,
+tie_word_embeddings: false, GQA 16/8, rope_theta 500000, rope_scaling: null
+```
+
+テンソル 219 個 = 24 層 × 9 + embed + norm + **lm_head**。0.5b / 1b / 3b とも同じ形。
+
+**Qwen2 との違いは 2 つだけだった**: q/k/v の bias があるか、head が tie されているか。
+どちらも config が既に言っていることである。しかも**テンソルの名前は完全に同じ**で、
+これが「両者は 1 つのアーキテクチャである」ことの一番強い証拠である。
+
+だから `Models::Qwen2` を **`Models::Llama` に改名し、一族の記述にした**。Llama 自身、
+Qwen2、sarashina2.2、そして sliding window を使わない Mistral。名前ごとに 1 つ書くのは、
+本質的に同じものを分散させることになる。
+
+**Qwen2 の bias は config に書かれていない。** `attention_bias` キーが無く、実装が
+決め打ちしている。だから `model_type` を見て既定を決める (qwen2 なら true、それ以外は
+false)。ここだけは「ファイルが言っていること」で済まない箇所である。
+
+**実装していないものは拒否する。** `rope_scaling` (Llama 3.1/3.2 の llama3 scaling) と
+sliding window は、**無視すると動いてしまう**: 学習も進むし勾配も合う。合わないのは
+「そのファイルが名指しているモデル」とだけである。だから from_hash が構築時に断る。
+
+テストは**1 つの記述が 2 つの公開モデルに一致する**ことを言う: 290 個 (bias と tie あり)
+と 219 個 (どちらも無し)、名前も形も欠けも余りも無し。tie の有無も、作り物ではなく
+公開されている 2 つで対比している。
+
+数値の突き合わせ (§15.52) は Qwen2 に対してだけ済んでいる。sarashina 用の
+`rake oracle:sarashina_forward` は用意したが、重みは 32GB 機にしか無い。
+
+この時点で Ruby 293 件 / Rust 126 件。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

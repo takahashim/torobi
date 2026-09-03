@@ -28,7 +28,7 @@ class Bf16Test < Minitest::Test
   end
 
   def published
-    @published ||= Torobi::Models::Qwen2.from_hash(
+    @published ||= Torobi::Models::Llama.from_hash(
       JSON.parse(File.read(File.expand_path("oracle/qwen2.5-0.5b.json", __dir__))).fetch("config")
     )
   end
@@ -38,7 +38,7 @@ class Bf16Test < Minitest::Test
   # already a gigabyte.
   def test_a_bf16_model_is_half_of_the_same_model_in_f32
     held = lambda do |dtype|
-      graph = Torobi::Models::Qwen2.causal_lm(published, seq: 8, dtype:)
+      graph = Torobi::Models::Llama.causal_lm(published, seq: 8, dtype:)
       widths = graph.parameters.map(&:dtype).uniq
 
       assert_equal [dtype], widths, "every parameter follows the table's dtype"
@@ -57,9 +57,9 @@ class Bf16Test < Minitest::Test
             "rope_theta" => 10_000.0, "tie_word_embeddings" => true,
             "eos_token_id" => 10 }.freeze
 
-  def config = @config ||= Torobi::Models::Qwen2.from_hash(SMALL)
+  def config = @config ||= Torobi::Models::Llama.from_hash(SMALL)
 
-  def model(dtype: :bf16) = Torobi::Models::Qwen2.causal_lm(config, seq: SEQ, dtype:)
+  def model(dtype: :bf16) = Torobi::Models::Llama.causal_lm(config, seq: SEQ, dtype:)
 
   def graph_config(graph)
     Torobi::GraphConfig.new(
@@ -77,7 +77,7 @@ class Bf16Test < Minitest::Test
   ROWS = [[3, 8, 5, 9], [4, 6, 1, 2]].freeze
 
   def batch
-    Torobi::Models::Qwen2.batch(config, ROWS, seq: SEQ)
+    Torobi::Models::Llama.batch(config, ROWS, seq: SEQ)
                          .merge(targets: Torobi::TensorData.from_a(
                            [ROWS.size, SEQ], ROWS.flat_map { |r| r[1..] + [10] }, dtype: :i32
                          ))

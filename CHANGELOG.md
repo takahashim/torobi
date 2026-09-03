@@ -48,12 +48,14 @@ between two versions people have.
   exactly the model it adapts, and training leaves the base bytes alone.
   On Qwen2.5-0.5B with rank 8 over q_proj and v_proj that is 0.109% of
   the parameters.
-- **`Torobi::Models::Qwen2`**, the first decoder: a causal language
-  model as a graph, declaring exactly the 290 parameters Qwen2.5-0.5B
-  holds, with the tied output projection that checkpoint expects, and
-  whose hidden states and next tokens agree with transformers. No KV
-  cache and no sampling loop, which stay out of scope; what it is for is
-  fine-tuning, and one forward is `Session#forward`.
+- **`Torobi::Models::Llama`**, the Llama-shaped decoder and so most of
+  them: one description that declares exactly the 290 parameters
+  Qwen2.5-0.5B holds and exactly the 219 sarashina2.2-0.5b holds, biases
+  and tied head included, and whose hidden states and next tokens agree
+  with transformers. What it does not implement (scaled rotary
+  embeddings, sliding window attention) it refuses rather than ignores.
+  No KV cache and no sampling loop, which stay out of scope; what it is
+  for is fine-tuning, and one forward is `Session#forward`.
 - **The vocabulary a decoder is written in**: `max`, a `cross_entropy`
   that takes the largest logit out before it exponentiates, attention
   with fewer key heads than query heads (grouped-query attention) and a

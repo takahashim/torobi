@@ -2,14 +2,20 @@
 
 module Torobi
   module Models
-    # Qwen2, as a GraphConfig.
+    # The Llama-shaped decoder, as a GraphConfig.
     #
-    # The second architecture Torobi describes, and the first decoder
-    # (docs/plan.md section 15.49). ModernBERT reads a sequence; this
-    # continues one, which changes four things and nothing else: attention
-    # only looks backwards, the key heads are fewer than the query heads,
-    # the MLP is gated with SiLU rather than GELU, and the output
-    # projection is usually the embedding table read a second time.
+    # Llama itself, and everything built to its shape: Qwen2, sarashina2.2,
+    # Mistral without its sliding window. One description rather than one
+    # per name, because they are one architecture and the differences
+    # between them are things their configs already say (docs/plan.md
+    # section 15.53). The tensor names are identical, which is the
+    # strongest evidence that this is so.
+    #
+    # ModernBERT reads a sequence; this continues one, which changes four
+    # things and nothing else: attention only looks backwards, the key
+    # heads are fewer than the query heads, the MLP is gated with SiLU
+    # rather than GELU, and the output projection is sometimes the
+    # embedding table read a second time.
     #
     # Written against the published configuration, and named the way the
     # checkpoint names things, so a model imports with no renaming:
@@ -20,16 +26,14 @@ module Torobi
     # is not going to be: a decoder in Torobi is a decoder being
     # fine-tuned, and what serves the result is llama.cpp or vLLM
     # (docs/plan.md section 14). One forward is `Session#forward`.
-    module Qwen2
-      # What a Qwen2 config says, with the defaults the reference uses
-      # when a file leaves one out.
+    module Llama
+      # What one of these configs says, with the defaults the reference
+      # uses when a file leaves one out.
       Config = Data.define(
         :vocab_size, :hidden_size, :intermediate_size, :num_hidden_layers,
-        :num_attention_heads, :num_key_value_heads, :rms_norm_eps, :rope_theta,
-        :tie_word_embeddings, :pad_token_id
+        :num_attention_heads, :num_key_value_heads, :head_dim, :rms_norm_eps,
+        :rope_theta, :tie_word_embeddings, :attention_bias, :pad_token_id
       ) do
-        def head_dim = hidden_size / num_attention_heads
-
         # How many query heads share one key head. Grouped-query
         # attention: 14 heads over 2 in Qwen2.5-0.5B, so seven of them
         # read the same keys and the checkpoint carries a seventh of the
@@ -37,10 +41,10 @@ module Torobi
         def group = num_attention_heads / num_key_value_heads
 
         def check!
-          unless (hidden_size % num_attention_heads).zero?
+          unless head_dim * num_attention_heads == hidden_size
             raise ConfigError,
-                  "hidden_size #{hidden_size} does not divide into " \
-                  "#{num_attention_heads} heads"
+                  "#{num_attention_heads} heads of #{head_dim} is not " \
+                  "hidden_size #{hidden_size}"
           end
           unless (num_attention_heads % num_key_value_heads).zero?
             raise ConfigError,
@@ -58,23 +62,58 @@ module Torobi
         from_hash(JSON.parse(File.read(path.to_s)))
       end
 
+      # Reads one of these configs, whichever of the family it is.
+      #
+      # Two things differ between them and neither is optional to get
+      # right. **Qwen2 puts a bias on q, k and v and says so nowhere**:
+      # its config has no `attention_bias` because the implementation
+      # hardcodes it, while Llama's says false and means it. And whether
+      # the output projection is the embedding table is `tie_word_embeddings`,
+      # which decides whether the checkpoint holds an `lm_head.weight` at
+      # all. So the family is read off `model_type` and the rest is read
+      # off the file.
       def from_hash(raw)
+        family = raw.fetch("model_type", "llama")
+        refuse_what_is_not_built(raw, family)
+        heads = raw.fetch("num_attention_heads")
         Config.new(
           vocab_size: raw.fetch("vocab_size"),
           hidden_size: raw.fetch("hidden_size"),
           intermediate_size: raw.fetch("intermediate_size"),
           num_hidden_layers: raw.fetch("num_hidden_layers"),
-          num_attention_heads: raw.fetch("num_attention_heads"),
-          num_key_value_heads: raw.fetch("num_key_value_heads"),
+          num_attention_heads: heads,
+          num_key_value_heads: raw.fetch("num_key_value_heads", heads),
+          head_dim: raw["head_dim"] || (raw.fetch("hidden_size") / heads),
           rms_norm_eps: raw.fetch("rms_norm_eps", 1e-6),
           rope_theta: raw.fetch("rope_theta", 10_000.0),
           tie_word_embeddings: raw.fetch("tie_word_embeddings", false),
+          attention_bias: raw.fetch("attention_bias", family == "qwen2"),
           # A decoder is trained on what it should say next, and the
           # positions it should say nothing at are dropped by the
           # objective rather than attended around. What pads them only has
           # to be a token id, and the end-of-text one is the one to hand.
           pad_token_id: raw["pad_token_id"] || raw.fetch("eos_token_id", 0)
         ).check!
+      end
+
+      # What this family does that this description does not.
+      #
+      # Refused rather than ignored. A rope that should have been scaled
+      # and was not, or a window that should have been slid and was not,
+      # is a model that runs, trains, and is not the model the file names;
+      # nothing downstream would notice.
+      def refuse_what_is_not_built(raw, family)
+        if raw["rope_scaling"]
+          raise ConfigError,
+                "#{family}: rope_scaling #{raw["rope_scaling"].inspect} is not " \
+                "implemented here, and a rotary embedding that should have been " \
+                "scaled and was not is a different model"
+        end
+        return unless raw["use_sliding_window"] || (family == "mistral" && raw["sliding_window"])
+
+        raise ConfigError,
+              "#{family}: sliding window attention is not implemented here; " \
+              "this builds a decoder that attends to everything before it"
       end
 
       # The language model: token ids in, one score per token of the
@@ -163,16 +202,18 @@ module Torobi
       # never after a padded one and never attends to it. What the padded
       # positions themselves produce is discarded by the objective.
       #
-      # q, k and v carry biases, which is Qwen2's own asymmetry: the
-      # output projection has none.
+      # Whether q, k and v carry biases is the family's own asymmetry:
+      # Qwen2 has them and Llama does not. The output projection has none
+      # either way.
       def attention(g, x, config, seq:)
         heads = config.num_attention_heads
         kv = config.num_key_value_heads
         dim = config.head_dim
         theta = config.rope_theta
-        q = g.linear(x, heads * dim, name: "self_attn.q_proj")
-        k = g.linear(x, kv * dim, name: "self_attn.k_proj")
-        v = g.linear(x, kv * dim, name: "self_attn.v_proj")
+        bias = config.attention_bias
+        q = g.linear(x, heads * dim, name: "self_attn.q_proj", bias:)
+        k = g.linear(x, kv * dim, name: "self_attn.k_proj", bias:)
+        v = g.linear(x, kv * dim, name: "self_attn.v_proj", bias:)
         # [batch, seq, heads * dim] -> [batch, heads, seq, dim]. The key
         # heads are fewer and stay that way: the backend takes them
         # untiled, which is the whole saving.

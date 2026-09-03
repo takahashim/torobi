@@ -120,7 +120,7 @@ A model can be held in the precision its checkpoint is stored in, which
 halves what it takes:
 
 ```ruby
-model = Torobi::Models::Qwen2.causal_lm(config, seq: 512, dtype: :bf16)
+model = Torobi::Models::Llama.causal_lm(config, seq: 512, dtype: :bf16)
 ```
 
 The loss is read as f32, so an objective over a bf16 model says where it
@@ -135,7 +135,7 @@ keyword rather than a different model description:
 
 ```ruby
 adapter = Torobi::LoRA.new(rank: 8, alpha: 16, on: %w[q_proj v_proj])
-model = Torobi::Models::Qwen2.causal_lm(config, seq: 512, adapter:)
+model = Torobi::Models::Llama.causal_lm(config, seq: 512, adapter:)
 config = Torobi::GraphConfig.new(models: { m: model }, objective:)
 
 Torobi::Session.open(config, pretrained: { m: "Qwen2.5-0.5B/model.safetensors" },
@@ -183,11 +183,15 @@ The milestones in [docs/plan.md](docs/plan.md) section 9.1 are met
 through M4: a distillation of a published ModernBERT runs to the end and
 leaves a record.
 
-`Models::Qwen2` declares exactly what Qwen2.5-0.5B holds, its gradients
-agree with its forward, and its numbers agree with transformers. What is
-deliberately absent is generation: no KV cache, no sampling loop. What
-Torobi does with a decoder is fine-tune it, in bf16 or behind a LoRA
-adapter, and something else serves the result. Quantized ops and
+`Models::Llama` is the Llama-shaped decoder, which is most of them: it
+declares exactly what Qwen2.5-0.5B holds and exactly what
+sarashina2.2-0.5b holds, its gradients agree with its forward, and its
+numbers agree with transformers. What it does not implement it refuses
+to build (scaled rotary embeddings, sliding window attention).
+
+What is deliberately absent is generation: no KV cache, no sampling
+loop. What Torobi does with a decoder is fine-tune it, in bf16 or behind
+a LoRA adapter, and something else serves the result. Quantized ops and
 variable length attention are not implemented.
 
 The version is 0.0.1 and the API still moves.

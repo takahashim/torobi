@@ -125,9 +125,20 @@ namespace :oracle do
   # installed here.
   desc "record what transformers answers for Qwen2.5-0.5B, for test/oracle"
   task :qwen2_forward do
-    sh "uv", "run", "--with", "transformers", "--with", "torch",
-       "python", "tools/qwen2_reference.py",
-       "--out", "test/oracle/qwen2.5-0.5b.forward.json"
+    reference "Qwen/Qwen2.5-0.5B", "test/oracle/qwen2.5-0.5b.forward.json"
+  end
+
+  # The same architecture as Qwen2 with two flags moved, which is the
+  # claim `Models::Llama` makes and this is what holds it to it.
+  desc "record what sbintuitions/sarashina2.2-0.5b holds, for test/oracle"
+  task :sarashina do
+    sh RbConfig.ruby, "tools/inventory.rb", "sbintuitions/sarashina2.2-0.5b",
+       "test/oracle/sarashina2.2-0.5b.json"
+  end
+
+  desc "record what transformers answers for sarashina2.2-0.5b, for test/oracle"
+  task :sarashina_forward do
+    reference "sbintuitions/sarashina2.2-0.5b", "test/oracle/sarashina2.2-0.5b.forward.json"
   end
 
   desc "record what cl-nagoya/ruri-v3-reranker-310m holds, for test/oracle"
@@ -141,7 +152,16 @@ namespace :oracle do
 end
 
 desc "regenerate every oracle artifact"
-task oracle: ["oracle:ruri", "oracle:reranker", "oracle:qwen2", "oracle:forward"]
+task oracle: ["oracle:ruri", "oracle:reranker", "oracle:qwen2", "oracle:sarashina",
+              "oracle:forward"]
+
+# One decoder's numbers, from the implementation everyone else is held to.
+# Needs the weights and a Python environment, so the dependencies are
+# named on the command line rather than installed here.
+def reference(repo, out)
+  sh "uv", "run", "--with", "transformers", "--with", "torch",
+     "python", "tools/qwen2_reference.py", "--model", repo, "--out", out
+end
 
 # Moving the MLX pin to another release of takahashim/mlx-prebuilt.
 #

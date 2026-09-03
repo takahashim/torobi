@@ -19,7 +19,7 @@ module Torobi
   # What this holds is the decision, not the arithmetic:
   #
   #   adapter = Torobi::LoRA.new(rank: 8, alpha: 16, on: %w[q_proj v_proj])
-  #   model = Torobi::Models::Qwen2.causal_lm(config, seq: 512, adapter:)
+  #   model = Torobi::Models::Llama.causal_lm(config, seq: 512, adapter:)
   #
   # `on` names the linears to adapt by their last segment, which is how
   # everyone else spells it (`target_modules` in PEFT) and is the only
