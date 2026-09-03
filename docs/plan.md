@@ -599,5 +599,17 @@ M0 と M1 の一部(§9.1 の M1 のうち single-step とその境界の初期�
 | エラー 3 分類 | **済**。`ConfigError` / `StepError` / `EngineUnavailable`(§5A.4)。4 つ目(abort)は文書とテストで固定 |
 | journal スキーマ | **済**。`Torobi::Journal`(JSONL、6 種の entry)と `Provenance`。観測も記録する(§8.5 の訂正どおり) |
 
-その後 M1 の残り(境界コスト実測は済、**installed-gem smoke が未**)を閉じ、
+### 15.2 M1 の進捗(2026-09-03)
+
+| 出口条件 | 状態 |
+| --- | --- |
+| 異なる batch での forward / grad / update | **済**(§15.1) |
+| FFI 異常系(例外変換、panic、致命、GC、多重セッション) | **済**。subprocess テスト |
+| GVL 解放中に別スレッドが進む | **済** |
+| 境界コストの実測 | **済**(§5A.2.1)。測って設計判断を覆した |
+| installed-gem smoke | **済、ただし結果は両義的**。仕組みは通る(56 KB の source gem がビルドされ、metallib が dladdr の見る場所に入り、1 step が動く)が、**このマシンでしか通らない**: `engine/Cargo.toml` が OminiX checkout を絶対パスで指し、それが gem に入る。checkout を隠して再試行すると失敗することを確認済み(`docs/vendoring.md`)|
+
+**したがって配布は「形は成立、事実として不可」**であり、vendoring(§5)を終えるまで
+source gem を「動く」と主張しない。M2 と並行して片付ける作業として残す。
+
 M2(stateful core: AdamW、RNG、checkpoint / resume)に進む。
