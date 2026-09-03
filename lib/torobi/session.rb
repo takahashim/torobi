@@ -23,6 +23,11 @@ module Torobi
   class Session
     # The update rule a session takes when none is named: plain SGD, which
     # has no state to restore and is the right default for a spike.
+    #
+    # This is the one a Ruby caller gets. The engine has its own for its
+    # command-line tool, and Ruby never reads it: every open from here
+    # states the rule and the seed, so the two cannot disagree about a
+    # run that actually happened.
     DEFAULT_OPTIMIZER = { kind: :sgd, lr: 0.1 }.freeze
 
     # Where a run's randomness starts when the caller names no seed. Zero

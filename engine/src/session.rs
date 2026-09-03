@@ -288,11 +288,26 @@ impl SessionCore {
 /// and touches neither the allocator nor the stream. Everything else waits
 /// its turn.
 impl Session {
+    /// What `open` runs with: plain SGD, which has no state to restore,
+    /// and a seed of zero.
+    ///
+    /// Not the library's default in any binding sense. Ruby names its own
+    /// (`Torobi::Session::DEFAULT_OPTIMIZER`) and always states both, so
+    /// what this decides is the command-line tool's runs and the tests'.
+    /// Two places say "sgd 0.1" and neither reads the other, which is
+    /// fine as long as neither is mistaken for one contract in two
+    /// languages.
+    const SPIKE: (OptimizerConfig, u64) = (OptimizerConfig::Sgd { lr: 0.1 }, 0);
+
     /// Loads a GraphConfig and its initial parameters. Parameters are given
     /// by qualified path ("student.head.weight"), which is also the order
     /// the engine keeps them in. Data comes later, one batch per step.
+    ///
+    /// For the command-line tool and the tests: a caller that has an
+    /// update rule and a seed to state uses [`Session::open_with`].
     pub fn open(graph_json: &str, weights: Weights<'_>) -> Outcome<Self> {
-        Self::open_with(graph_json, weights, OptimizerConfig::Sgd { lr: 0.1 }, 0)
+        let (optimizer, seed) = Self::SPIKE;
+        Self::open_with(graph_json, weights, optimizer, seed)
     }
 
     /// The same, with the update rule named and the run's seed given.
