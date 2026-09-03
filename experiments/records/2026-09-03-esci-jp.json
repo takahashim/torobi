@@ -1,0 +1,52 @@
+{
+  "dataset": {
+    "name": "mteb/ESCIReranking jp",
+    "revision": "dc2cfaf4fcbf238806a02ae8607786e88112463e",
+    "teacher": "cl-nagoya/ruri-v3-reranker-310m",
+    "tokenizer": "cl-nagoya/ruri-v3-reranker-310m",
+    "max_seq_length": 128
+  },
+  "epochs": 2,
+  "batch": 8,
+  "learning_rate": 2.0e-05,
+  "seed": 0,
+  "order_seed": 20260903,
+  "teacher_ndcg": 0.777032962286384,
+  "measurements": [
+    {
+      "step": 0,
+      "loss": 0.4558299343679204,
+      "ndcg": 0.6436588206368634
+    },
+    {
+      "step": 150,
+      "loss": 0.025477761640231314,
+      "ndcg": 0.6882090588161883
+    },
+    {
+      "step": 300,
+      "loss": 0.023939071639942387,
+      "ndcg": 0.7290751060473276
+    },
+    {
+      "step": 450,
+      "loss": 0.016891008810906077,
+      "ndcg": 0.768030347822338
+    },
+    {
+      "step": 600,
+      "loss": 0.01654441318618532,
+      "ndcg": 0.7592464087536842
+    },
+    {
+      "step": 750,
+      "loss": 0.013482718346759159,
+      "ndcg": 0.7619925587862956
+    },
+    {
+      "step": 846,
+      "loss": 0.012711761958300292,
+      "ndcg": 0.7559547529559556
+    }
+  ]
+}

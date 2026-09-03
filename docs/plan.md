@@ -462,7 +462,7 @@ memory も検証できないまま M4 の蒸留に入る構造だった。分割
 | M2.5 ✅ | 窓 | ノブ、フック、journal、**2 種の replay**(§8.6)、freeze の構造変更としての扱い |
 | M3a ✅ | model import | safetensors ロード、**1 ブロックの forward と gradient の parity** |
 | M3b ✅ | ModernBERT | 全体の forward / gradient parity、tiny dataset の過学習、memory 予算の実測 |
-| **M4** | **蒸留実験** | 固定 dataset / metric / seed での実験が**完走し、記録が残る**こと |
+| M4 ✅ | 蒸留実験 | 固定 dataset / metric / seed での実験が**完走し、記録が残る**こと |
 
 **M4 の出口条件を訂正した。** v3.1 は「素の base-v2 と同等以上」としていたが、それは
 データとハイパーパラメータに依存する**研究成果**であり、フレームワークの完成条件ではない。
@@ -1567,6 +1567,67 @@ Hash を自分のオプションとして取る)ことも、途中で分かっ�
 
 **ノブにもしない。** 0.4% のために付けた off スイッチは、いつか誰かが off にする。
 §15.9 で 2 つのノブを入れなかったのと同じ理由による。
+
+### 15.28 M4: 蒸留が完走し、記録が残った(2026-09-03)
+
+出口条件は「固定 dataset / metric / seed での実験が**完走し、記録が残る**こと」。
+研究成果ではなくフレームワークの条件である(§9.1 の訂正)。
+
+**組んだもの**
+
+| | |
+| --- | --- |
+| データ | mteb/ESCIReranking の日本語 split (revision `dc2cfaf`)。train 3383 行 / validation 2864 行、150 クエリずつ |
+| 教師 | cl-nagoya/ruri-v3-reranker-310m。全行をあらかじめ採点(25 分) |
+| 学生 | cl-nagoya/ruri-v3-130m の encoder + 無い head (`fresh:`)。119 パラメータ |
+| 損失 | 学生の logit の sigmoid と教師の点の MSE |
+| metric | クエリごとの nDCG@10。ラベルはデータセットのもの |
+| 条件 | batch 8 × seq 128、AdamW lr 2e-5、2 epoch = 846 step |
+
+kohagi 側に `tools/pairs` を足した(parquet → pairs.jsonl)。既存の `tools/dataset` が
+知らないフィールドをそのまま通す設計だったので、**`query_id` と `relevance` が
+行と一緒に最後まで運ばれる**。Torobi はテキストを一度も見ない(§15.19)。
+
+**結果**(19 分 39 秒で完走)
+
+| step | validation loss | nDCG@10 |
+| --- | --- | --- |
+| 0 | 0.4558 | 0.6437 |
+| 150 | 0.0255 | 0.6882 |
+| 300 | 0.0239 | 0.7291 |
+| **450** | 0.0169 | **0.7680** |
+| 600 | 0.0165 | 0.7592 |
+| 750 | 0.0135 | 0.7620 |
+| 846 | 0.0127 | 0.7560 |
+
+教師自身が 0.7770、学習前の学生(head が乱数)が 0.6437。**最良は step 450 の
+0.7680 で、教師の 98.8%** である。130M が 310M の順位付けをほぼ再現した。
+
+**面白いのは後半である。** step 450 以降、損失は下がり続けるのに nDCG は下がる。
+教師の**点**により近づきながら**順位**は悪くなっている。蒸留の損失は metric では
+ないという教科書どおりの現象だが、それを実際に踏んだのは収穫で、§8 が validation と
+`restore` による巻き戻しを窓の一部として持っている理由がこれである。
+
+**記録として残るもの**: journal(858 行。header の provenance、step ごとの span、
+validation の observe、checkpoint、閉じた記録)、checkpoint(manifest が
+config digest・step 846・optimizer 状態・119 パラメータ・**データセットの
+provenance** を持つ)、そして `experiments/records/2026-09-03-esci-jp.json`。
+
+**フレームワークとして分かったこと**
+
+1. **実験は素の Ruby スクリプトで書けた**(§7.3 の予定どおり)。`experiments/`
+   に 1 ファイル、graph とループと metric がそのまま読める形で収まる。Experiment
+   クラスや sweep の器は要らなかったので、まだ作らない。
+2. **検証は 1 パスで取る**。損失と各行のスコアを別々に求めると forward が 2 倍に
+   なる。tap は同じ forward が計算したものを報告するので、`evaluate` の戻り値と
+   `tapped` を一緒に読めばよい。検証 1 回は 150 step 分の学習の約 1/5 を使う。
+3. **seed は 2 つある**。session のもの(fresh な head を引いた種、既定は 0)と、
+   スクリプトが持つデータ順の種。metrics.json は両方を書く。
+
+行の 62% は 128 トークンで切られている(ESCI の商品説明は長い)。教師と学生は
+同じ ids を見ているので比較は成立しているが、**この数字は seq 128 での数字**である。
+
+この時点で Ruby 203 件 / Rust 109 + 28 件。
 
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
