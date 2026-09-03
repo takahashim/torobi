@@ -3,9 +3,9 @@
 require_relative "test_helper"
 require "json"
 
-# Qwen2 as Torobi describes it (docs/plan.md section 15.49).
+# Qwen2 as Torobi describes it (docs/plan.md sections 15.49 and 15.52).
 #
-# Two claims, of two different kinds.
+# Three claims, of three different kinds.
 #
 # **Structural**, against a checkpoint that exists: the graph declares
 # exactly the parameters Qwen2.5-0.5B holds, by name and by shape.
@@ -19,15 +19,94 @@ require "json"
 # no reference implementation to check: a token that has not been read
 # yet cannot have changed anything.
 #
-# What is still missing is the third kind, numbers against the reference
-# implementation. That needs the weights and a second implementation to
-# run them (docs/plan.md 9.2).
+# **Numeric**, against the implementation everyone else is held to: the
+# hidden states and the tokens it thinks come next, from transformers on
+# the CPU in f32 (`rake oracle:qwen2_forward`). This one needs the
+# weights, so it says so and skips where they are not; the other two run
+# anywhere.
 class Qwen2Test < Minitest::Test
   ORACLE = File.expand_path("oracle/qwen2.5-0.5b.json", __dir__)
 
   def oracle = @oracle ||= JSON.parse(File.read(ORACLE))
 
   def published = Torobi::Models::Qwen2.from_hash(oracle.fetch("config"))
+
+  FORWARD = File.expand_path("oracle/qwen2.5-0.5b.forward.json", __dir__)
+  SNAPSHOTS = File.expand_path("~/.cache/huggingface/hub/models--Qwen--Qwen2.5-0.5B/snapshots")
+
+  # The weights, if this machine has them. Unlike the inventory above,
+  # numbers cannot be compared without them.
+  def checkpoint
+    dir = ENV["QWEN2_5_0_5B"] || Dir[File.join(SNAPSHOTS, "*")].max_by { |d| File.mtime(d) }
+    dir if dir && File.file?(File.join(dir.to_s, "model.safetensors"))
+  end
+
+  # The third kind of claim: the numbers, against the implementation
+  # everyone else is held to (docs/plan.md 9.2).
+  #
+  # What this catches and the other two cannot: a rotary base off by a
+  # zero, a norm on the wrong side of a residual, a head tied the wrong
+  # way round. All of those differentiate perfectly and declare exactly
+  # the right parameters.
+  def test_the_numbers_agree_with_the_reference_implementation
+    skip "no reference recorded (rake oracle:qwen2_forward)" unless File.exist?(FORWARD)
+    dir = checkpoint
+    skip "Qwen/Qwen2.5-0.5B is not in the cache (set QWEN2_5_0_5B)" unless dir
+
+    reference = JSON.parse(File.read(FORWARD))
+
+    assert_equal published.hidden_size, reference.fetch("hidden_size")
+
+    reference.fetch("cases").each_with_index do |c, i|
+      hidden, logits = run_case(dir, c.fetch("input_ids"))
+      compare_hidden(hidden, c.fetch("hidden"), "case #{i}")
+      compare_logits(logits, c.fetch("top_logits"), "case #{i}")
+    end
+  end
+
+  # One case through Torobi: the hidden state at every position, and the
+  # scores at the last one, which is the position a decoder is asked
+  # about.
+  def run_case(dir, ids)
+    graph = Torobi::Models::Qwen2.causal_lm(published, seq: ids.size)
+    config = Torobi::GraphConfig.new(models: { m: graph }, train: [])
+    Torobi::Session.open(config, pretrained: { m: File.join(dir, "model.safetensors") }) do |s|
+      s.tap("m.hidden", stat: :full)
+      produced = s.forward(Torobi::Models::Qwen2.batch(published, [ids], seq: ids.size))
+      [s.tapped.fetch("m.hidden").to_a.each_slice(published.hidden_size).to_a,
+       produced.fetch("m.logits").to_a.last(published.vocab_size)]
+    end
+  end
+
+  # Relative to the size of what is being compared: a hidden state deep
+  # in a decoder is tens, and an absolute tolerance would be saying
+  # something about this model rather than about the arithmetic.
+  def compare_hidden(got, want, where)
+    assert_equal want.size, got.size, "#{where}: positions"
+    apart = got.flatten.zip(want.flatten).map { |a, b| (a - b).abs }.max
+    scale = want.flatten.map(&:abs).max
+
+    assert_operator apart / scale, :<, 2e-3,
+                    "#{where}: hidden states differ by #{apart} against #{scale}"
+  end
+
+  # The ids first: which tokens a model thinks come next is what it is
+  # for, and two implementations that disagree about the order are not
+  # the same model however close the numbers are.
+  def compare_logits(got, want, where)
+    mine = got.each_with_index.max_by(want.size) { |value, _| value }
+
+    assert_equal want.map { |t| t.fetch("id") }.first, mine.first.last,
+                 "#{where}: a different token comes next"
+    assert_equal want.map { |t| t.fetch("id") }.sort, mine.map(&:last).sort,
+                 "#{where}: a different set of tokens is likely"
+
+    by_id = mine.to_h { |value, id| [id, value] }
+    apart = want.map { |t| (by_id.fetch(t.fetch("id")) - t.fetch("value")).abs }.max
+    scale = want.map { |t| t.fetch("value").abs }.max
+
+    assert_operator apart / scale, :<, 2e-3, "#{where}: scores differ by #{apart}"
+  end
 
   def test_the_recorded_config_is_the_one_this_builder_understands
     c = published

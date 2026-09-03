@@ -2556,6 +2556,45 @@ loss が f32 でないことは **`GraphConfig` が構築時に断る**。step �
 この時点で Ruby 291 件 / Rust 126 件。次に量子化を考えるとしたら、狙いが 7B 以上に
 動いたときである。
 
+### 15.52 参照実装と数値を突き合わせる足場(2026-09-04)
+
+Qwen2 について言えていなかった 3 つ目、「**数値が参照実装と一致する**」(§9.2) の
+道具立て。1 つ目 (パラメータの名前と形) と 2 つ目 (中心差分と一致、後ろを見ない) は
+重みが無くても言えたが、これは言えない。
+
+**参照は transformers の CPU / float32** にした。plan は §10 で Python MLX を oracle と
+呼んでいるが、ここでは
+**mlx-lm も MLX の上の port である**ことの方が効く: 同じ演算を通るので、
+「配線を間違えている」を捕まえる力が弱い。transformers は他の実装が皆それに対して
+測られている実装であり、CPU の f32 なら bf16 の丸めが比較から消えるので、公差が
+意味を持つ。
+
+記録するもの (`tools/qwen2_reference.py` → `test/oracle/qwen2.5-0.5b.forward.json`):
+
+| | |
+| --- | --- |
+| `input_ids` | **ids を記録する**。tokenize は Torobi の外 (§15.19) なので、oracle も ids で話す |
+| `hidden` | 最終 norm 後の隠れ状態、全位置。Torobi が "hidden" と名付けている値そのもの |
+| `top_logits` | 最後の位置の上位 10 個 (id と値)。全語彙は 152k 個あり、sampler が見る範囲で頭と tie は言える |
+
+比較は**相対**で行う。decoder の深い層の隠れ状態は数十のオーダーになるので、絶対
+公差はこのモデルについての主張になってしまう。logits は**まず id を比べる**: 次に
+来る token が違うなら、数値がいくら近くても同じモデルではない。
+
+テストは重みが無ければ skip する (§15.20 の ruri と同じ作法)。artifact は commit
+するが、**この比較だけは重みのあるマシンでしか動かない**。
+
+**まだ走らせていない。** 手元 (16GB M2) に Qwen の重みが無く、Python 環境も無い。
+32GB M1 側で走らせる:
+
+```
+bundle install && bundle exec rake              # 拡張を建てる
+uv run --with huggingface_hub python -c \
+  "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen2.5-0.5B')"
+bundle exec rake oracle:qwen2_forward           # 参照を記録する
+bundle exec ruby -Ilib -Itest test/qwen2_test.rb
+```
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

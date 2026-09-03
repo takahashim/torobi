@@ -119,6 +119,17 @@ namespace :oracle do
        "test/oracle/qwen2.5-0.5b.json"
   end
 
+  # The numbers, from the implementation everyone else is held to. Needs
+  # the weights (about 1GB) and a Python environment, so it is `uv run`
+  # with the dependencies named on the command line rather than anything
+  # installed here.
+  desc "record what transformers answers for Qwen2.5-0.5B, for test/oracle"
+  task :qwen2_forward do
+    sh "uv", "run", "--with", "transformers", "--with", "torch",
+       "python", "tools/qwen2_reference.py",
+       "--out", "test/oracle/qwen2.5-0.5b.forward.json"
+  end
+
   desc "record what cl-nagoya/ruri-v3-reranker-310m holds, for test/oracle"
   task :reranker do
     dir = ENV["RURI_V3_RERANKER_310M"] ||
