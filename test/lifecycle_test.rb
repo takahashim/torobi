@@ -31,23 +31,51 @@ class LifecycleTest < Minitest::Test
 
   # A session serves one thread. A second one used to panic inside a
   # RefCell, and a panic that escapes becomes a Ruby fatal: the process
-  # ended. Now it is told it is busy, and both threads survive.
-  def test_a_second_thread_is_told_the_session_is_busy_rather_than_ending_it
+  # ended. Now a watcher reads the last completed step's numbers, and both
+  # threads survive (notes/SESSION_CONCURRENCY_SPEC.md section 4).
+  def test_a_second_thread_watching_reads_the_last_step_rather_than_refusing
     session = Torobi::Session.open(config, weights)
-    busy = 0
+    seen = []
+    refused = []
     reader = Thread.new do
-      200.times do
-        session.loss
-      rescue Torobi::Busy
-        busy += 1
+      400.times do
+        seen << [session.step, session.loss, session.lr, session.seed]
+      rescue StandardError => e
+        refused << e.class
       end
     end
     session.run([batch] * 40)
     reader.join
     session.close
 
-    assert_operator busy, :>, 0, "the reader should have found the session busy"
+    assert_empty refused, "watching should never refuse"
+    refute_empty seen
+    # Only steps the run actually passed through, and never going backwards.
+    steps = seen.map(&:first)
+
+    assert_equal steps, steps.sort
+    assert_operator steps.max, :<=, 40
+    assert(seen.none? { |_, loss, _, _| loss.nil? })
     assert_equal 40, Torobi::Session.open(config, weights) { |s| s.run([batch] * 40); s.step }
+  end
+
+  # Watching is not serving. A second thread that tries to *use* the engine
+  # while a step runs is still told it is busy.
+  def test_a_second_thread_that_uses_the_engine_is_told_it_is_busy
+    session = Torobi::Session.open(config, weights)
+    busy = 0
+    other = Thread.new do
+      200.times do
+        session.fetch("m.l.bias")
+      rescue Torobi::Busy
+        busy += 1
+      end
+    end
+    session.run([batch] * 40)
+    other.join
+    session.close
+
+    assert_operator busy, :>, 0, "using the engine from a second thread should say busy"
   end
 
   # Closing releases the engine, and everything afterwards refuses rather
@@ -63,9 +91,13 @@ class LifecycleTest < Minitest::Test
 
     e = assert_raises(Torobi::SessionClosed) { session.step!(batch) }
     assert_match(/closed/, e.message)
-    assert_raises(Torobi::SessionClosed) { session.loss }
     # Not a StepError: a step error means the session is still yours.
     refute_kind_of Torobi::StepError, e
+
+    # Watching still answers. A closed session says where it got to, which
+    # is what a caller reporting on a finished run needs.
+    assert_equal 1, session.step
+    refute_predicate session.loss, :nan?
   end
 
   # The block form owns the lifetime, so the device memory goes when the

@@ -83,6 +83,34 @@ class InterruptTest < Minitest::Test
     session.close
   end
 
+  # The numbers a watcher reads are a state the run passed through, never a
+  # step in progress and never one that was rolled back.
+  def test_a_watcher_never_sees_a_step_that_did_not_happen
+    session = Torobi::Session.open(config, weights)
+    readings = Queue.new
+    # Sampled rather than spun: the point is to catch the run at many
+    # moments, not to see how fast a read is.
+    watcher = Thread.new { loop { readings << [session.step, session.loss]; sleep 0.0005 } }
+    steps = 30
+    steps.times { session.step!(batch) }
+    watcher.kill
+    watcher.join
+
+    seen = Array.new(readings.size) { readings.pop }
+    refute_empty seen
+    seen.each do |step, loss|
+      assert_operator step, :<=, steps, "no step the run has not reached"
+      # NaN belongs to a session that has taken no step at all; after that
+      # every published loss is one some step produced.
+      assert(step.zero? || !loss.nan?, "step #{step} published a loss of #{loss}")
+    end
+    # And the readings only ever move forward.
+    steps_seen = seen.map(&:first)
+
+    assert_equal steps_seen.sort, steps_seen
+    session.close
+  end
+
   # A signal is the case a caller actually meets: Ctrl-C during training.
   # In a subprocess, because an unhandled INT would end this one.
   def test_a_signal_during_a_span_leaves_the_session_usable

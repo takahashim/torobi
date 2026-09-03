@@ -35,6 +35,38 @@ use torobi_engine::Session as EngineSession;
 #[magnus::wrap(class = "Torobi::Native::Session", free_immediately, size)]
 struct Session {
     slot: Mutex<Slot>,
+    /// The numbers a watcher reads, kept apart from the engine so that
+    /// reading them never waits on a step. Its lock is held for a copy and
+    /// never across the GVL boundary.
+    snapshot: Mutex<Snapshot>,
+}
+
+/// What the last completed step left behind.
+///
+/// A session serves one thread, but watching it is not serving it: a
+/// progress bar or a metrics thread wants the numbers, not the engine.
+/// Answering "busy" to those was the shape the spec objected to, and it is
+/// what this exists to avoid (notes/SESSION_CONCURRENCY_SPEC.md 3, 4).
+///
+/// Never a partial step. It is published after the engine has committed,
+/// so a reader sees a state the run actually passed through.
+#[derive(Clone, Copy)]
+struct Snapshot {
+    step: usize,
+    loss: f32,
+    lr: f32,
+    seed: u64,
+}
+
+impl Snapshot {
+    fn of(engine: &EngineSession) -> Self {
+        Self {
+            step: engine.step(),
+            loss: engine.loss(),
+            lr: engine.lr(),
+            seed: engine.seed(),
+        }
+    }
 }
 
 /// What a session is, from the outside.
@@ -163,6 +195,7 @@ impl Session {
         })?;
         EngineSession::open_with(&graph_json, &weights_json, optimizer)
             .map(|session| Self {
+                snapshot: Mutex::new(Snapshot::of(&session)),
                 slot: Mutex::new(Slot::Ready(Box::new(session))),
             })
             .map_err(|e| to_error(ruby, e))
@@ -232,6 +265,9 @@ impl Session {
         };
         match catch_unwind(AssertUnwindSafe(|| work(&mut engine))) {
             Ok(result) => {
+                // Published before the engine goes back, so a reader never
+                // sees a Ready session whose numbers are a step stale.
+                self.publish(&engine);
                 self.put_back(Ok(engine));
                 Ran::Finished(result)
             }
@@ -256,6 +292,18 @@ impl Session {
                 Err(refusal)
             }
         }
+    }
+
+    /// Copies the engine's numbers out for watchers to read.
+    fn publish(&self, engine: &EngineSession) {
+        let mut guard = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Snapshot::of(engine);
+    }
+
+    /// The last published numbers. Never refuses: a closed or poisoned
+    /// session still says where it got to.
+    fn watch(&self) -> Snapshot {
+        *self.snapshot.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Puts the engine back, or records why there is none to put back.
@@ -345,16 +393,16 @@ impl Session {
         }
     }
 
-    fn step(ruby: &Ruby, rb_self: &Self) -> Result<usize, Error> {
-        rb_self.read(ruby, |engine| engine.step())
+    fn step(&self) -> usize {
+        self.watch().step
     }
 
-    fn loss(ruby: &Ruby, rb_self: &Self) -> Result<f32, Error> {
-        rb_self.read(ruby, |engine| engine.loss())
+    fn loss(&self) -> f32 {
+        self.watch().loss
     }
 
-    fn lr(ruby: &Ruby, rb_self: &Self) -> Result<f32, Error> {
-        rb_self.read(ruby, |engine| engine.lr())
+    fn lr(&self) -> f32 {
+        self.watch().lr
     }
 
     fn set_lr(ruby: &Ruby, rb_self: &Self, lr: f32) -> Result<f32, Error> {
@@ -364,8 +412,8 @@ impl Session {
         })
     }
 
-    fn seed(ruby: &Ruby, rb_self: &Self) -> Result<u64, Error> {
-        rb_self.read(ruby, |engine| engine.seed())
+    fn seed(&self) -> u64 {
+        self.watch().seed
     }
 
     fn set_seed(ruby: &Ruby, rb_self: &Self, seed: u64) -> Result<u64, Error> {
