@@ -95,6 +95,7 @@ struct Names {
     parameters: Vec<String>,
     inputs: Vec<String>,
     nodes: Vec<String>,
+    outputs: Vec<String>,
 }
 
 impl Names {
@@ -115,6 +116,9 @@ impl Names {
             nodes: engine
                 .node_names()
                 .expect("an open session answers node_names"),
+            outputs: engine
+                .output_names()
+                .expect("an open session answers output_names"),
         }
     }
 }
@@ -566,6 +570,21 @@ impl Session {
         rb_self.with_engine(ruby, |engine| engine.evaluate(&batch))
     }
 
+    /// Named model outputs for one batch: [name, dtype, shape, bytes]
+    /// each. The forward an evaluation runs, stopping before the
+    /// objective, with nothing about the run moved.
+    fn forward(ruby: &Ruby, rb_self: &Self, batch: RHash, of: Vec<String>) -> Result<RArray, Error> {
+        let batch = read_batch(ruby, batch)?;
+        let produced = rb_self.with_engine(ruby, |engine| engine.forward(&batch, &of))?;
+        tensors_to_ruby(ruby, produced)
+    }
+
+    /// Every model output a forward may ask for. Answered from what was
+    /// taken at open, like the other names.
+    fn output_names(ruby: &Ruby, rb_self: &Self) -> RArray {
+        ruby.ary_from_vec(rb_self.names.outputs.clone())
+    }
+
     /// Writes the run's state and returns where it landed. `run` is the
     /// caller's own record (epoch, batch position, sampler state) as JSON;
     /// the engine writes it verbatim and never reads it.
@@ -936,6 +955,8 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("tap_node", method!(Session::tap, 2))?;
     class.define_method("untap", method!(Session::untap, 1))?;
     class.define_method("taps", method!(Session::taps, 0))?;
+    class.define_method("forward", method!(Session::forward, 2))?;
+    class.define_method("output_names", method!(Session::output_names, 0))?;
     class.define_method("node_names", method!(Session::node_names, 0))?;
     class.define_method("tapped", method!(Session::tapped, 0))?;
     class.define_method("parameter_paths", method!(Session::parameter_paths, 0))?;

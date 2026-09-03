@@ -22,6 +22,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
+use mlx_rs::transforms::eval;
 
 use crate::executor::{self, Taps};
 use crate::interp::Stat;
@@ -135,6 +136,11 @@ impl SessionCore {
     /// Every name a tap could ask for.
     pub(crate) fn node_names(&self) -> Vec<String> {
         self.plan.node_names().to_vec()
+    }
+
+    /// Every model output a forward could ask for.
+    pub(crate) fn output_names(&self) -> Vec<String> {
+        self.plan.output_names().to_vec()
     }
 
     /// What the most recent pass's taps saw, by name.
@@ -255,6 +261,64 @@ impl SessionCore {
             executor::evaluate(&self.plan, self.state.pass().params, &fields, &self.taps)?;
         self.record(tapped)?;
         Ok(loss.item::<f32>())
+    }
+
+    /// Named model outputs for `batch`, without taking a step.
+    ///
+    /// The forward `evaluate` runs, stopping before the objective: what
+    /// comes back is what a model produced (an embedding, a set of
+    /// logits) rather than the loss over it. No gradients, no randomness,
+    /// and nothing about the run moves.
+    ///
+    /// `wanted` empty asks for every output there is. The taps report the
+    /// pass, except any on the objective, which did not run.
+    pub(crate) fn forward(
+        &mut self,
+        batch: &Batch,
+        wanted: &[String],
+    ) -> Result<Vec<(String, Tensor)>> {
+        let names = self.wanted(wanted)?;
+        let fields = self.plan.bind_models(batch)?;
+        let mut tapped = executor::Tapped::new();
+        let produced = executor::produce(
+            &self.plan,
+            self.state.pass().params,
+            &fields,
+            &self.taps,
+            &mut tapped,
+        )?;
+        let mut found = Vec::with_capacity(names.len());
+        for name in names {
+            let (model, output) = name
+                .split_once('.')
+                .expect("an output name is qualified by its model");
+            let value = produced
+                .get(&(model.to_string(), output.to_string()))
+                .expect("output_names comes from the same programs that just ran");
+            found.push((name, value.clone()));
+        }
+        eval(found.iter().map(|(_, value)| value))?;
+        self.record(tapped)?;
+        found
+            .into_iter()
+            .map(|(name, value)| Ok((name, to_tensor(&value)?)))
+            .collect()
+    }
+
+    /// Which outputs a forward was asked for, refusing a name no model
+    /// declares rather than returning less than was asked for.
+    fn wanted(&self, wanted: &[String]) -> Result<Vec<String>> {
+        if wanted.is_empty() {
+            return Ok(self.plan.output_names().to_vec());
+        }
+        for name in wanted {
+            anyhow::ensure!(
+                self.plan.output_names().iter().any(|n| n == name),
+                "no output is named {name:?} here (this run produces {:?})",
+                self.plan.output_names()
+            );
+        }
+        Ok(wanted.to_vec())
     }
 
     /// Gradients with respect to named batch fields, by field name.
@@ -558,6 +622,18 @@ impl Session {
     pub fn evaluate(&mut self, batch: &Batch) -> Outcome<f32> {
         let core = self.core_mut()?;
         runtime().execute(|| core.evaluate(batch))
+    }
+
+    /// Named model outputs for `batch`: the forward an evaluation runs,
+    /// stopping before the objective. Nothing about the run moves.
+    pub fn forward(&mut self, batch: &Batch, wanted: &[String]) -> Outcome<Vec<(String, Tensor)>> {
+        let core = self.core_mut()?;
+        runtime().execute(|| core.forward(batch, wanted))
+    }
+
+    /// Every model output a forward can be asked for, qualified.
+    pub fn output_names(&self) -> Outcome<Vec<String>> {
+        Ok(self.core()?.output_names())
     }
 
     /// Gradients with respect to named batch fields, by field name. The
@@ -924,6 +1000,69 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("accumulated"), "{e}");
+    }
+
+    /// A forward is how a run is asked what it produces, rather than what
+    /// its loss is: two models, both of them answered, each qualified by
+    /// the model that produced it.
+    #[test]
+    fn a_forward_brings_back_what_the_models_produced() {
+        let mut session = session(fixtures::teacher_and_student());
+        assert_eq!(
+            session.output_names().unwrap(),
+            vec!["student.out", "teacher.out"]
+        );
+
+        let produced = session
+            .forward(&fixtures::batch_x(&[1.0, 1.0]), &[])
+            .unwrap();
+        let names: Vec<_> = produced.iter().map(|(name, _)| name.as_str()).collect();
+
+        assert_eq!(names, vec!["student.out", "teacher.out"]);
+        // x * scale, with the student's [1, 1] and the teacher's [3, 4].
+        close(&values(&produced[0].1), &[1.0, 1.0]);
+        close(&values(&produced[1].1), &[3.0, 4.0]);
+        assert_eq!(produced[0].1.shape, vec![1, 2]);
+    }
+
+    /// And asked for one of them by name. A name no model declares is
+    /// refused with what there is, rather than answered with less than was
+    /// asked for.
+    #[test]
+    fn a_forward_answers_the_outputs_it_was_asked_for() {
+        let mut session = session(fixtures::teacher_and_student());
+        let batch = fixtures::batch_x(&[1.0, 1.0]);
+
+        let one = session.forward(&batch, &["teacher.out".to_string()]).unwrap();
+
+        assert_eq!(one.len(), 1);
+        close(&values(&one[0].1), &[3.0, 4.0]);
+
+        let e = session
+            .forward(&batch, &["teacher.hidden".to_string()])
+            .unwrap_err()
+            .to_string();
+
+        assert!(e.contains("no output is named"), "{e}");
+        assert!(e.contains("teacher.out"), "{e}");
+    }
+
+    /// Nothing about the run moves: it is the evaluation pass, and the
+    /// counters, the loss a watcher reads and the parameters are all where
+    /// they were.
+    #[test]
+    fn a_forward_moves_nothing() {
+        let mut session = session(fixtures::scaled_mean());
+        let batch = fixtures::batch_x(&[1.0, 1.0]);
+        session.run_step(&batch).unwrap();
+        let (step, loss) = (session.step().unwrap(), session.loss().unwrap());
+        let before = session.fetch("m.w").unwrap();
+
+        session.forward(&batch, &[]).unwrap();
+
+        assert_eq!(session.step().unwrap(), step);
+        assert_eq!(session.loss().unwrap(), loss);
+        close(&values(&session.fetch("m.w").unwrap()), &values(&before));
     }
 
     #[test]

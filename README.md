@@ -90,6 +90,32 @@ cache.step(parts)   # one optimizer step over every part
 `test/contrastive_test.rb` is the whole of it on a tiny model, held to
 the step the same batch would have taken in one piece.
 
+## Asking a model what it produces
+
+Training asks what the loss is. Everything else asks what the model
+says, which is a different question and now a first-class one:
+
+```ruby
+Torobi::Session.open(
+  Torobi::GraphConfig.new(models: { m: embedder }, train: []),
+  pretrained: { m: "runs/001/model.safetensors" }
+) do |s|
+  s.output_names                             # => ["m.embedding"]
+  s.forward(batch)["m.embedding"]            # => TensorData [rows, dim]
+  s.forward(batch, outputs: ["m.logits"])    # or just the one
+end
+```
+
+It is the pass `evaluate` runs, stopping before the objective: no
+gradients, no randomness, and nothing about the run moves. The batch
+needs what the models read and no more, so a run trained against labels
+does not need them to be asked what it thinks. `train: []` is a run
+opened to be read, and needs no loss at all.
+
+What this is not is serving. No HTTP, no tokenizer, no continuous
+batching, no KV cache, no generation loop: those belong to whatever
+serves the model (docs/plan.md section 14).
+
 ## Running a long one
 
 A training run belongs in a process of its own with a cap on what it may

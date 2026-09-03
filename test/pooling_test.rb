@@ -44,24 +44,17 @@ class PoolingTest < Minitest::Test
     { params: }
   end
 
-  # A run opened to be read rather than trained. It still needs a scalar
-  # to call the loss, and what that scalar is does not matter: nothing
-  # here differentiates it.
+  # A run opened to be read rather than trained: nothing is trained, so
+  # nothing has to be a loss, and what it produces is asked for by name.
   def read_only(graph)
-    Torobi::GraphConfig.new(
-      models: { m: graph }, train: [],
-      objective: Torobi.objective(m: graph) do |g|
-        g.output :loss, g.mean(g.from_model(:m, :embedding))
-      end
-    )
+    Torobi::GraphConfig.new(models: { m: graph }, train: [])
   end
 
   def embed(rows, seq: SEQ, pooling: :mean)
     graph = embedder(seq:, pooling:)
     Torobi::Session.open(read_only(graph), weights: weights(graph)) do |s|
-      s.tap("m.embedding", stat: :full)
-      s.evaluate(Torobi::Models::ModernBERT.batch(config, rows, seq:, pooling:))
-      s.tapped.fetch("m.embedding").to_a.each_slice(config.hidden_size).to_a
+      batch = Torobi::Models::ModernBERT.batch(config, rows, seq:, pooling:)
+      s.forward(batch)["m.embedding"].to_a.each_slice(config.hidden_size).to_a
     end
   end
 
@@ -71,11 +64,12 @@ class PoolingTest < Minitest::Test
   # second implementation of the encoder.
   def test_the_mean_is_over_the_tokens_a_row_actually_has
     graph = embedder
-    hidden, pooled = Torobi::Session.open(read_only(graph), weights: weights(graph)) do |s|
-      s.tap("m.hidden", stat: :full).tap("m.embedding", stat: :full)
-      s.evaluate(Torobi::Models::ModernBERT.batch(config, [LONG, SHORT], seq: SEQ,
-                                                  pooling: :mean))
-      [s.tapped.fetch("m.hidden").to_a, s.tapped.fetch("m.embedding").to_a]
+    pooled, hidden = Torobi::Session.open(read_only(graph), weights: weights(graph)) do |s|
+      # The vector is an output and is asked for by name; what it was
+      # pooled from is inside the graph, which is what a tap is for.
+      s.tap("m.hidden", stat: :full)
+      batch = Torobi::Models::ModernBERT.batch(config, [LONG, SHORT], seq: SEQ, pooling: :mean)
+      [s.forward(batch)["m.embedding"].to_a, s.tapped.fetch("m.hidden").to_a]
     end
 
     dim = config.hidden_size
@@ -113,7 +107,7 @@ class PoolingTest < Minitest::Test
     graph = embedder
     over_everything = Torobi::Session.open(read_only(graph), weights: weights(graph)) do |s|
       s.tap("m.hidden", stat: :full)
-      s.evaluate(Torobi::Models::ModernBERT.batch(config, [SHORT], seq: SEQ, pooling: :mean))
+      s.forward(Torobi::Models::ModernBERT.batch(config, [SHORT], seq: SEQ, pooling: :mean))
       states = s.tapped.fetch("m.hidden").to_a.each_slice(config.hidden_size).to_a
       Array.new(config.hidden_size) { |j| states.sum { |state| state[j] } / SEQ }
     end

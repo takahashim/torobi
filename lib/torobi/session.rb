@@ -140,7 +140,7 @@ module Torobi
       provenance = Provenance.of(config, dataset:,
                                  extra: { "optimizer" => optimizer, "seed" => seed })
       journal ||= Journal.new(provenance, io:) if io
-      session = new(native, journal:, provenance:)
+      session = new(native, journal:, provenance:, loss: config.loss?)
       journal&.note(step: 0, event: "opened", seed:,
                     optimizer: optimizer.transform_keys(&:to_s))
       return session unless block_given?
@@ -154,12 +154,18 @@ module Torobi
       end
     end
 
-    def initialize(native, journal: nil, provenance: nil)
+    def initialize(native, journal: nil, provenance: nil, loss: true)
       @native = native
       @journal = journal
       @provenance = provenance
+      @loss = loss
       @hooks = Hooks.new(self)
     end
+
+    # Whether this run has a loss. A config that trains nothing and
+    # declares no objective has none, and everything that would move
+    # something refuses rather than inventing one (`GraphConfig#loss?`).
+    def loss? = @loss
 
     # What this session is recording into, if anything.
     attr_reader :journal
@@ -189,6 +195,7 @@ module Torobi
     # the loss. The GVL is released for the step, so other Ruby threads
     # proceed.
     def step!(batch)
+      needs_loss!("a step")
       packed = Batch.pack(batch)
       loss = atomically do
         value = @native.run_step(packed)
@@ -222,6 +229,7 @@ module Torobi
     # Freezing and `checkpoint!` refuse while parts are waiting, because
     # one moves what a gradient is for and the other does not hold them.
     def accumulate(batch)
+      needs_loss!("accumulating")
       atomically do
         loss = @native.accumulate(Batch.pack(batch))
         @journal&.observe(step: @native.step, accumulated: @native.accumulated, loss:)
@@ -296,7 +304,39 @@ module Torobi
     # Not journalled. An evaluation changes nothing, so a replay has nothing
     # to apply; `observe` is how a decision made on one gets recorded.
     def evaluate(batch)
+      needs_loss!("evaluate")
       @native.evaluate(Batch.pack(batch))
+    end
+
+    # What the models produce for `batch`, by qualified output name.
+    #
+    # The forward `evaluate` runs, stopping before the objective: what
+    # comes back is what a model produced rather than the loss over it.
+    # This is how a fine-tuned model is used to look at something, which
+    # is what it was fine-tuned for.
+    #
+    #   s.forward(batch)                         # => {"m.embedding" => TensorData}
+    #   s.forward(batch, outputs: ["m.logits"])  # only that one
+    #
+    # No gradients, no randomness (dropout stands aside), and nothing
+    # about the run moves: not the parameters, not the counters, not what
+    # `loss` reports. Not journalled, for the same reason `evaluate` is
+    # not: nothing happened that a replay would apply.
+    #
+    # The batch needs what the models read and no more. A run that trains
+    # against labels does not need them to be asked what it thinks.
+    #
+    # The taps report it, as they report any pass, except any on the
+    # objective: it does not run here, so it has nothing to say.
+    #
+    # Every value is a TensorData, whatever its shape. What an output is
+    # for is its shape, and a caller that wants the number out of a
+    # scalar can say `.to_a.first`.
+    def forward(batch, outputs: nil)
+      wanted = Array(outputs).map(&:to_s)
+      @native.forward(Batch.pack(batch), wanted).to_h do |name, dtype, shape, bytes|
+        [name, TensorData.new(shape, bytes, dtype: dtype.to_sym)]
+      end
     end
 
     # The same batch for `steps` steps. For fixed-data spikes and tests;
@@ -518,6 +558,11 @@ module Torobi
     # ("student.hidden"). Settled at open, like `parameter_paths`.
     def node_names = @native.node_names
 
+    # Every output `forward` could ask for, qualified by the model that
+    # declares it ("student.embedding"). Settled at open, like the rest of
+    # the names.
+    def output_names = @native.output_names
+
     # What the last step's taps saw, by name. Read-only, so it needs no
     # journal entry of its own; `observe` is how a decision made on one
     # gets recorded.
@@ -566,6 +611,7 @@ module Torobi
     #
     # The fields must be in the batch, and the answer has their shapes.
     def field_gradients(batch, of:)
+      needs_loss!("a gradient")
       names = Array(of).map(&:to_s)
       @native.field_gradients(Batch.pack(batch), names).to_h do |name, dtype, shape, bytes|
         [name, TensorData.new(shape, bytes, dtype: dtype.to_sym)]
@@ -574,12 +620,28 @@ module Torobi
 
     # The gradients for `batch`, by parameter path. Does not update anything.
     def gradients(batch)
+      needs_loss!("a gradient")
       @native.gradients(Batch.pack(batch)).to_h do |path, dtype, shape, bytes|
         [path, TensorData.new(shape, bytes, dtype: dtype.to_sym)]
       end
     end
 
     private
+
+    # What a run without a loss cannot do.
+    #
+    # Refused here rather than at the boundary, because what is missing is
+    # a fact about the config: nothing is trained and no output is a
+    # scalar, so there is nothing to differentiate or report. `forward` is
+    # what such a run is for.
+    def needs_loss!(what)
+      return if @loss
+
+      raise ConfigError,
+            "#{what} needs a loss, and this run has none: nothing is trained and " \
+            "no model output is an f32 scalar. That is what a config opened for " \
+            "inference looks like, and `forward` is what it can do."
+    end
 
     # Inline weights as JSON: a TensorData spells its numbers out here.
     #

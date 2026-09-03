@@ -29,6 +29,12 @@ between two versions people have.
   checkpoint's own parameter names so a model imports with no renaming.
   `classifier` for a cross-encoder, `embedder` for a sentence embedder,
   and `batch` for the ids, masks and pooling weights a step needs.
+- **`Session#forward`**, which asks a model what it produces rather than
+  what its loss is: named outputs as `TensorData`, from the same
+  deterministic pass `evaluate` runs, stopping before the objective. A
+  config that trains nothing (`train: []`) needs no loss at all, which
+  is what a run opened for inference looks like. Serving is still out of
+  scope: no HTTP, no tokenizer, no KV cache.
 - **`Torobi::GradCache`**, which trains a contrastive batch larger than
   the machine can hold, landing where the whole batch would have.
 - **`Torobi::Export`**: a run's weights written as a HuggingFace /

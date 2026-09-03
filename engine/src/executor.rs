@@ -24,6 +24,49 @@ pub type Taps = BTreeMap<String, Stat>;
 /// What the taps saw, by node name.
 pub type Tapped = BTreeMap<String, Array>;
 
+/// What the models produced, by model and output name.
+pub type Produced = BTreeMap<(String, String), Array>;
+
+/// Runs the models and hands back what they produced.
+///
+/// The objective does not run: what it produces is the loss, and this is
+/// for a caller that wants a model's own output (an embedding, a set of
+/// logits). No randomness, so it is the evaluation pass that `evaluate`
+/// is, and nothing here is stateful, so nothing about the run moves.
+///
+/// The taps report it, as they report any pass, except the objective's:
+/// what did not run has nothing to say.
+pub fn produce(
+    plan: &Plan,
+    params: &[Array],
+    fields: &BTreeMap<String, Array>,
+    taps: &Taps,
+    collected: &mut Tapped,
+) -> Result<Produced> {
+    let mut produced = Produced::new();
+    for Model {
+        name,
+        program,
+        slice,
+    } in &plan.models
+    {
+        let inputs = resolve(program, fields, &produced, name)?;
+        let values = interp::evaluate_tapped(
+            program,
+            &params[slice.clone()],
+            &inputs,
+            None,
+            name,
+            taps,
+            collected,
+        )?;
+        for (output, value) in values {
+            produced.insert((name.clone(), output), value);
+        }
+    }
+    Ok(produced)
+}
+
 /// Runs every model, then the objective over their outputs.
 ///
 /// `rng` is both the randomness and the mode: a key means a training pass,

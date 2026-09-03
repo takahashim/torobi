@@ -2322,6 +2322,54 @@ checkpoint がディスクに要る)。
 **まだ 1 度も走っていない。** mlx-prebuilt のときと同じで、最初の 1 回が
 「image に何があるか」を確かめる回になる。
 
+### 15.47 学習したモデルに「何を出すか」を訊ける(2026-09-04)
+
+推論についての指摘: 内部的には forward できているのに、利用者からは
+「validation 用の `evaluate` を tap で転用する」形になっている。半分ある、と。
+その通りだった。`executor::forward` は**全モデル出力を計算してから loss 以外を
+捨てている** (`executor.rs:41,70`) ので、足りないのは経路ではなく API である。
+
+**`Session#forward(batch, outputs: nil)`** を第一級にした。返すのは
+`{"m.embedding" => TensorData}`。`evaluate` と同じ pass で、**objective の手前で
+止まる**。
+
+| | |
+| --- | --- |
+| 勾配 | 取らない |
+| 乱数 | 引かない (dropout は退く) |
+| run の状態 | step も loss も parameter も動かない |
+| journal | 書かない (`evaluate` と同じ理由: replay が適用するものが無い) |
+| batch | **models が読むものだけ**。label で学習した run に、意見を訊くのに label は要らない |
+| tap | 発火する。ただし objective のものは走っていないので黙る |
+
+objective を走らせないので `Plan::bind` を `bind_models` に分けた。これが
+「label が要らない」の実装であり、同時に**訊くだけなら loss を計算しない**という
+ことでもある。
+
+**loss を要らなくした。** これも指摘の一部で、読むだけの run にも
+「loss を作るためだけの objective」が要った。規則を 1 つ足した:
+**何も train しない config は loss を要求されない**。
+
+```ruby
+Torobi::GraphConfig.new(models: { m: embedder }, train: [])   # これで開く
+```
+
+`GraphConfig#loss?` が「objective があるか、単一モデルの単一出力が f32 スカラーか」
+を答え、無い run では `step!` / `evaluate` / `accumulate` / `gradients` が
+**境界に届く前に**理由付きで拒否する (engine で shape の話として落ちるのではなく)。
+`train: []` かつ出力がスカラー、という既存の使い方 (GradCache の loss session) は
+`loss?` が true のままなので影響を受けない。
+
+`test/pooling_test.rb` がこの変更の証拠になっている: tap と偽の objective が消えて、
+`s.forward(batch)["m.embedding"]` になった。tap は「pooling の入力である hidden を
+見る」テストにだけ残っており、これは内部を覗く話なので tap が正しい道具である。
+
+**serving は入れない。** HTTP、tokenizer、continuous batching、KV cache、生成
+ループは Torobi の責務ではない (§14)。ここで足したのは「fine-tune したものを
+Ruby から 1 回 forward して名前付き出力を得る」だけである。
+
+Rust 3 件 / Ruby 10 件を足して、この時点で Ruby 256 件 / Rust 125 + 40 件。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

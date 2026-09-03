@@ -49,7 +49,7 @@ module Torobi
       if objective
         check_objective(objective)
         check_wiring(objective, models)
-      else
+      elsif !train.empty?
         check_single_loss(models)
       end
       metadata = IR::Json.primitive!(metadata.transform_keys(&:to_s), where: "metadata")
@@ -98,6 +98,25 @@ module Torobi
 
     def digest
       Digest::SHA256.hexdigest(canonical_json)
+    end
+
+    # Whether this config has a loss: something to train on, to evaluate,
+    # or to differentiate.
+    #
+    # An objective's is the one it declares. Without an objective it is the
+    # single model's single scalar output, which is the shorthand a spike
+    # is written in. A config that trains nothing and declares neither has
+    # no loss at all, and is one opened to look at what a model produces
+    # (`Session#forward`) rather than to move it.
+    def loss?
+      return true if objective
+      return false unless models.size == 1
+
+      graph = models.values.first
+      return false unless graph.outputs.size == 1
+
+      shape, dtype = graph.output_signature(graph.outputs.keys.first)
+      shape&.empty? && dtype == :f32
     end
 
     def self.from_h(h)
@@ -169,6 +188,10 @@ module Torobi
 
     # Without an objective, the single model's own single output is the
     # loss, and the same demands apply to it.
+    #
+    # Only when something is trained. A config that trains nothing is not
+    # obliged to produce a number nobody will differentiate, and `train: []`
+    # is how a run is opened to be read rather than moved.
     def check_single_loss(models)
       unless models.size == 1
         raise ConfigError,
@@ -190,7 +213,8 @@ module Torobi
       raise ConfigError,
             "without an objective, model #{name.inspect}'s output " \
             "#{names.first.inspect} is the loss, so it must be an f32 scalar, " \
-            "and it is #{dtype}#{shape.inspect}"
+            "and it is #{dtype}#{shape.inspect}. A config that trains nothing " \
+            "(train: []) needs no loss, and can be asked what it produces."
     end
 
     # An objective may read a model output only if that model declares it,

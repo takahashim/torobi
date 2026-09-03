@@ -112,6 +112,7 @@ pub struct Plan {
     input_names: Vec<String>,
     /// Every name a tap could ask for.
     node_names: Vec<String>,
+    output_names: Vec<String>,
 }
 
 impl Plan {
@@ -183,6 +184,7 @@ impl Plan {
         let plan = Self {
             input_names: input_names(&models, objective.as_ref()),
             node_names: node_names(&models, objective.as_ref()),
+            output_names: output_names(&models),
             models,
             objective,
             paths,
@@ -212,6 +214,12 @@ impl Plan {
         &self.node_names
     }
 
+    /// Every model output a forward pass can be asked for, qualified by
+    /// the model that declares it.
+    pub fn output_names(&self) -> &[String] {
+        &self.output_names
+    }
+
     pub fn index_of(&self, path: &str) -> Option<usize> {
         self.paths.iter().position(|p| p == path)
     }
@@ -235,6 +243,24 @@ impl Plan {
     /// A null dimension is symbolic and may differ from step to step
     /// (docs/plan.md 6.2).
     pub fn bind(&self, batch: &BTreeMap<String, Tensor>) -> Result<BTreeMap<String, Array>> {
+        self.bind_programs(batch, self.programs())
+    }
+
+    /// The same, for the models alone.
+    ///
+    /// What a forward pass needs: it stops before the objective, so the
+    /// objective's own fields (the labels, a teacher's scores) are not
+    /// something to ask a caller for. A batch that carries them anyway is
+    /// still accepted, since they are fields this run reads.
+    pub fn bind_models(&self, batch: &BTreeMap<String, Tensor>) -> Result<BTreeMap<String, Array>> {
+        self.bind_programs(batch, self.models.iter().map(|m| &m.program))
+    }
+
+    fn bind_programs<'a>(
+        &self,
+        batch: &BTreeMap<String, Tensor>,
+        programs: impl Iterator<Item = &'a Program>,
+    ) -> Result<BTreeMap<String, Array>> {
         for name in batch.keys() {
             anyhow::ensure!(
                 self.input_names.iter().any(|w| w == name),
@@ -244,7 +270,7 @@ impl Plan {
         }
 
         let mut fields = BTreeMap::new();
-        for program in self.programs() {
+        for program in programs {
             for spec in &program.inputs {
                 let Some(field) = spec.batch_field() else {
                     continue;
@@ -454,6 +480,24 @@ fn node_names(models: &[Model], objective: Option<&Program>) -> Vec<String> {
                 .into_iter()
                 .flat_map(|o| o.node_names().map(|n| qualified(OBJECTIVE, n))),
         )
+        .collect()
+}
+
+/// Every model output, qualified ("student.embedding").
+///
+/// The objective's outputs are not among them: its output is the loss,
+/// which `evaluate` returns, and what this names is what a model
+/// produces. Qualified for the reason a parameter path is: two models of
+/// one architecture both declare "embedding".
+fn output_names(models: &[Model]) -> Vec<String> {
+    models
+        .iter()
+        .flat_map(|m| {
+            m.program
+                .outputs
+                .iter()
+                .map(|(name, _)| qualified(&m.name, name))
+        })
         .collect()
 }
 
