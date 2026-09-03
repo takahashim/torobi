@@ -116,6 +116,26 @@ What this is not is serving. No HTTP, no tokenizer, no continuous
 batching, no KV cache, no generation loop: those belong to whatever
 serves the model (docs/plan.md section 14).
 
+## Fine-tuning without moving the model
+
+LoRA trains a pair of small matrices beside each weight and leaves the
+weight alone. What is adapted is the fine-tune's decision, so it is a
+keyword rather than a different model description:
+
+```ruby
+adapter = Torobi::LoRA.new(rank: 8, alpha: 16, on: %w[q_proj v_proj])
+model = Torobi::Models::Qwen2.causal_lm(config, seq: 512, adapter:)
+config = Torobi::GraphConfig.new(models: { m: model }, objective:)
+
+Torobi::Session.open(config, pretrained: { m: "Qwen2.5-0.5B/model.safetensors" },
+                     fresh: adapter.fresh(config),
+                     optimizer: { kind: :adamw, lr: 1e-4 }) { |s| s.run(batches) }
+```
+
+Inside an adapter nothing else is trainable, so the base is the same
+bytes at the end as at the start. On Qwen2.5-0.5B with rank 8 that
+leaves 0.109% of the parameters being trained.
+
 ## Running a long one
 
 A training run belongs in a process of its own with a cap on what it may
@@ -156,7 +176,7 @@ Decoders are started rather than done: `Models::Qwen2` declares exactly
 what Qwen2.5-0.5B holds and its gradients agree with its forward, but it
 has not been held to a reference implementation's numbers. Generation is
 deliberately absent (no KV cache, no sampling loop); what Torobi does
-with a decoder is fine-tune it. LoRA, quantized ops and variable length
+with a decoder is fine-tune it. Quantized ops and variable length
 attention are not implemented.
 
 The version is 0.0.1 and the API still moves.

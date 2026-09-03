@@ -92,20 +92,30 @@ module Torobi
       # classifiers keep it under `model.`; a classifier built on a bare
       # encoder checkpoint (ruri-v3-130m holds `embeddings.*` at the root)
       # wants none, and its head is `fresh:` because no file has one.
-      def classifier(config, seq:, encoder_prefix: "model", rows: nil)
+      # `adapter:` is a `Torobi::LoRA`, and adapts the linears it names
+      # rather than this description having to know about it. The head is
+      # inside it, so a classifier adapted this way trains its adapter
+      # and nothing else; a head that has to be trained too is a
+      # `fresh:` head on an unadapted model.
+      def classifier(config, seq:, encoder_prefix: "model", rows: nil, adapter: nil)
         config.check!
         Torobi.graph do |g|
-          x = body(g, config, seq:, rows:, encoder_prefix:)
-          pooled = pool(g, x, config, seq:, rows:)
-          # ModernBERT's head: a dense, gelu, a norm, then the classifier.
-          pooled = norm(g, g.linear(pooled, config.hidden_size, name: "head.dense",
-                                    bias: false).gelu,
-                        config, name: "head.norm")
-          # `linear` names the node after the parameter scope, so this is
-          # already called "classifier"; the output name is separate.
-          g.output :logits, g.linear(pooled, config.num_labels, name: "classifier",
-                                     bias: config.classifier_bias)
+          g.adapting(adapter) { classify(g, config, seq:, rows:, encoder_prefix:) }
         end
+      end
+
+      # The classifier's body, so that `adapting` has something to wrap.
+      def classify(g, config, seq:, rows:, encoder_prefix:)
+        x = body(g, config, seq:, rows:, encoder_prefix:)
+        pooled = pool(g, x, config, seq:, rows:)
+        # ModernBERT's head: a dense, gelu, a norm, then the classifier.
+        pooled = norm(g, g.linear(pooled, config.hidden_size, name: "head.dense",
+                                  bias: false).gelu,
+                      config, name: "head.norm")
+        # `linear` names the node after the parameter scope, so this is
+        # already called "classifier"; the output name is separate.
+        g.output :logits, g.linear(pooled, config.num_labels, name: "classifier",
+                                   bias: config.classifier_bias)
       end
 
       # A sentence embedder: token ids in, one vector per row out.

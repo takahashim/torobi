@@ -2459,6 +2459,55 @@ head_dim 64、intermediate 4864、rope_theta 1e6、**tie_word_embeddings: true**
 
 この時点で Ruby 275 件 / Rust 126 件。
 
+### 15.50 LoRA。engine には 1 行も足していない(2026-09-04)
+
+段取りの 3 段目。予想通り**engine の追加はゼロ**だった。LoRA は新しい演算ではなく、
+既にある部品の並べ方である: 凍結した base、`fresh:` で作る小さい行列 2 つ、matmul。
+
+`y = Wx + b + (alpha/rank) * B(Ax)`。`A` は [rank, d_in] で乱数、`B` は
+[d_out, rank] で**ゼロから始まる**。だから**適用直後のモデルは base と厳密に同じ**で、
+これは細部ではなく「adapter を付けた状態から始めても安全」の根拠そのものである。
+テストは近似ではなく `assert_equal` で書いた。
+
+**どこに置くか**が設計の判断だった。
+
+- `Models::Qwen2` に lora の引数を生やす → モデル記述ごとに同じものが増える
+- IR を後から書き換える → node の番号振り直しが要る
+- **DSL に `adapting(adapter) { ... }` を置き、`linear` が中で分岐する** ← これにした
+
+モデル記述側は 1 行 (`g.adapting(adapter) { ... }`) で済み、**何を adapt するかは
+fine-tune する人の判断**として `causal_lm(adapter:)` に残る。ModernBERT の
+`classifier` にも同じ 1 行を入れた。機構は DSL のもので、モデルのものではない。
+
+**block の中では adapter 以外は訓練されない。** これは `linear` ではなく `param` に
+置いた。base が手違いで trainable のまま残った LoRA は、**普通に学習してしまう**ので
+バグに見えない (小さめの fine-tune に見える)。後から `unfreeze!` で直すこともできない:
+窓の freeze はグラフが trainable と宣言したものの中でしか動かないので、宣言が全てである。
+
+`on:` は最後のセグメントで照合する (`%w[q_proj v_proj]`)。PEFT の `target_modules` と
+同じ綴りで、モデルの作者と adapter の利用者が合意できるのはそこだけである (層番号は
+モデルの都合)。engine の pattern は前方一致なので、`fresh:` は**パターンではなく
+実パスの一覧**を返す (`adapter.fresh(config)`)。中間ワイルドカードのために
+クエリ言語を足すのは、一覧で言えることを言うためには重すぎる。
+
+実物 (Qwen2.5-0.5B、rank 8、q_proj と v_proj) で **494,573,440 個のうち 540,672 個、
+0.109%** が trainable になる。テストはこの数を公開 config で確かめている
+(小さい玩具モデルでは rank 2 / 幅 8 で 7.9% になり、主張として意味が無い)。
+
+テストが言っていること:
+
+| | |
+| --- | --- |
+| adapter だけが微分される | 宣言でも、開いた run の `trainable` でも |
+| **adapted は base と厳密に同一から始まる** | 実ファイルから `pretrained:` + `fresh:` で開いて突き合わせ |
+| 学習は adapter を動かし、**base は 1 バイトも動かない** | tie した embedding も含めて |
+
+2 つ目は `fresh:` の経路も同時に試している。adapter の行列はどの checkpoint にも
+無いので、initializer から作られる。
+
+この時点で Ruby 284 件 / Rust 126 件。M6 のうち decoder と LoRA はこれで一通り。
+残りは量子化 op と varlen、そして「参照実装との数値一致」である。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

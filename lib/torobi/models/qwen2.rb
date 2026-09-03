@@ -96,10 +96,14 @@ module Torobi
       # `rows:` fixes how many rows a batch has, and is normally left
       # alone; it is for an objective that reads across the batch rather
       # than down it.
-      def causal_lm(config, seq:, rows: nil)
+      # `adapter:` is a `Torobi::LoRA`, and adapts the linears it names
+      # rather than this description having to know about it.
+      def causal_lm(config, seq:, rows: nil, adapter: nil)
         config.check!
         Torobi.graph do |g|
-          hidden = g.name("hidden", g.scope("model") { encode(g, config, seq:, rows:) })
+          hidden = g.adapting(adapter) do
+            g.name("hidden", g.scope("model") { encode(g, config, seq:, rows:) })
+          end
           # Not named: an untied head is a `linear`, which names its own
           # node after its parameters, and `forward` reaches an output by
           # the name the output has.

@@ -12,6 +12,9 @@ module Torobi
     class Builder
       # `models` is the set an objective may read outputs from; a model
       # graph is built with none.
+      # The adapter in scope, if a caller put one there (`adapting`).
+      attr_reader :adapter
+
       def initialize(models: {})
         @models = models.to_h { |name, graph| [name.to_s, graph] }
         @inputs = []
@@ -104,7 +107,15 @@ module Torobi
       end
 
       def param(name, shape, init:, dtype: :f32, trainable: true)
-        spec = IR::ParameterSpec.new(id: @parameters.size, path: scoped(name), shape:,
+        path = scoped(name)
+        # Inside an adapting block, what is trained is the adapter and
+        # nothing else. Said here rather than at each parameter, because
+        # a base model left trainable by an oversight is not a LoRA
+        # fine-tune, and no pattern anybody writes later can undo it: the
+        # window's `unfreeze!` moves within what the graph declared
+        # trainable, so this is the declaration that matters.
+        trainable &&= @adapter.adapted?(path) if @adapter
+        spec = IR::ParameterSpec.new(id: @parameters.size, path:, shape:,
                                      dtype:, initializer: init, trainable:)
         @parameters << spec
         emit("parameter", params: [spec.id])
@@ -163,10 +174,52 @@ module Torobi
                   init: { "type" => "kaiming_uniform" })
         wt = emit("transpose", inputs: [w], attrs: { axes: [1, 0] })
         y = matmul(x, wt)
-        return self.name(label, y) unless bias
+        y += param("#{name}.bias", [d_out], dtype: x.dtype, init: { "type" => "zeros" }) if bias
+        y += low_rank(x, d_in, d_out, name:) if @adapter&.wraps?(scoped(name))
+        self.name(label, y)
+      end
 
-        self.name(label, y + param("#{name}.bias", [d_out], dtype: x.dtype,
-                                                   init: { "type" => "zeros" }))
+      # Builds a graph with an adapter in scope, so that every linear it
+      # names is trained through a pair of small matrices instead of
+      # being moved itself (`Torobi::LoRA`).
+      #
+      # A block rather than a keyword on `linear`, because what is being
+      # adapted is decided once, by whoever is doing the fine-tune, and a
+      # model description should not have to be rewritten to be adapted:
+      #
+      #   Torobi.graph do |g|
+      #     g.adapting(adapter) { ... the model ... }
+      #   end
+      #
+      # `nil` adapts nothing, so a builder that always writes this reads
+      # the same either way.
+      def adapting(adapter)
+        return yield if adapter.nil?
+        raise ConfigError, "an adapter is already in scope" if @adapter
+
+        @adapter = adapter
+        begin
+          yield
+        ensure
+          @adapter = nil
+        end
+      end
+
+      # The adapter's own arithmetic: `x` through a narrow matrix and back
+      # out to the width the linear has, scaled.
+      #
+      # `B` starts at zero, so this contributes nothing until something
+      # has trained it. That is what makes an adapted model start as the
+      # model it adapts.
+      def low_rank(x, d_in, d_out, name:)
+        rank = @adapter.rank
+        a = param("#{name}.lora_A.weight", [rank, d_in], dtype: x.dtype,
+                                                         init: { "type" => "kaiming_uniform" })
+        b = param("#{name}.lora_B.weight", [d_out, rank], dtype: x.dtype,
+                                                          init: { "type" => "zeros" })
+        down = matmul(x, emit("transpose", inputs: [a], attrs: { axes: [1, 0] }))
+        up = matmul(down, emit("transpose", inputs: [b], attrs: { axes: [1, 0] }))
+        up * @adapter.scale
       end
 
       def embedding(ids, vocab:, dim:, name:)

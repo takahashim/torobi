@@ -9,6 +9,7 @@ require_relative "torobi/journal"
 require_relative "torobi/ops"
 require_relative "torobi/shape"
 require_relative "torobi/dsl"
+require_relative "torobi/lora"
 require_relative "torobi/models/modern_bert"
 require_relative "torobi/models/qwen2"
 

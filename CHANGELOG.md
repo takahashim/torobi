@@ -35,6 +35,13 @@ between two versions people have.
   config that trains nothing (`train: []`) needs no loss at all, which
   is what a run opened for inference looks like. Serving is still out of
   scope: no HTTP, no tokenizer, no KV cache.
+- **`Torobi::LoRA`**, low-rank adaptation as something to build a graph
+  with: `g.adapting(adapter) { ... }` in the model description, and
+  `causal_lm(adapter:)` for whoever is doing the fine-tune. Inside the
+  block only the adapter is trainable, an adapted model starts as
+  exactly the model it adapts, and training leaves the base bytes alone.
+  On Qwen2.5-0.5B with rank 8 over q_proj and v_proj that is 0.109% of
+  the parameters.
 - **`Torobi::Models::Qwen2`**, the first decoder: a causal language
   model as a graph, declaring exactly the 290 parameters Qwen2.5-0.5B
   holds, with the tied output projection that checkpoint expects. No KV
@@ -62,7 +69,7 @@ between two versions people have.
 
 - Qwen2 is described and differentiates, but has not been held to a
   reference implementation's numbers; that needs the weights and a
-  second implementation to run them. Other decoder architectures, LoRA,
+  second implementation to run them. Other decoder architectures,
   quantized ops and variable length attention are not implemented
   (docs/plan.md section 9.1, M6).
 - `Torobi::Memory.limit=` does not refuse an allocation that exceeds it;
