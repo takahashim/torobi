@@ -6,10 +6,16 @@ description = "Torobi's execution engine: interprets GraphConfig on MLX"
 license = "MIT"
 
 [dependencies]
-# M1 spike: a path dependency on the local OminiX-MLX checkout, pinned by
-# the ledger in ../docs/vendoring.md (rev 4988a3f). Selective vendoring with
-# provenance replaces this before anything ships (docs/plan.md section 5).
-mlx-rs = { path = "/Users/maki/git/OminiX-MLX/mlx-rs" }
+# MLX through OminiX's fork of mlx-rs, pinned to an exact revision.
+#
+# A git dependency rather than the vendored copy the plan first imagined:
+# it costs no source tree of ours, cargo records the commit in Cargo.lock,
+# and it builds anywhere - which an absolute path to a local checkout did
+# not (docs/vendoring.md records what that cost us). The fork rather than
+# crates.io's mlx-rs 0.25 because it tracks MLX 0.32 and falls back to a
+# pre-built MLX when no Metal compiler is present, which is what lets the
+# gem build on a machine without Xcode.
+mlx-rs = { git = "https://github.com/OminiX-ai/OminiX-MLX.git", rev = "4988a3fcfa48b8cb5d0780a501b92c6a41401523" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

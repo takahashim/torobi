@@ -158,12 +158,17 @@ v3.1 は「native 境界は一度書いて閉じる有界な問題」と書い�
 限定的な eager API)を妨げない。ただし広げる際は §12「狭い腰の劣化」の審査
 (テンソル越境と callback の禁止を破らないか、関数数の増分に見合う価値か)を通す。
 
-## 5. 依存と vendoring(v3 から変更なし)
+## 5. 依存(v3.2 で方針変更: vendoring ではなく pinned git)
 
-- torobi-engine は mlx-rs を選択的に vendoring(array / ops / fast / transforms / io。不要部は刈る)。
+- torobi-engine は **OminiX の mlx-rs を rev 固定の git 依存**として使う。
+  v3.1 までは「選択的 vendoring(array / ops / fast / transforms / io を取り込み、
+  残りを刈る)」としていたが、**同じ目的をより安く達成できるため変更した**:
+  自分のツリーに 2.3 MB を抱えず、Cargo.lock が commit を強制し、どこででもビルドできる。
+  失うのは刈り込みとローカルパッチで、必要になったら fork に pin し直す。
+  経緯と実測は `docs/vendoring.md`。
 - nn / optimizer はエンジン内で所有(mlx-rs は参考)。AdamW は oracle の数 step と照合する。
-- vendoring 台帳(元コミット、刈った物、MLX / mlx-c / mlx-rs の exact revision)を維持し、
-  `Torobi.build_info` が全 revision を報告する。更新は一版ずつの明示作業。
+- 依存台帳(rev、MLX / mlx-c の出所、metallib の配置制約)を維持し、
+  `Torobi::Native.build_info` が報告する。更新は一版ずつの明示作業。
 
 ## 5A. 実行契約(G0。M2 着手の前提)
 
@@ -556,7 +561,7 @@ Ruby へ返すのは loss・metrics・明示的に copy したテンソルに限
 
 | Risk | 対処 |
 |---|---|
-| mlx-rs / MLX の追従 | exact pin + vendoring 台帳 + 一版ずつの upgrade(全スイート) |
+| mlx-rs / MLX の追従 | exact rev pin(Cargo.lock が強制)+ 依存台帳 + 一版ずつの upgrade(全スイート) |
 | 狭い腰の劣化(関数が増え広い binding 化する) | セッション API の関数数を計測対象にする。テンソル越境と callback の禁止を review 基準に |
 | IR と engine の意味ずれ | 単一 manifest から両面生成、differential test |
 | resume / replay 非再現 | TrainState(乱数込み)の明示管理、resume=連続・replay=再演のテスト |
@@ -607,9 +612,9 @@ M0 と M1 の一部(§9.1 の M1 のうち single-step とその境界の初期�
 | FFI 異常系(例外変換、panic、致命、GC、多重セッション) | **済**。subprocess テスト |
 | GVL 解放中に別スレッドが進む | **済** |
 | 境界コストの実測 | **済**(§5A.2.1)。測って設計判断を覆した |
-| installed-gem smoke | **済、ただし結果は両義的**。仕組みは通る(56 KB の source gem がビルドされ、metallib が dladdr の見る場所に入り、1 step が動く)が、**このマシンでしか通らない**: `engine/Cargo.toml` が OminiX checkout を絶対パスで指し、それが gem に入る。checkout を隠して再試行すると失敗することを確認済み(`docs/vendoring.md`)|
+| installed-gem smoke | **済**。56 KB の source gem がビルドされ、metallib が dladdr の見る場所に入り、checkout の外から 1 step が動く。当初は絶対パス依存のため「このマシンでのみ」だったが、pinned git 依存(§5)に変更し、**ローカル checkout を隠した状態でビルド・インストール・実行が通ることを確認**(`docs/vendoring.md`)|
 
-**したがって配布は「形は成立、事実として不可」**であり、vendoring(§5)を終えるまで
-source gem を「動く」と主張しない。M2 と並行して片付ける作業として残す。
+配布は形も事実も成立した。残るのは方針の決定(§11.4)であり、
+それは利用者像が見えてからでよい。
 
 M2(stateful core: AdamW、RNG、checkpoint / resume)に進む。

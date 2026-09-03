@@ -324,6 +324,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "mlx-internal-macros"
 version = "1.2.0"
+source = "git+https://github.com/OminiX-ai/OminiX-MLX.git?rev=4988a3fcfa48b8cb5d0780a501b92c6a41401523#4988a3fcfa48b8cb5d0780a501b92c6a41401523"
 dependencies = [
  "darling",
  "itertools 0.14.0",
@@ -335,6 +336,7 @@ dependencies = [
 [[package]]
 name = "mlx-macros"
 version = "1.2.0"
+source = "git+https://github.com/OminiX-ai/OminiX-MLX.git?rev=4988a3fcfa48b8cb5d0780a501b92c6a41401523#4988a3fcfa48b8cb5d0780a501b92c6a41401523"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -345,6 +347,7 @@ dependencies = [
 [[package]]
 name = "mlx-rs"
 version = "1.2.0"
+source = "git+https://github.com/OminiX-ai/OminiX-MLX.git?rev=4988a3fcfa48b8cb5d0780a501b92c6a41401523#4988a3fcfa48b8cb5d0780a501b92c6a41401523"
 dependencies = [
  "dyn-clone",
  "half",
@@ -367,6 +370,7 @@ dependencies = [
 [[package]]
 name = "mlx-sys"
 version = "0.2.0"
+source = "git+https://github.com/OminiX-ai/OminiX-MLX.git?rev=4988a3fcfa48b8cb5d0780a501b92c6a41401523#4988a3fcfa48b8cb5d0780a501b92c6a41401523"
 dependencies = [
  "bindgen",
  "cc",
