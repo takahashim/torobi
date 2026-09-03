@@ -48,7 +48,7 @@ class HooksTest < Minitest::Test
 
   def test_hooks_fire_in_registration_order_and_at_their_interval
     order = []
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       s.on(:step) { |e| order << [:first, e.step] }
       s.on(:step, every: 2) { |e| order << [:second, e.step] }
       s.on(:span_end) { |e| order << [:span, e.step] }
@@ -59,7 +59,7 @@ class HooksTest < Minitest::Test
 
   def test_a_hook_sees_the_run_and_can_use_the_window
     seen = nil
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       s.on(:step, every: 2) do |e|
         seen = e
         # A hook's capabilities are the window's: read, and turn knobs.
@@ -76,7 +76,7 @@ class HooksTest < Minitest::Test
   # The fence that keeps a run readable: a hook fires in the window, so it
   # cannot start a span of its own.
   def test_a_hook_cannot_run_a_span
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       s.on(:step) { |e| e.session.run([batch]) }
       e = assert_raises(Torobi::Error) { s.run([batch]) }
       assert_match(/cannot run a span/, e.message)
@@ -86,7 +86,7 @@ class HooksTest < Minitest::Test
   # An exception in a hook stops the span, which is safe because a window
   # is a point where the state is consistent.
   def test_an_exception_in_a_hook_stops_the_span_and_leaves_the_session_usable
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       s.on(:step) { |e| raise "enough" if e.step == 2 }
       assert_raises(RuntimeError) { s.run([batch] * 10) }
       assert_equal 2, s.step
@@ -96,7 +96,7 @@ class HooksTest < Minitest::Test
   end
 
   def test_unknown_events_and_missing_blocks_are_refused
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       assert_raises(ArgumentError) { s.on(:whenever) { nil } }
       assert_raises(ArgumentError) { s.on(:step) }
       assert_raises(ArgumentError) { s.use("not a policy") }
@@ -105,7 +105,7 @@ class HooksTest < Minitest::Test
 
   def test_progress_reports_what_it_is_given
     ticks = []
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       s.use(Torobi::Policies::Progress.new { |step, loss| ticks << [step, loss] }, every: 2)
       s.run([batch] * 4)
     end
@@ -116,7 +116,7 @@ class HooksTest < Minitest::Test
   def test_best_checkpoint_keeps_the_best_the_run_has_been
     Dir.mktmpdir("torobi-hooks") do |dir|
       best = Torobi::Policies::BestCheckpoint.new(File.join(dir, "best"))
-      Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.3 }) do |s|
+      Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.3 }) do |s|
         s.use(best)
         s.run([batch] * 6)
       end
@@ -131,7 +131,7 @@ class HooksTest < Minitest::Test
   # under a thousandth. `by` is what says how much improvement counts, so
   # a policy watching for progress this small finds the plateau.
   def test_lr_on_plateau_lowers_the_rate_when_the_loss_stops_falling
-    Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.3 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.3 }) do |s|
       s.use(Torobi::Policies::LrOnPlateau.new(factor: 0.5, patience: 3, by: 1e-3))
       s.run([batch] * 30)
       assert_operator s.lr, :<, 0.3, "the rate should have come down on the plateau"
@@ -140,7 +140,7 @@ class HooksTest < Minitest::Test
   end
 
   def test_early_stopping_ends_the_run_where_it_stops_improving
-    Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.3 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.3 }) do |s|
       s.use(Torobi::Policies::EarlyStopping.new(patience: 3, by: 1e-3))
       assert_raises(Torobi::Policies::EarlyStopping::Stop) { s.run([batch] * 200) }
       assert_operator s.step, :<, 200, "it should have stopped early"
@@ -152,7 +152,7 @@ class HooksTest < Minitest::Test
   # journal like anything else.
   def test_what_a_policy_adjusts_is_journalled
     io = StringIO.new
-    Torobi::Session.open(config, weights, io:, optimizer: { kind: :sgd, lr: 0.3 }) do |s|
+    Torobi::Session.open(config, weights: weights, io:, optimizer: { kind: :sgd, lr: 0.3 }) do |s|
       s.use(Torobi::Policies::LrOnPlateau.new(factor: 0.5, patience: 3, by: 1e-3))
       s.run([batch] * 30)
     end
@@ -167,7 +167,7 @@ class HooksTest < Minitest::Test
   # step and nothing else: the parameters are the ones the last good step
   # left, and the run carries on.
   def test_a_single_bad_batch_costs_one_step_and_nothing_else
-    Torobi::Session.open(config, weights(w: [0.5, 0.5]),
+    Torobi::Session.open(config, weights: weights(w: [0.5, 0.5]),
                          optimizer: { kind: :sgd, lr: 0.1 }) do |s|
       s.run([batch] * 3)
       before = s.fetch("m.l.weight")[:data]
@@ -190,7 +190,7 @@ class HooksTest < Minitest::Test
   # Giving up is the honest response, and the reason a rollback still has a
   # job (see the test below).
   def test_nan_guard_gives_up_when_lowering_the_rate_cannot_help
-    Torobi::Session.open(config, weights(w: [0.5, 0.5]),
+    Torobi::Session.open(config, weights: weights(w: [0.5, 0.5]),
                          optimizer: { kind: :sgd, lr: 50.0 }) do |s|
       s.use(Torobi::Policies::NaNGuard.new(lr_factor: 0.001, patience: 3))
       e = assert_raises(Torobi::StepError) { s.run([batch] * 40) }
@@ -205,7 +205,7 @@ class HooksTest < Minitest::Test
   def test_nan_guard_still_takes_a_checkpoint_when_it_is_given_one
     Dir.mktmpdir("torobi-hooks") do |dir|
       path = File.join(dir, "safe")
-      Torobi::Session.open(config, weights(w: [0.5, 0.5]),
+      Torobi::Session.open(config, weights: weights(w: [0.5, 0.5]),
                            optimizer: { kind: :sgd, lr: 50.0 }) do |s|
         s.checkpoint!(path)
         at_checkpoint = s.fetch("m.l.weight")[:data]
@@ -221,7 +221,7 @@ class HooksTest < Minitest::Test
 
   # An evaluation reads the model without touching the run.
   def test_evaluate_reads_without_taking_a_step
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       s.run([batch] * 3)
       step = s.step
       training_loss = s.loss

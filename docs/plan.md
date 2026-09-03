@@ -949,6 +949,47 @@ extension に残したのは Ruby runtime の制約だけである: 値の変換
 
 この時点で Ruby 168 件 / Rust 79 件。
 
+### 15.13 境界の見直しで出た 2 点(2026-09-03)
+
+Ruby と Rust の分担を改めて確認したときに出たもの。分担の原則(Ruby が記述・判断・
+記録、engine が実行と MLX の制約、ext は Ruby runtime の制約だけ)は妥当だったので、
+穴 2 つだけを塞いだ。
+
+**1. 死ねる経路が 1 つ残っていた。** metallib の不在は Ruby の `Preflight` だけが見て
+いたので、`Torobi::Native` を直接使う経路、engine の CLI、engine のテストは素通り
+だった。MLX は `dladdr` で自分の位置を引いてその隣を探すので、**同じ問いを同じ方法で
+先に engine が聞く**ようにした(`runtime::available`、プロセスに 1 度)。これで
+`Runtime::enter` を通る全経路が abort ではなく `EngineUnavailable` になる。
+`MLX_METAL_PATH` が設定されていれば、こちらより呼び出し側の方が事情を知っているので
+判断を譲る。
+
+境界テストが 1 つ**反転した**。`test_without_the_refusal_a_missing_metallib_ends_the_process`
+は「Ruby を経由しなければ死ぬ」ことを固定していたが、今は死なない。
+`test_even_the_direct_native_route_is_refused_not_aborted` に置き換えた。
+
+あわせて Ruby 側 `Preflight` から metallib チェックを外し、**probe に専念**させた
+(policy を 2 箇所に書かない)。probe が失敗したとき、子プロセスが言ったことを親の
+例外メッセージに載せるようにもした。以前は理由を捨てて定型文を出していた。
+
+**2. weights をキーワード引数にした。** `open(config, weights:)`。M3a で model import
+(safetensors ファイルからの読み込み)が入ると、パラメータの出どころは複数になる。
+positional のままだと String と Hash の型で分岐する形になり、GraphConfig が既に
+宣言している initializer から始める第 3 の形も並べにくい。キーワードなら 3 択が
+そのまま並ぶ。
+
+```ruby
+open(config)                       # 宣言された initializer + seed から(将来)
+open(config, weights: hash)        # 値を直接
+open(config, weights_file: path)   # ファイルから(M3a)
+```
+
+**大きなモデルの weights を JSON で渡す形は M3a では使わない。** batch で「JSON が
+1 step の 65%」と実測したのと同じ問題が、130M パラメータでは桁違いの規模で出る。
+checkpoint の restore と同じく、パスを渡して engine が safetensors を読む形にする。
+ファイルは共有メモリではないので「コピーだけが境界を渡る」は保たれる。
+
+この時点で Ruby 169 件 / Rust 83 件。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

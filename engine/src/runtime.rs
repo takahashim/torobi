@@ -27,6 +27,10 @@ pub enum RuntimeError {
     /// A fork. The device did not come along, and neither did whatever
     /// held the gate at the time.
     ForeignProcess,
+    /// MLX could not run here even once: something it needs is not in
+    /// place, and asking it anyway would end the process rather than
+    /// return. The string says what is missing and where it was expected.
+    Unavailable(String),
     /// A panic escaped an operation while it held the gate. MLX is
     /// process-global, so what that left behind is not knowable, and no
     /// further work is attempted in this process.
@@ -44,6 +48,7 @@ impl std::fmt::Display for RuntimeError {
                  A Metal device does not survive fork: open a session in the \
                  child, or run the work in a process of its own."
             ),
+            RuntimeError::Unavailable(what) => write!(f, "{what}"),
             RuntimeError::Poisoned => write!(
                 f,
                 "the engine panicked while it held MLX, so nothing more is \
@@ -116,9 +121,12 @@ impl Runtime {
 
     /// The pid first, and before the gate. A mutex another thread held
     /// when the fork happened is locked forever in the child, so a child
-    /// that waited would wait for good.
+    /// that waited would wait for good. Then whether MLX can run here at
+    /// all, because the failure that answers otherwise is an abort, not an
+    /// error.
     fn enter(&self) -> Result<MutexGuard<'_, ()>, RuntimeError> {
         self.here()?;
+        available()?;
         self.gate.lock().map_err(|_| RuntimeError::Poisoned)
     }
 
@@ -161,4 +169,108 @@ impl Runtime {
 /// Whether MLX can still be reached from this process.
 pub fn usable() -> bool {
     runtime().usable()
+}
+
+/// Refuses, once and for all, if MLX could not start here.
+///
+/// The failure this prevents is not an error. MLX finds its Metal kernels
+/// by asking `dladdr` where its own code lives and looking for
+/// `mlx.metallib` next to it; if the file is not there, device
+/// initialization throws a C++ exception that nothing in Rust can catch,
+/// and the process exits with nothing for any caller to rescue
+/// (docs/vendoring.md). So the same question is asked here first, the same
+/// way, before MLX ever is.
+///
+/// Asked once per process: the file does not move while we run, and the
+/// answer is the same for every session.
+fn available() -> Result<(), RuntimeError> {
+    static ANSWER: OnceLock<Option<String>> = OnceLock::new();
+    match ANSWER.get_or_init(missing_metallib) {
+        None => Ok(()),
+        Some(what) => Err(RuntimeError::Unavailable(what.clone())),
+    }
+}
+
+/// What is missing, if MLX would fail to find its kernels here.
+#[cfg(target_os = "macos")]
+fn missing_metallib() -> Option<String> {
+    // An anchor in this object's data segment: dladdr on it names the
+    // binary or bundle this code is linked into, which is exactly where
+    // MLX will look (its code is statically linked into the same object).
+    static ANCHOR: u8 = 0;
+    let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+    let found =
+        unsafe { libc::dladdr(std::ptr::addr_of!(ANCHOR) as *const libc::c_void, &mut info) };
+    if found == 0 || info.dli_fname.is_null() {
+        // Cannot tell where we are; refusing on ignorance would block a
+        // working setup, so let MLX try.
+        return None;
+    }
+    let object = unsafe { std::ffi::CStr::from_ptr(info.dli_fname) };
+    let object = std::path::PathBuf::from(object.to_string_lossy().into_owned());
+    let expected = object.parent()?.join("mlx.metallib");
+    if expected.exists() {
+        return None;
+    }
+    // Someone pointing MLX elsewhere knows more than this check does;
+    // defer to them rather than refuse a setup that might work.
+    if std::env::var_os("MLX_METAL_PATH").is_some() {
+        return None;
+    }
+    Some(format!(
+        "MLX's Metal kernels are not where it will look for them: expected \
+         {} beside {}. Without that file MLX aborts the process rather than \
+         raising, so this refuses first. The gem's install step puts it \
+         there; in a checkout, run `rake metallib`.",
+        expected.display(),
+        object.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn missing_metallib() -> Option<String> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn this_process_owns_the_runtime() {
+        assert!(usable(), "the tests run where the engine was loaded");
+        assert!(runtime().here().is_ok());
+    }
+
+    #[test]
+    fn the_metallib_is_looked_for_beside_this_object() {
+        // The check has to agree with MLX, which asks dladdr where its own
+        // code is. Ours is in the same object, so if it finds nothing to
+        // complain about, MLX will find the file.
+        assert!(
+            missing_metallib().is_none(),
+            "the test binary should have mlx.metallib beside it \
+             (engine/build.rs links it into deps/): {:?}",
+            missing_metallib()
+        );
+    }
+
+    #[test]
+    fn a_refusal_says_what_is_missing_and_where() {
+        // The message is the whole value of refusing rather than aborting,
+        // so its shape is worth pinning.
+        let refusal = RuntimeError::Unavailable("no kernels at /x/mlx.metallib".into());
+        let said = refusal.to_string();
+        assert!(said.contains("/x/mlx.metallib"), "{said}");
+    }
+
+    #[test]
+    fn the_layers_are_told_apart_rather_than_flattened() {
+        // The binding maps these to different Ruby classes, so they must
+        // not collapse into one another on the way up.
+        let engine = RuntimeError::Engine(anyhow::anyhow!("a step failed"));
+        assert!(matches!(engine, RuntimeError::Engine(_)));
+        assert!(!matches!(RuntimeError::ForeignProcess, RuntimeError::Engine(_)));
+        assert!(!matches!(RuntimeError::Poisoned, RuntimeError::ForeignProcess));
+    }
 }

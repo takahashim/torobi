@@ -57,7 +57,7 @@ class InterruptTest < Minitest::Test
   end
 
   def test_a_timeout_during_a_span_leaves_the_session_usable
-    session = Torobi::Session.open(config, weights)
+    session = Torobi::Session.open(config, weights: weights)
     assert_raises(Timeout::Error) { Timeout.timeout(0.3) { session.run(endless) } }
 
     took = session.step
@@ -69,7 +69,7 @@ class InterruptTest < Minitest::Test
   end
 
   def test_a_thread_raise_during_a_span_surfaces_the_callers_own_error
-    session = Torobi::Session.open(config, weights)
+    session = Torobi::Session.open(config, weights: weights)
     target = Thread.current
     killer = Thread.new { sleep 0.2; target.raise(ArgumentError, "the caller's own error") }
 
@@ -89,7 +89,7 @@ class InterruptTest < Minitest::Test
   # be one step behind what the engine did and a replay would diverge.
   def test_the_journal_and_the_engine_agree_after_an_interruption
     io = StringIO.new
-    session = Torobi::Session.open(config, weights, io:)
+    session = Torobi::Session.open(config, weights: weights, io:)
     assert_raises(Timeout::Error) { Timeout.timeout(0.3) { session.run(endless) } }
 
     spans = session.journal.entries.select { |e| e["kind"] == "span" }
@@ -103,7 +103,7 @@ class InterruptTest < Minitest::Test
   # The numbers a watcher reads are a state the run passed through, never a
   # step in progress and never one that was rolled back.
   def test_a_watcher_never_sees_a_step_that_did_not_happen
-    session = Torobi::Session.open(config, weights)
+    session = Torobi::Session.open(config, weights: weights)
     readings = Queue.new
     # Sampled rather than spun: the point is to catch the run at many
     # moments, not to see how fast a read is.
@@ -141,19 +141,19 @@ class InterruptTest < Minitest::Test
   # another session's step without the gate, so each gets a thread here.
   def test_every_way_into_mlx_takes_turns_rather_than_crashing
     output = run_script(<<~SCRIPT)
-      a = Torobi::Session.open(config, weights)
+      a = Torobi::Session.open(config, weights: weights)
       threads = []
       threads << Thread.new { 200.times { a.step!(batch) } }
       # Opening and closing beside it.
       threads << Thread.new do
-        40.times { Torobi::Session.open(config, weights) { |s| s.step!(batch) } }
+        40.times { Torobi::Session.open(config, weights: weights) { |s| s.step!(batch) } }
       end
       # Reading a parameter off the device beside it.
-      b = Torobi::Session.open(config, weights)
+      b = Torobi::Session.open(config, weights: weights)
       threads << Thread.new { 200.times { b.fetch("m.l.weight") } }
       # And building an RNG key beside it. Its own session: two threads on
       # one session are told it is busy, which is a different rule.
-      c = Torobi::Session.open(config, weights)
+      c = Torobi::Session.open(config, weights: weights)
       threads << Thread.new { 200.times { |i| c.adjust(seed: i) } }
       threads.each(&:join)
       puts "SURVIVED \#{a.step} \#{c.seed}"
@@ -168,7 +168,7 @@ class InterruptTest < Minitest::Test
   # slot would lose it there. Nothing is taken before the region, so this
   # only has to show that it holds under repetition.
   def test_repeated_interruption_never_loses_the_engine
-    session = Torobi::Session.open(config, weights)
+    session = Torobi::Session.open(config, weights: weights)
     20.times do
       assert_raises(Timeout::Error) { Timeout.timeout(0.02) { session.run(endless) } }
       refute_predicate session, :closed?
@@ -194,7 +194,7 @@ class InterruptTest < Minitest::Test
       config = Torobi::GraphConfig.new(models: { "m" => model })
       weights = #{weights.inspect}
       batch = #{batch.inspect}
-      session = Torobi::Session.open(config, weights)
+      session = Torobi::Session.open(config, weights: weights)
       Thread.new { sleep 0.3; Process.kill("INT", Process.pid) }
       begin
         session.run(Enumerator.new { |y| loop { y << batch } })

@@ -25,6 +25,9 @@ anyhow = "1"
 # The config digest a checkpoint records, computed over the same bytes
 # the Ruby side hashed.
 sha2 = "0.10"
+# dladdr, for refusing a missing metallib before MLX aborts over it
+# (src/runtime.rs). Already in the tree through mlx-sys.
+libc = "0.2"
 
 [dev-dependencies]
 # Checkpoint tests write real directories; nothing here mocks a filesystem.

@@ -88,7 +88,7 @@ class OptimizerTest < Minitest::Test
     oracle = AdamWOracle.new(lr:)
     b_batch = batch
 
-    Torobi::Session.open(config, weights, optimizer: { kind: :adamw, lr: }) do |session|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :adamw, lr: }) do |session|
       5.times do |step|
         dw, db = gradients(w, b, b_batch)
         expected = oracle.step("w" => [w, dw], "b" => [b, db])
@@ -112,7 +112,7 @@ class OptimizerTest < Minitest::Test
   # gradient's size. A wrong t would show up here.
   def test_the_first_adamw_step_moves_by_the_learning_rate
     lr = 0.01
-    Torobi::Session.open(config, weights, optimizer: { kind: :adamw, lr: }) do |session|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :adamw, lr: }) do |session|
       before = session.fetch("m.l.weight")[:data]
       session.step!(batch)
       after = session.fetch("m.l.weight")[:data]
@@ -125,11 +125,11 @@ class OptimizerTest < Minitest::Test
 
   def test_decoupled_weight_decay_pulls_toward_zero
     lr = 0.01
-    plain = Torobi::Session.open(config, weights, optimizer: { kind: :adamw, lr: }) do |s|
+    plain = Torobi::Session.open(config, weights: weights, optimizer: { kind: :adamw, lr: }) do |s|
       3.times { s.step!(batch) }
       s.fetch("m.l.weight")[:data]
     end
-    decayed = Torobi::Session.open(config, weights,
+    decayed = Torobi::Session.open(config, weights: weights,
                                    optimizer: { kind: :adamw, lr:, weight_decay: 0.5 }) do |s|
       3.times { s.step!(batch) }
       s.fetch("m.l.weight")[:data]
@@ -146,7 +146,7 @@ class OptimizerTest < Minitest::Test
     b_batch = batch
     dw, db = gradients(w, b, b_batch)
 
-    Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: }) do |session|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: }) do |session|
       session.step!(b_batch)
       engine_w = session.fetch("m.l.weight")[:data]
       w.each_with_index do |value, i|
@@ -158,7 +158,7 @@ class OptimizerTest < Minitest::Test
 
   def test_an_unknown_optimizer_is_refused_by_name
     e = assert_raises(ArgumentError) do
-      Torobi::Session.open(config, weights, optimizer: { kind: :adagrad, lr: 0.1 })
+      Torobi::Session.open(config, weights: weights, optimizer: { kind: :adagrad, lr: 0.1 })
     end
     assert_match(/unknown variant `adagrad`/, e.message)
     assert_match(/expected `sgd` or `adamw`/, e.message)

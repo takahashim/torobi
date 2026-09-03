@@ -45,7 +45,7 @@ class ReplayTest < Minitest::Test
   # to replay beyond the steps themselves.
   def record(data)
     io = StringIO.new
-    Torobi::Session.open(config, weights, io:, optimizer:) do |s|
+    Torobi::Session.open(config, weights: weights, io:, optimizer:) do |s|
       s.run(data.first(3))
       s.adjust(lr: 0.01)
       s.run(data.drop(3))
@@ -73,7 +73,7 @@ class ReplayTest < Minitest::Test
     replayed = Torobi::Replay.action(journal, config:, weights:, batches: data)
 
     # The same steps without the adjustment reach a different loss.
-    without = Torobi::Session.open(config, weights, optimizer:) do |s|
+    without = Torobi::Session.open(config, weights: weights, optimizer:) do |s|
       s.run(data)
       s.loss
     end
@@ -115,7 +115,7 @@ class ReplayTest < Minitest::Test
       end
     end
 
-    Torobi::Session.open(config, weights, io:, optimizer:) { |s| policy.call(s, data) }
+    Torobi::Session.open(config, weights: weights, io:, optimizer:) { |s| policy.call(s, data) }
     result = Torobi::Replay.rerun(io.string, config:, weights:, batches: data, &policy)
 
     assert_predicate result, :agrees?, result.to_s
@@ -141,7 +141,7 @@ class ReplayTest < Minitest::Test
       end
     end
 
-    Torobi::Session.open(config, weights, io:, optimizer:) { |s| original.call(s, data) }
+    Torobi::Session.open(config, weights: weights, io:, optimizer:) { |s| original.call(s, data) }
     result = Torobi::Replay.rerun(io.string, config:, weights:, batches: data, &changed)
 
     refute_predicate result, :agrees?
@@ -151,7 +151,7 @@ class ReplayTest < Minitest::Test
   def test_a_rerun_notices_a_policy_that_stopped_observing
     data = batches(4)
     io = StringIO.new
-    Torobi::Session.open(config, weights, io:, optimizer:) do |s|
+    Torobi::Session.open(config, weights: weights, io:, optimizer:) do |s|
       data.each { |b| s.observe(loss: s.step!(b)) }
     end
 
@@ -165,7 +165,7 @@ class ReplayTest < Minitest::Test
   def test_a_journal_is_accepted_as_an_object_its_jsonl_or_its_entries
     data = batches(3)
     io = StringIO.new
-    Torobi::Session.open(config, weights, io:, optimizer:) { |s| s.run(data) }
+    Torobi::Session.open(config, weights: weights, io:, optimizer:) { |s| s.run(data) }
 
     text = io.string
     [text, Torobi::Journal.read(text)].each do |form|
@@ -180,7 +180,7 @@ class ReplayTest < Minitest::Test
   def test_the_replay_takes_the_optimizer_from_the_journal
     data = batches(4)
     io = StringIO.new
-    Torobi::Session.open(config, weights, io:, optimizer: { kind: :sgd, lr: 0.4 }) do |s|
+    Torobi::Session.open(config, weights: weights, io:, optimizer: { kind: :sgd, lr: 0.4 }) do |s|
       s.run(data)
     end
     result = Torobi::Replay.action(io.string, config:, weights:, batches: data)

@@ -36,7 +36,7 @@ class WindowTest < Minitest::Test
   def batch = { x: { shape: [8, DIM], data: Array.new(8 * DIM, 1.0) } }
 
   def test_freezing_stops_training_what_it_names
-    Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
       assert_equal 4, s.trainable.size
 
       moved = s.freeze!("m.first.*")
@@ -51,7 +51,7 @@ class WindowTest < Minitest::Test
   end
 
   def test_unfreezing_lets_it_move_again
-    Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
       s.freeze!("m.first.*")
       s.run([batch] * 3)
       frozen = s.fetch("m.first.weight")[:data]
@@ -66,7 +66,7 @@ class WindowTest < Minitest::Test
   # zero for what thaws. If they did not, the next step would index a slot
   # that is not there.
   def test_freezing_moves_the_optimizer_slots_with_it
-    Torobi::Session.open(config, weights, optimizer: { kind: :adamw, lr: 0.05 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :adamw, lr: 0.05 }) do |s|
       s.run([batch] * 3)
       s.freeze!("m.first.*")
       s.run([batch] * 3)
@@ -78,7 +78,7 @@ class WindowTest < Minitest::Test
   end
 
   def test_freezing_everything_is_refused
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       e = assert_raises(Torobi::StepError) { s.freeze!("m.*") }
       assert_match(/would leave nothing to train/, e.message)
       assert_equal 4, s.trainable.size, "the refusal changed nothing"
@@ -86,14 +86,14 @@ class WindowTest < Minitest::Test
   end
 
   def test_a_pattern_that_matches_nothing_is_refused
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       e = assert_raises(Torobi::StepError) { s.freeze!("m.third.*") }
       assert_match(/no parameter matches/, e.message)
     end
   end
 
   def test_a_parameter_can_be_written_from_the_window
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       s.put("m.second.weight", { shape: [1, DIM], data: [1.0, 2.0, 3.0, 4.0] })
       assert_equal [1.0, 2.0, 3.0, 4.0], s.fetch("m.second.weight")[:data]
 
@@ -109,7 +109,7 @@ class WindowTest < Minitest::Test
   # their inputs, not just the fact that steps happened.
   def test_the_journal_records_the_window
     io = StringIO.new
-    Torobi::Session.open(config, weights, io:, dataset: { "digest" => "abc" }) do |s|
+    Torobi::Session.open(config, weights: weights, io:, dataset: { "digest" => "abc" }) do |s|
       s.adjust(lr: 0.25)
       s.run([batch] * 2)
       s.observe(loss: s.loss)
@@ -145,7 +145,7 @@ class WindowTest < Minitest::Test
   end
 
   def test_a_session_without_a_journal_records_nothing_and_still_runs
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       assert_nil s.journal
       s.adjust(lr: 0.1)
       s.run([batch])
@@ -158,7 +158,7 @@ class WindowTest < Minitest::Test
     Dir.mktmpdir("torobi-journal") do |dir|
       path = File.join(dir, "run.jsonl")
       File.open(path, "w") do |file|
-        Torobi::Session.open(config, weights, io: file) do |s|
+        Torobi::Session.open(config, weights: weights, io: file) do |s|
           s.run([batch] * 2)
           # Readable before the session closes, because each entry is
           # flushed as it is written.

@@ -23,7 +23,7 @@ Torobi::Runner.child! do |run|
                         "m.l.bias" => { shape: [DIM], data: Array.new(DIM, 0.0) } } }
   batch = { x: { shape: [64, DIM], data: Array.new(64 * DIM, 1.0) } }
 
-  Torobi::Session.open(config, weights, io: run.journal) do |s|
+  Torobi::Session.open(config, weights: weights, io: run.journal) do |s|
     s.restore(run.checkpoint) if Torobi::Checkpoint.exist?(run.checkpoint)
     s.run(Array.new(STEPS) { batch }) do
       s.checkpoint!(run.checkpoint, at: { step: s.step }) if (s.step % EVERY).zero?

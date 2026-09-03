@@ -39,7 +39,7 @@ class ErrorsTest < Minitest::Test
     good = { x: { shape: [2, 2], data: [1.0, 2.0, 3.0, 4.0] },
              y: { shape: [2, 1], data: [1.0, 2.0] } }
 
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       # 2 rows of x against 3 of y: neither the build-time inference nor
       # the bind check can settle a symbolic dimension, so MLX does.
       mismatched = good.merge(y: { shape: [3, 1], data: [1.0, 2.0, 3.0] })

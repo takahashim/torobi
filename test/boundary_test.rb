@@ -60,7 +60,7 @@ class BoundaryTest < Minitest::Test
       batch[:x] = { shape: [4, 2], data: Array.new(8, 1.0) }
       batch[:y] = { shape: [3, 1], data: Array.new(3, 1.0) }
       begin
-        Torobi::Session.open(config, weights).step!(batch)
+        Torobi::Session.open(config, weights: weights).step!(batch)
         puts "NO ERROR"
       rescue => e
         puts "RESCUED \#{e.class}: \#{e.message}"
@@ -79,7 +79,7 @@ class BoundaryTest < Minitest::Test
       config, weights, batch = build
       batch[:x] = { shape: [1, 3], data: [1.0, 2.0, 3.0] }
       begin
-        Torobi::Session.open(config, weights).step!(batch)
+        Torobi::Session.open(config, weights: weights).step!(batch)
         puts "NO ERROR"
       rescue => e
         puts "RESCUED \#{e.message}"
@@ -94,41 +94,44 @@ class BoundaryTest < Minitest::Test
     body = <<~RUBY
       config, weights, batch = build
       begin
-        Torobi::Session.open(config, weights)
+        Torobi::Session.open(config, weights: weights)
         puts "OPENED"
       rescue Torobi::EngineUnavailable => e
-        puts "REFUSED"
+        puts "REFUSED \#{e.message[0, 160].tr("\n", " ")}"
       end
     RUBY
     output, status = run_isolated(body, hide_metallib: true)
     assert_predicate status, :success?, output
     assert_match(/REFUSED/, output)
+    assert_match(/metallib|kernels/i, output, "the message should say what is missing")
   end
 
-  # The finding this file is really about: without that refusal, MLX ends
-  # the process. Documented as a test so it cannot quietly change.
-  def test_without_the_refusal_a_missing_metallib_ends_the_process
+  # The route that used to die. `Torobi::Native` called directly goes
+  # through no Ruby preflight, and before the check moved into the engine's
+  # runtime, MLX ended the process here. Now every route into the engine is
+  # refused with an exception, because the runtime asks dladdr the same
+  # question MLX would, first.
+  def test_even_the_direct_native_route_is_refused_not_aborted
     body = <<~RUBY
       config, weights, batch = build
       begin
         Torobi::Native::Session.open(config.canonical_json, JSON.generate(weights),
                                      JSON.generate(Torobi::Session::DEFAULT_OPTIMIZER))
         puts "OPENED"
-      rescue => e
+      rescue Torobi::EngineUnavailable => e
         puts "RESCUED \#{e.class}"
       end
     RUBY
     output, status = run_isolated(body, hide_metallib: true)
-    refute_predicate status, :success?,
-                     "MLX now survives a missing metallib; the preflight and the plan " \
-                     "should say so (#{output})"
-    refute_match(/RESCUED/, output, "the failure did not reach Ruby, as expected")
+    assert_predicate status, :success?,
+                     "a missing metallib should be an exception now, not an abort (#{output})"
+    assert_match(/RESCUED Torobi::EngineUnavailable/, output)
   end
 
   def test_a_session_survives_forced_gc_and_repeated_spans
     body = <<~RUBY
       config, weights, batch = build
-      s = Torobi::Session.open(config, weights)
+      s = Torobi::Session.open(config, weights: weights)
       s.adjust(lr: 0.1)
       50.times do
         s.repeat(batch, steps: 4)
@@ -146,7 +149,7 @@ class BoundaryTest < Minitest::Test
   def test_many_sessions_are_opened_and_dropped_without_growth
     body = <<~RUBY
       config, weights, batch = build
-      100.times { Torobi::Session.open(config, weights).step!(batch) }
+      100.times { Torobi::Session.open(config, weights: weights).step!(batch) }
       GC.start
       puts "SURVIVED"
     RUBY

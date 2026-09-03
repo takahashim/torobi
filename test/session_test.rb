@@ -38,7 +38,7 @@ class SessionTest < Minitest::Test
   end
 
   def test_a_span_takes_one_batch_per_step
-    Torobi::Session.open(@config, @weights) do |s|
+    Torobi::Session.open(@config, weights: @weights) do |s|
       assert_equal 0, s.step
       assert_equal %w[spike.linear.weight spike.linear.bias], s.parameter_paths
       assert_equal %w[x y], s.input_names.sort
@@ -62,7 +62,7 @@ class SessionTest < Minitest::Test
   # The symbolic batch dimension is real: batches of different sizes go
   # through the same graph.
   def test_batches_may_differ_in_size_from_step_to_step
-    Torobi::Session.open(@config, @weights) do |s|
+    Torobi::Session.open(@config, weights: @weights) do |s|
       s.adjust(lr: 0.3)
       [1, 4, 16, 3].each { |rows| s.step!(batch(rows)) }
       assert_equal 4, s.step
@@ -71,7 +71,7 @@ class SessionTest < Minitest::Test
   end
 
   def test_gradients_are_for_the_batch_they_are_given
-    Torobi::Session.open(@config, @weights) do |s|
+    Torobi::Session.open(@config, weights: @weights) do |s|
       b = batch(8, seed: 1)
       grads = s.gradients(b)
       assert_equal %w[spike.linear.weight spike.linear.bias], grads.keys
@@ -87,19 +87,19 @@ class SessionTest < Minitest::Test
   end
 
   def test_knobs_are_read_back_and_take_effect
-    slow = Torobi::Session.open(@config, @weights) do |s|
+    slow = Torobi::Session.open(@config, weights: @weights) do |s|
       s.adjust(lr: 0.05)
       assert_in_delta 0.05, s.lr
       s.run(batches(5))
     end
-    fast = Torobi::Session.open(@config, @weights) { |s| s.adjust(lr: 0.5).run(batches(5)) }
+    fast = Torobi::Session.open(@config, weights: @weights) { |s| s.adjust(lr: 0.5).run(batches(5)) }
     assert_operator fast, :<, slow, "a larger lr should get further in the same steps"
   end
 
   # The point of releasing the GVL: another Ruby thread runs while a span
   # is in flight.
   def test_other_threads_proceed_while_a_span_runs
-    Torobi::Session.open(@config, @weights) do |s|
+    Torobi::Session.open(@config, weights: @weights) do |s|
       ticks = 0
       ticker = Thread.new do
         loop do
@@ -114,13 +114,24 @@ class SessionTest < Minitest::Test
     end
   end
 
+  # Where the parameters come from is a keyword, not a position: model
+  # import adds loading from a file, and the GraphConfig's declared
+  # initializers are a natural third. Saying which one is meant should not
+  # be a matter of what type the second argument happens to be.
+  def test_a_session_says_which_parameters_it_wants
+    e = assert_raises(ArgumentError) { Torobi::Session.open(@config) }
+
+    assert_match(/needs its parameters/, e.message)
+    assert_match(/weights:/, e.message)
+  end
+
   def test_mistakes_are_named
     e = assert_raises(Torobi::StepError) do
-      Torobi::Session.open(@config, { params: {} })
+      Torobi::Session.open(@config, weights: { params: {} })
     end
     assert_match(/missing parameter "spike.linear.weight"/, e.message)
 
-    Torobi::Session.open(@config, @weights) do |s|
+    Torobi::Session.open(@config, weights: @weights) do |s|
       assert_raises(Torobi::StepError) { s.fetch("nope") }
       assert_raises(ArgumentError) { s.run([]) }
 

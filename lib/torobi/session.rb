@@ -25,8 +25,15 @@ module Torobi
     # has no state to restore and is the right default for a spike.
     DEFAULT_OPTIMIZER = { kind: :sgd, lr: 0.1 }.freeze
 
-    # Opens a session over `config` (a GraphConfig) with initial `weights`,
-    # shaped {params: {path => {shape:, data:}}}.
+    # Opens a session over `config` (a GraphConfig).
+    #
+    # `weights:` is the initial parameters as values, shaped
+    # {params: {path => {shape:, data:}}}. A keyword rather than a
+    # positional, because it is one of what will be several ways to say
+    # where parameters come from: model import (M3a) adds loading from a
+    # safetensors file, and the GraphConfig already declares initializers,
+    # so a run that starts from those alone is a natural third. Keywords
+    # let the choices sit side by side without a type switch.
     #
     # `optimizer` is data, so that a journal and a checkpoint can record
     # exactly what ran: {kind: :adamw, lr: 1e-3, weight_decay: 0.01}.
@@ -35,8 +42,15 @@ module Torobi
     # section 8.6. Pass a Journal, or `io:` to have one made against this
     # config's provenance; without either, nothing is recorded and the
     # session is exactly as fast.
-    def self.open(config, weights, optimizer: DEFAULT_OPTIMIZER, journal: nil, io: nil,
+    def self.open(config, weights: nil, optimizer: DEFAULT_OPTIMIZER, journal: nil, io: nil,
                   dataset: nil)
+      unless weights
+        raise ArgumentError,
+              "a session needs its parameters: pass weights: " \
+              "{params: {path => {shape:, data:}}} (loading from a file " \
+              "arrives with model import)"
+      end
+
       Preflight.check!
       native = Native::Session.open(config.canonical_json, JSON.generate(weights),
                                     JSON.generate(optimizer))

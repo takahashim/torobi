@@ -35,7 +35,7 @@ class DtypeTest < Minitest::Test
   end
 
   def test_a_graph_reads_i32_ids
-    Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
       loss = s.step!(ids_batch([1, 2, 3]))
       assert_in_delta 2.0, loss, 1e-6, "the mean of rows 1, 2 and 3"
 
@@ -47,7 +47,7 @@ class DtypeTest < Minitest::Test
   # The gradient reaches only the rows that were read, which is the whole
   # point of an embedding.
   def test_only_the_rows_that_were_read_receive_gradient
-    Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 1.0 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 1.0 }) do |s|
       s.step!(ids_batch([2, 2]))
       table = s.fetch("m.emb.weight")[:data].each_slice(DIM).to_a
       refute_equal [2.0] * DIM, table[2], "row 2 was read and should have moved"
@@ -60,7 +60,7 @@ class DtypeTest < Minitest::Test
   end
 
   def test_the_dtype_a_batch_gives_must_be_the_one_declared
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       e = assert_raises(Torobi::StepError) do
         s.step!({ ids: { shape: [1, 2], data: [1.0, 2.0] } }) # f32 by default
       end

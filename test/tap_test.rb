@@ -36,7 +36,7 @@ class TapTest < Minitest::Test
   def batch = { x: { shape: [ROWS, DIM], data: Array.new(ROWS * DIM, 1.0) } }
 
   def test_the_names_a_tap_can_ask_for_are_the_ones_the_dsl_gave
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       assert_equal %w[first second], s.node_names
     end
   end
@@ -44,7 +44,7 @@ class TapTest < Minitest::Test
   # Every statistic is checked against the value we know is there: 0.4 in
   # every one of ROWS x DIM places after the first layer.
   def test_a_tap_reduces_on_the_device
-    Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
       s.tap("first", stat: :mean)
       s.step!(batch)
       assert_in_delta 0.4, s.tapped.fetch("first"), 1e-6
@@ -63,7 +63,7 @@ class TapTest < Minitest::Test
   end
 
   def test_a_full_tap_brings_the_tensor_back
-    Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
       s.tap("second", stat: :full)
       s.step!(batch)
       value = s.tapped.fetch("second")
@@ -74,7 +74,7 @@ class TapTest < Minitest::Test
   end
 
   def test_several_taps_at_once_and_untapping
-    Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
       s.tap("first").tap("second", stat: :mean)
       assert_equal %w[first second], s.taps
       s.step!(batch)
@@ -90,11 +90,11 @@ class TapTest < Minitest::Test
   # A tap watches, it does not change: the same run with and without one
   # reaches the same place.
   def test_watching_does_not_change_what_is_learned
-    without = Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
+    without = Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
       s.run([batch] * 5)
       s.fetch("m.second.weight")[:data]
     end
-    with = Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
+    with = Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
       s.tap("first", stat: :norm)
       s.run([batch] * 5)
       s.fetch("m.second.weight")[:data]
@@ -103,7 +103,7 @@ class TapTest < Minitest::Test
   end
 
   def test_asking_for_what_is_not_there_is_refused_by_name
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       e = assert_raises(Torobi::StepError) { s.tap("third") }
       assert_match(/no value is named "third"/, e.message)
       assert_match(/first/, e.message, "the refusal should say what there is")
@@ -117,7 +117,7 @@ class TapTest < Minitest::Test
   # tap's value is waiting.
   def test_a_hook_reads_what_the_tap_saw
     seen = []
-    Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
       s.tap("first", stat: :norm)
       s.on(:step) { |e| seen << e.session.tapped.fetch("first") }
       s.run([batch] * 3)

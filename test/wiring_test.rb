@@ -70,7 +70,7 @@ class WiringTest < Minitest::Test
       { x: { shape: [rows, 2], data: xs.flatten } }
     end
 
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       # The objective needs no batch field of its own here: it reads both
       # models, and they read x.
       assert_equal ["x"], s.input_names

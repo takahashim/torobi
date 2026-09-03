@@ -48,7 +48,7 @@ class RngTest < Minitest::Test
 
   def losses(seed:, steps: 6, all: nil)
     all ||= batches(steps)
-    Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
       s.adjust(seed:)
       all.map { |b| s.step!(b) }
     end
@@ -66,7 +66,7 @@ class RngTest < Minitest::Test
   end
 
   def test_the_seed_is_readable_state
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       assert_equal 0, s.seed, "a session starts from a stated seed, not from chance"
       s.adjust(seed: 42)
       assert_equal 42, s.seed
@@ -81,18 +81,18 @@ class RngTest < Minitest::Test
       optimizer = { kind: :adamw, lr: 0.02 }
       path = File.join(dir, "half")
 
-      continuous = Torobi::Session.open(config, weights, optimizer:) do |s|
+      continuous = Torobi::Session.open(config, weights: weights, optimizer:) do |s|
         s.adjust(seed: 5)
         s.run(all)
         s.parameter_paths.to_h { |p| [p, s.fetch(p)[:data]] }
       end
 
-      Torobi::Session.open(config, weights, optimizer:) do |s|
+      Torobi::Session.open(config, weights: weights, optimizer:) do |s|
         s.adjust(seed: 5)
         s.run(all.first(4))
         s.checkpoint!(path)
       end
-      resumed = Torobi::Session.open(config, weights, optimizer:) do |s|
+      resumed = Torobi::Session.open(config, weights: weights, optimizer:) do |s|
         s.restore(path)
         assert_equal 5, s.seed, "the seed came back with the checkpoint"
         s.run(all.drop(4))
@@ -125,7 +125,7 @@ class RngTest < Minitest::Test
     } }
     batch = { x: { shape: [ROWS, DIM], data: Array.new(ROWS * DIM, 1.0) } }
 
-    loss = Torobi::Session.open(conf, w, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
+    loss = Torobi::Session.open(conf, weights: w, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
       s.adjust(seed: 3)
       s.step!(batch)
     end
@@ -135,19 +135,19 @@ class RngTest < Minitest::Test
   def test_a_rate_outside_zero_to_one_is_refused
     conf = config(p: 1.5)
     e = assert_raises(Torobi::StepError) do
-      Torobi::Session.open(conf, weights) { |s| s.step!(batches(1).first) }
+      Torobi::Session.open(conf, weights: weights) { |s| s.step!(batches(1).first) }
     end
     assert_match(/p must be in 0\.\.1/, e.message)
   end
 
   def test_a_rate_of_zero_is_the_identity
     all = batches(4)
-    without = Torobi::Session.open(config(p: 0.0), weights,
+    without = Torobi::Session.open(config(p: 0.0), weights: weights,
                                    optimizer: { kind: :sgd, lr: 0.05 }) do |s|
       s.adjust(seed: 1)
       all.map { |b| s.step!(b) }
     end
-    other_seed = Torobi::Session.open(config(p: 0.0), weights,
+    other_seed = Torobi::Session.open(config(p: 0.0), weights: weights,
                                       optimizer: { kind: :sgd, lr: 0.05 }) do |s|
       s.adjust(seed: 99)
       all.map { |b| s.step!(b) }

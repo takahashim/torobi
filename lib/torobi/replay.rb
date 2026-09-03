@@ -50,7 +50,7 @@ module Torobi
       data = batches.to_a
       divergences = []
 
-      final = Session.open(config, weights, optimizer: optimizer_of(entries)) do |session|
+      final = Session.open(config, weights: weights, optimizer: optimizer_of(entries)) do |session|
         seen = 0
         entries.each do |entry|
           case entry["kind"]
@@ -87,7 +87,7 @@ module Torobi
       seen = []
       divergences = []
 
-      final = Session.open(config, weights, optimizer: optimizer_of(entries)) do |session|
+      final = Session.open(config, weights: weights, optimizer: optimizer_of(entries)) do |session|
         recorder = Watcher.new(session, seen)
         program.call(recorder, batches)
         session.loss

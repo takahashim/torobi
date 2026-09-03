@@ -174,7 +174,7 @@ impl<T> Ran<T> {
 /// it. Nothing reads a message to find out (the plan, section 9).
 fn from_engine(ruby: &Ruby, error: RuntimeError) -> Error {
     let class = match error {
-        RuntimeError::ForeignProcess => "EngineUnavailable",
+        RuntimeError::ForeignProcess | RuntimeError::Unavailable(_) => "EngineUnavailable",
         RuntimeError::Poisoned => "RuntimePoisoned",
         RuntimeError::Engine(inner) => return to_error(ruby, inner),
     };

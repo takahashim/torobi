@@ -50,7 +50,7 @@ Dir.mktmpdir("torobi-smoke") do |home|
                           "m.l.bias" => { shape: [1], data: [0.0] } } }
     batch = { x: { shape: [2, 2], data: [1.0, 2.0, 3.0, 4.0] },
               y: { shape: [2, 1], data: [1.0, 2.0] } }
-    loss = Torobi::Session.open(config, weights) { |s| s.adjust(lr: 0.1).step!(batch) }
+    loss = Torobi::Session.open(config, weights: weights) { |s| s.adjust(lr: 0.1).step!(batch) }
     puts JSON.generate({ loss:, metallib: File.exist?(Torobi::Preflight::METALLIB),
                          engine: Torobi::Native.build_info })
   RUBY

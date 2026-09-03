@@ -27,7 +27,7 @@ module Torobi
   # And in train.rb:
   #
   #   Torobi::Runner.child do |run|
-  #     Torobi::Session.open(config, weights, io: run.journal) do |s|
+  #     Torobi::Session.open(config, weights: weights, io: run.journal) do |s|
   #       s.run(batches) do
   #         s.checkpoint!(run.checkpoint) if (s.step % 200).zero?
   #         break if run.stopping?

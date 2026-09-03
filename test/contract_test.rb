@@ -89,25 +89,25 @@ class ContractTest < Minitest::Test
 
     Dir.mktmpdir("torobi-contract") do |dir|
       path = File.join(dir, "c")
-      Torobi::Session.open(config, weights, optimizer: adamw) do |s|
+      Torobi::Session.open(config, weights: weights, optimizer: adamw) do |s|
         s.step!(batch)
         s.checkpoint!(path)
       end
       File.unlink(File.join(path, "optimizer.safetensors"))
 
       e = assert_raises(Torobi::StepError) do
-        Torobi::Session.open(config, weights, optimizer: adamw) { |s| s.restore(path) }
+        Torobi::Session.open(config, weights: weights, optimizer: adamw) { |s| s.restore(path) }
       end
       assert_match(/no optimizer state, and adamw needs it/, e.message)
 
       # And an SGD checkpoint is not an AdamW one, in either direction.
       sgd_path = File.join(dir, "sgd")
-      Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
+      Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
         s.step!(batch)
         s.checkpoint!(sgd_path)
       end
       e = assert_raises(Torobi::StepError) do
-        Torobi::Session.open(config, weights, optimizer: adamw) { |s| s.restore(sgd_path) }
+        Torobi::Session.open(config, weights: weights, optimizer: adamw) { |s| s.restore(sgd_path) }
       end
       assert_match(/different optimizer/, e.message)
     end
@@ -123,13 +123,13 @@ class ContractTest < Minitest::Test
 
     Dir.mktmpdir("torobi-contract") do |dir|
       path = File.join(dir, "c")
-      Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
+      Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
         s.step!(batch)
         s.checkpoint!(path)
       end
       File.unlink(File.join(path, "random.safetensors"))
 
-      Torobi::Session.open(config, weights, optimizer: { kind: :adamw, lr: 0.01 }) do |s|
+      Torobi::Session.open(config, weights: weights, optimizer: { kind: :adamw, lr: 0.01 }) do |s|
         s.step!(batch)
         before = { step: s.step, weight: s.fetch("m.l.weight")[:data], seed: s.seed }
         assert_raises(Torobi::StepError) { s.restore(path) }
@@ -152,7 +152,7 @@ class ContractTest < Minitest::Test
                           "m.l.bias" => { shape: [1], data: [0.0] } } }
     good = { x: { shape: [2, 2], data: [1.0, 2.0, 3.0, 4.0] } }
 
-    Torobi::Session.open(config, weights, optimizer: { kind: :adamw, lr: 0.05 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :adamw, lr: 0.05 }) do |s|
       s.step!(good)
       before = s.fetch("m.l.weight")[:data]
 
@@ -165,7 +165,7 @@ class ContractTest < Minitest::Test
       # The next step continues the same trajectory: run the same batch
       # twice from a fresh session and compare.
       after_failure = s.step!(good)
-      clean = Torobi::Session.open(config, weights, optimizer: { kind: :adamw, lr: 0.05 }) do |t|
+      clean = Torobi::Session.open(config, weights: weights, optimizer: { kind: :adamw, lr: 0.05 }) do |t|
         t.step!(good)
         t.step!(good)
       end
@@ -184,7 +184,7 @@ class ContractTest < Minitest::Test
 
     Dir.mktmpdir("torobi-contract") do |dir|
       path = File.join(dir, "c")
-      Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
+      Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
         s.step!(batch)
         s.checkpoint!(path)
         s.step!(batch)

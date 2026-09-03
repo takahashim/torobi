@@ -55,22 +55,22 @@ class CheckpointTest < Minitest::Test
     optimizer = { kind: :adamw, lr: 0.05 }
     all = batches
 
-    continuous = Torobi::Session.open(config, weights, optimizer:) do |s|
+    continuous = Torobi::Session.open(config, weights: weights, optimizer:) do |s|
       s.run(all)
       state_of(s)
     end
 
-    resumed = Torobi::Session.open(config, weights, optimizer:) do |s|
+    resumed = Torobi::Session.open(config, weights: weights, optimizer:) do |s|
       s.run(all.first(5))
       s.checkpoint!(File.join(@dir, "half"))
       state_of(s)
     end
-    assert_equal 5, Torobi::Session.open(config, weights, optimizer:) { |s|
+    assert_equal 5, Torobi::Session.open(config, weights: weights, optimizer:) { |s|
       s.restore(File.join(@dir, "half"))
       s.step
     }
 
-    final = Torobi::Session.open(config, weights, optimizer:) do |s|
+    final = Torobi::Session.open(config, weights: weights, optimizer:) do |s|
       s.restore(File.join(@dir, "half"))
       s.run(all.drop(5))
       state_of(s)
@@ -83,7 +83,7 @@ class CheckpointTest < Minitest::Test
                         "#{path}[#{i}] after resuming"
       end
     end
-    assert_equal STEPS, Torobi::Session.open(config, weights, optimizer:) { |s|
+    assert_equal STEPS, Torobi::Session.open(config, weights: weights, optimizer:) { |s|
       s.restore(File.join(@dir, "half"))
       s.run(all.drop(5))
       s.step
@@ -97,11 +97,11 @@ class CheckpointTest < Minitest::Test
     all = batches(6)
     path = File.join(@dir, "half")
 
-    Torobi::Session.open(config, weights, optimizer:) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer:) do |s|
       s.run(all.first(3))
       s.checkpoint!(path)
     end
-    with_state = Torobi::Session.open(config, weights, optimizer:) do |s|
+    with_state = Torobi::Session.open(config, weights: weights, optimizer:) do |s|
       s.restore(path)
       s.run(all.drop(3))
       state_of(s)
@@ -110,11 +110,11 @@ class CheckpointTest < Minitest::Test
     # A run given the checkpoint's parameters but not its optimizer state.
     parameters = JSON.parse(File.read(File.join(path, "manifest.json")))
     assert_equal 3, parameters.fetch("step")
-    fresh_weights = { params: Torobi::Session.open(config, weights, optimizer:) { |s|
+    fresh_weights = { params: Torobi::Session.open(config, weights: weights, optimizer:) { |s|
       s.restore(path)
       s.parameter_paths.to_h { |p| [p, s.fetch(p)] }
     } }
-    without_state = Torobi::Session.open(config, fresh_weights, optimizer:) do |s|
+    without_state = Torobi::Session.open(config, weights: fresh_weights, optimizer:) do |s|
       s.run(all.drop(3))
       state_of(s)
     end
@@ -128,7 +128,7 @@ class CheckpointTest < Minitest::Test
   # section 11.2). These are the parts that make it one.
 
   def test_a_checkpoint_carries_the_description_it_belongs_to
-    written = Torobi::Session.open(config, weights) do |s|
+    written = Torobi::Session.open(config, weights: weights) do |s|
       s.run(batches(1))
       s.checkpoint!(File.join(@dir, "c"))
     end
@@ -143,7 +143,7 @@ class CheckpointTest < Minitest::Test
   end
 
   def test_a_checkpoint_inventories_shapes_and_dtypes
-    written = Torobi::Session.open(config, weights) do |s|
+    written = Torobi::Session.open(config, weights: weights) do |s|
       s.run(batches(1))
       s.checkpoint!(File.join(@dir, "c"))
     end
@@ -157,7 +157,7 @@ class CheckpointTest < Minitest::Test
   def test_a_checkpoint_records_where_in_the_data_the_run_was
     # Torobi is handed batches and never fetches them, so it cannot work
     # this out. It records what it is told and hands it back.
-    written = Torobi::Session.open(config, weights) do |s|
+    written = Torobi::Session.open(config, weights: weights) do |s|
       s.run(batches(2))
       s.checkpoint!(File.join(@dir, "c"), at: { epoch: 3, batch: 1400,
                                                 sampler: { kind: :shuffled, seed: 9 } })
@@ -167,25 +167,25 @@ class CheckpointTest < Minitest::Test
                    "sampler" => { "kind" => "shuffled", "seed" => 9 } },
                  Torobi::Checkpoint.position(written))
 
-    resumed = Torobi::Session.open(config, weights) { |s| s.restore(written) }
+    resumed = Torobi::Session.open(config, weights: weights) { |s| s.restore(written) }
 
     assert_equal 3, resumed.fetch("epoch")
     assert_equal 1400, resumed.fetch("batch")
   end
 
   def test_a_checkpoint_without_a_position_restores_to_nothing
-    written = Torobi::Session.open(config, weights) do |s|
+    written = Torobi::Session.open(config, weights: weights) do |s|
       s.run(batches(1))
       s.checkpoint!(File.join(@dir, "c"))
     end
 
     assert_nil Torobi::Checkpoint.position(written)
-    assert_nil Torobi::Session.open(config, weights) { |s| s.restore(written) }
+    assert_nil Torobi::Session.open(config, weights: weights) { |s| s.restore(written) }
   end
 
   def test_a_checkpoint_records_the_runs_provenance
     dataset = { "name" => "spike", "digest" => "abc" }
-    written = Torobi::Session.open(config, weights, dataset:) do |s|
+    written = Torobi::Session.open(config, weights: weights, dataset:) do |s|
       s.run(batches(1))
       s.checkpoint!(File.join(@dir, "c"))
     end
@@ -198,7 +198,7 @@ class CheckpointTest < Minitest::Test
   end
 
   def test_a_manifest_reads_without_a_session_to_read_it_into
-    written = Torobi::Session.open(config, weights) do |s|
+    written = Torobi::Session.open(config, weights: weights) do |s|
       s.run(batches(2))
       s.checkpoint!(File.join(@dir, "c"), at: { epoch: 1 })
     end
@@ -215,20 +215,20 @@ class CheckpointTest < Minitest::Test
   end
 
   def test_a_graph_that_is_not_the_one_the_manifest_claims_is_refused
-    written = Torobi::Session.open(config, weights) do |s|
+    written = Torobi::Session.open(config, weights: weights) do |s|
       s.run(batches(1))
       s.checkpoint!(File.join(@dir, "c"))
     end
     File.write(File.join(written, "graph.json"), "{}")
 
     error = assert_raises(Torobi::StepError) do
-      Torobi::Session.open(config, weights) { |s| s.restore(written) }
+      Torobi::Session.open(config, weights: weights) { |s| s.restore(written) }
     end
     assert_match(/not the description this manifest claims/, error.message)
   end
 
   def test_a_position_that_is_not_json_is_refused_before_anything_is_written
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       s.run(batches(1))
       # An object JSON cannot represent: the refusal is the engine's, and
       # it happens before the directory exists.
@@ -240,7 +240,7 @@ class CheckpointTest < Minitest::Test
   end
 
   def test_a_checkpoint_says_what_it_belongs_to
-    Torobi::Session.open(config, weights, optimizer: { kind: :adamw, lr: 0.05 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :adamw, lr: 0.05 }) do |s|
       s.run(batches(2))
       s.checkpoint!(File.join(@dir, "c"))
     end
@@ -262,13 +262,13 @@ class CheckpointTest < Minitest::Test
 
   # SGD has no slots, so it writes none; the checkpoint is still complete.
   def test_an_optimizer_without_slots_writes_none
-    Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
       s.run(batches(2))
       s.checkpoint!(File.join(@dir, "sgd"))
     end
     refute_path_exists File.join(@dir, "sgd", "optimizer.safetensors")
 
-    Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
       s.restore(File.join(@dir, "sgd"))
       assert_equal 2, s.step
     end
@@ -277,7 +277,7 @@ class CheckpointTest < Minitest::Test
   def test_what_does_not_belong_is_refused
     path = File.join(@dir, "c")
     optimizer = { kind: :adamw, lr: 0.05 }
-    Torobi::Session.open(config, weights, optimizer:) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer:) do |s|
       s.run(batches(2))
       s.checkpoint!(path)
     end
@@ -291,13 +291,13 @@ class CheckpointTest < Minitest::Test
     other_weights = { params: { "m.different.weight" => { shape: [1, 2], data: [0.0, 0.0] },
                                 "m.different.bias" => { shape: [1], data: [0.0] } } }
     e = assert_raises(Torobi::StepError) do
-      Torobi::Session.open(other, other_weights, optimizer:) { |s| s.restore(path) }
+      Torobi::Session.open(other, weights: other_weights, optimizer:) { |s| s.restore(path) }
     end
     assert_match(/belongs to another graph/, e.message)
 
     # Another optimizer.
     e = assert_raises(Torobi::StepError) do
-      Torobi::Session.open(config, weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
+      Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
         s.restore(path)
       end
     end
@@ -305,7 +305,7 @@ class CheckpointTest < Minitest::Test
 
     # Nothing there at all.
     e = assert_raises(Torobi::StepError) do
-      Torobi::Session.open(config, weights, optimizer:) { |s| s.restore(File.join(@dir, "nope")) }
+      Torobi::Session.open(config, weights: weights, optimizer:) { |s| s.restore(File.join(@dir, "nope")) }
     end
     assert_match(/manifest.json/, e.message)
   end
@@ -314,7 +314,7 @@ class CheckpointTest < Minitest::Test
   # mistaken for a checkpoint.
   def test_writing_is_atomic
     path = File.join(@dir, "c")
-    Torobi::Session.open(config, weights, optimizer: { kind: :adamw, lr: 0.05 }) do |s|
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :adamw, lr: 0.05 }) do |s|
       s.run(batches(2))
       s.checkpoint!(path)
       refute_path_exists "#{path}.writing", "the staging directory should be gone"

@@ -4,20 +4,22 @@ module Torobi
   # What must hold before the engine is asked to do anything.
   #
   # Not defensive programming for its own sake: some MLX failures do not
-  # come back as errors. A missing metallib, or a machine with no Metal
-  # device, raises a C++ exception during device initialization, which Rust
-  # cannot catch; the process exits with nothing for Ruby to rescue. The
-  # remedy for the failures we can foresee is to refuse before touching
-  # MLX, with a message that says what to do.
+  # come back as errors. A machine with no working Metal device raises a
+  # C++ exception during device initialization, which Rust cannot catch;
+  # the process exits with nothing for Ruby to rescue.
   #
-  # See docs/plan.md, section 4.1: what is checked here is the known list,
-  # not a guarantee. An external review reached a machine where the
-  # metallib was present and initialization still aborted, which is why
-  # `probe!` exists: it asks in a subprocess, where an abort is an exit
-  # status rather than the end of this process.
+  # This file holds the checks only Ruby can make. The missing-metallib
+  # refusal moved into the engine's runtime, where it also covers callers
+  # that never pass through here (`Torobi::Native` used directly, the
+  # engine's own CLI and tests). What stays is the probe: an external
+  # review reached a machine where the metallib was present and
+  # initialization still aborted, and the only honest way to ask "will the
+  # device start" is in a subprocess, where an abort is an exit status
+  # rather than the end of this process (docs/plan.md section 4.1).
   module Preflight
-    # MLX finds its Metal kernels through dladdr, so the metallib must sit
-    # beside the library holding the MLX symbols: the extension bundle.
+    # Where MLX will look for its Metal kernels: beside the library holding
+    # the MLX symbols, found through dladdr. The engine refuses when the
+    # file is not there; this constant remains for the tests that hide it.
     METALLIB = File.expand_path("mlx.metallib", __dir__)
 
     # The process that loaded the extension. A Metal device and its command
@@ -37,19 +39,9 @@ module Torobi
               "worker (Puma clustered, Sidekiq, Spring)."
       end
 
-      unless File.exist?(METALLIB)
-        raise Torobi::EngineUnavailable,
-              "MLX's metallib is not beside the extension (expected #{METALLIB}). " \
-              "Without it MLX aborts the process rather than raising, so this " \
-              "refuses first. Run `rake metallib` in a checkout, or reinstall the gem."
-      end
-
       return if probe_result
 
-      raise Torobi::EngineUnavailable,
-            "MLX cannot start on this machine: initializing its device ended a " \
-            "probe process rather than raising. Torobi needs Apple silicon with " \
-            "a working Metal device; see docs/vendoring.md."
+      raise Torobi::EngineUnavailable, "MLX cannot start on this machine: #{@probe_reason}"
     end
 
     # Whether MLX can actually initialize, asked once per process.
@@ -87,15 +79,33 @@ module Torobi
         print "ok"
       RUBY
       output, status = Open3.capture2e(RbConfig.ruby, "-e", script)
-      status.success? && output.end_with?("ok")
-    rescue StandardError
+      ok = status.success? && output.end_with?("ok")
+      @probe_reason = ok ? nil : reason_from(output)
+      ok
+    rescue StandardError => e
+      @probe_reason = e.message
       false
+    end
+
+    # The child's own words, when it had any. An engine refusal arrives as
+    # an exception message; an abort leaves whatever MLX printed on the way
+    # down; a silent death leaves nothing, and then the generic truth is
+    # all there is to say.
+    def reason_from(output)
+      line = output.lines.map(&:strip).reject(&:empty?).first
+      return "initializing its device ended a probe process rather than raising. " \
+             "Torobi needs Apple silicon with a working Metal device; " \
+             "see docs/vendoring.md." unless line
+
+      # An unrescued Ruby exception prints as "-e:12:in '<main>': message".
+      line.sub(/\A.*?:\d+:in '.*?': /, "")
     end
 
     # For tests that need the probe run again.
     def forget_probe!
       @probe_pid = nil
       @probe_result = nil
+      @probe_reason = nil
     end
   end
 end

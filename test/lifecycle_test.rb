@@ -35,7 +35,7 @@ class LifecycleTest < Minitest::Test
   # ended. Now a watcher reads the last completed step's numbers, and both
   # threads survive (notes/SESSION_CONCURRENCY_SPEC.md section 4).
   def test_a_second_thread_watching_reads_the_last_step_rather_than_refusing
-    session = Torobi::Session.open(config, weights)
+    session = Torobi::Session.open(config, weights: weights)
     seen = []
     refused = []
     reader = Thread.new do
@@ -57,13 +57,13 @@ class LifecycleTest < Minitest::Test
     assert_equal steps, steps.sort
     assert_operator steps.max, :<=, 40
     assert(seen.none? { |_, loss, _, _| loss.nil? })
-    assert_equal 40, Torobi::Session.open(config, weights) { |s| s.run([batch] * 40); s.step }
+    assert_equal 40, Torobi::Session.open(config, weights: weights) { |s| s.run([batch] * 40); s.step }
   end
 
   # Watching is not serving. A second thread that tries to *use* the engine
   # while a step runs is still told it is busy.
   def test_a_second_thread_that_uses_the_engine_is_told_it_is_busy
-    session = Torobi::Session.open(config, weights)
+    session = Torobi::Session.open(config, weights: weights)
     busy = 0
     other = Thread.new do
       200.times do
@@ -82,7 +82,7 @@ class LifecycleTest < Minitest::Test
   # Closing releases the engine, and everything afterwards refuses rather
   # than pretending. Idempotent, so an ensure can always call it.
   def test_close_is_idempotent_and_refuses_afterwards
-    session = Torobi::Session.open(config, weights)
+    session = Torobi::Session.open(config, weights: weights)
     session.step!(batch)
     refute_predicate session, :closed?
 
@@ -106,7 +106,7 @@ class LifecycleTest < Minitest::Test
   def test_the_block_form_closes_even_when_the_block_raises
     session = nil
     assert_raises(RuntimeError) do
-      Torobi::Session.open(config, weights) do |s|
+      Torobi::Session.open(config, weights: weights) do |s|
         session = s
         s.step!(batch)
         raise "something went wrong in the caller"
@@ -118,7 +118,7 @@ class LifecycleTest < Minitest::Test
   # A span is driven per step from Ruby, so it can be interrupted between
   # steps rather than after the last one.
   def test_a_span_is_interruptible_between_steps
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       seen = 0
       assert_raises(RuntimeError) do
         s.run(Array.new(1000) { batch }) do |_loss|
@@ -135,7 +135,7 @@ class LifecycleTest < Minitest::Test
 
   # An endless enumerable trains, rather than being materialized first.
   def test_a_span_consumes_its_batches_as_it_goes
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       endless = Enumerator.new { |y| loop { y << batch } }
       taken = 0
       assert_raises(RuntimeError) do
@@ -152,7 +152,7 @@ class LifecycleTest < Minitest::Test
   # takes is journalled and fires its hooks like any other.
   def test_repeat_is_a_span_like_any_other
     io = StringIO.new
-    Torobi::Session.open(config, weights, io:) do |s|
+    Torobi::Session.open(config, weights: weights, io:) do |s|
       fired = 0
       s.on(:step) { fired += 1 }
       s.repeat(batch, steps: 4)
@@ -179,12 +179,12 @@ class LifecycleTest < Minitest::Test
       config = Torobi::GraphConfig.new(models: { "m" => model })
       weights = #{weights.inspect}
       batch = #{batch.inspect}
-      keeps_going = Torobi::Session.open(config, weights)
+      keeps_going = Torobi::Session.open(config, weights: weights)
       worker = Thread.new { 300.times { keeps_going.step!(batch) } }
       60.times do
         # Opened and dropped without close, so the sweep has device memory
         # to free while the worker is inside MLX.
-        Torobi::Session.open(config, weights).step!(batch)
+        Torobi::Session.open(config, weights: weights).step!(batch)
         GC.start
       end
       worker.join
@@ -203,7 +203,7 @@ class LifecycleTest < Minitest::Test
     before = Torobi::Memory.report
     assert_operator before.fetch(:limit), :>, 0, "this machine reports a cap"
 
-    Torobi::Session.open(config, weights) do |s|
+    Torobi::Session.open(config, weights: weights) do |s|
       s.run([batch(rows: 512)] * 5)
       during = Torobi::Memory.report
       assert_operator during.fetch(:peak), :>, 0, "training should have allocated"
@@ -216,7 +216,7 @@ class LifecycleTest < Minitest::Test
   end
 
   def test_the_peak_can_be_forgotten_and_the_limit_set
-    Torobi::Session.open(config, weights) { |s| s.step!(batch) }
+    Torobi::Session.open(config, weights: weights) { |s| s.step!(batch) }
     Torobi::Memory.reset_peak!
     assert_operator Torobi::Memory.peak, :<=, Torobi::Memory.active + 1
 
@@ -234,7 +234,7 @@ class LifecycleTest < Minitest::Test
     settled = Torobi::Memory.active
 
     20.times do
-      Torobi::Session.open(config, weights) { |s| s.step!(batch(rows: 256)) }
+      Torobi::Session.open(config, weights: weights) { |s| s.step!(batch(rows: 256)) }
     end
     Torobi::Memory.clear_cache!
 
@@ -249,7 +249,7 @@ class LifecycleTest < Minitest::Test
   # and it runs before any lock or any MLX call
   # (notes/SESSION_CONCURRENCY_SPEC.md sections 3 and 9).
   def test_a_session_that_crossed_a_fork_is_refused
-    session = Torobi::Session.open(config, weights)
+    session = Torobi::Session.open(config, weights: weights)
     session.step!(batch)
 
     reader, writer = IO.pipe
@@ -290,7 +290,7 @@ class LifecycleTest < Minitest::Test
   # The same for the process-global calls: they reach the allocator every
   # session shares, so a child must not make them either.
   def test_the_global_memory_calls_are_refused_after_a_fork
-    Torobi::Session.open(config, weights) { |s| s.step!(batch) }
+    Torobi::Session.open(config, weights: weights) { |s| s.step!(batch) }
 
     reader, writer = IO.pipe
     pid = fork do
@@ -322,7 +322,7 @@ class LifecycleTest < Minitest::Test
     pid = fork do
       reader.close
       begin
-        Torobi::Session.open(config, weights) { |s| s.step!(batch) }
+        Torobi::Session.open(config, weights: weights) { |s| s.step!(batch) }
         writer.puts "OPENED"
       rescue Torobi::EngineUnavailable => e
         writer.puts "REFUSED #{e.message[0, 60]}"
