@@ -56,12 +56,35 @@ class Qwen2Test < Minitest::Test
     reference = JSON.parse(File.read(FORWARD))
 
     assert_equal published.hidden_size, reference.fetch("hidden_size")
+    check_weights(reference, dir)
 
     reference.fetch("cases").each_with_index do |c, i|
       hidden, logits = run_case(dir, c.fetch("input_ids"))
       compare_hidden(hidden, c.fetch("hidden"), "case #{i}")
       compare_logits(logits, c.fetch("top_logits"), "case #{i}")
     end
+  end
+
+  # That all three are about the same copy of the model.
+  #
+  # The inventory pins a commit, the reference records which one it ran,
+  # and the Hub names a snapshot directory after it. A reference taken
+  # against a checkpoint that has since been replaced would disagree
+  # with these weights and say nothing about why, which is the failure
+  # this is here to name. Checked where it can be: an artifact recorded
+  # before this was written carries no revision, and a directory named
+  # by hand is not a commit.
+  def check_weights(reference, dir)
+    pinned = oracle.fetch("revision")
+    recorded = reference["revision"]
+    if recorded
+      assert_equal pinned, recorded,
+                   "the reference ran against another copy of the model"
+    end
+    return unless File.basename(dir).match?(/\A[0-9a-f]{40}\z/)
+
+    assert_equal pinned, File.basename(dir),
+                 "these are not the weights the inventory was taken from"
   end
 
   # One case through Torobi: the hidden state at every position, and the

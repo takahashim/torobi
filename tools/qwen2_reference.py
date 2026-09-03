@@ -24,6 +24,7 @@ the ids is upstream of Torobi and stays there (docs/plan.md 15.19).
 import argparse
 import datetime
 import json
+import os
 
 SCHEMA_VERSION = 1
 
@@ -47,7 +48,14 @@ def main() -> None:
 
     import torch
     import transformers
+    from huggingface_hub import snapshot_download
     from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    # Which weights these numbers came from. The inventory beside this
+    # file pins a commit (tools/inventory.rb), and a reference recorded
+    # against some other copy of the model would agree with nothing and
+    # say why to nobody. The snapshot directory is named after it.
+    revision = os.path.basename(snapshot_download(args.model))
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.float32)
@@ -81,6 +89,7 @@ def main() -> None:
     inventory = {
         "schema_version": SCHEMA_VERSION,
         "source": args.model,
+        "revision": revision,
         "produced_by": f"transformers {transformers.__version__} / torch {torch.__version__}",
         "settings": {"precision": "f32", "device": "cpu", "top_logits": TOP},
         "generated_at": datetime.datetime.now(datetime.timezone.utc)
