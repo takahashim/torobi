@@ -9,10 +9,34 @@ do not make it obvious which one is built. In order, top to bottom:
 
 | | what it is | where |
 |---|---|---|
-| **mlx-rs (upstream)** | the unofficial Rust bindings, by Minghua Wu and David Chavez. crates.io's `mlx-rs`. **Not what Torobi builds** | `github.com/oxiglade/mlx-rs`, formerly `github.com/oxideai/mlx-rs` (the org was renamed; the old links redirect, which is one source of the confusion) |
+| **mlx-rs (upstream)** | the unofficial Rust bindings, by Minghua Wu and David Chavez, and what crates.io publishes (0.25.3, December 2025). **Not what Torobi builds** | `github.com/oxiglade/mlx-rs`, formerly `github.com/oxideai/mlx-rs`. The old name redirects, and both crates.io and OminiX still print it, which is one source of the confusion |
 | **OminiX-MLX** | **the same repository, continued.** Not a rewrite and not a vendored copy: the history is mlx-rs's own (534 commits, `init commit` at the bottom, 302 of them by upstream's main author), and on 2026-01-25 `753d289 refactor: Move original mlx-rs components into mlx-rs directory` moved it into a subdirectory to make room for model crates. **This is what Torobi builds**, pinned to one commit | `github.com/OminiX-ai/OminiX-MLX`, subtree `mlx-rs/` |
 | **mlx-c** | Apple's C API for MLX, a git submodule of `mlx-sys`. bindgen reads its headers | `github.com/ml-explore/mlx-c` |
 | **MLX** | the library itself. Not built here: a pre-built binary is downloaded at build time (below) | `github.com/ml-explore/mlx` |
+
+## Which one is upstream, and why nothing says so
+
+`oxiglade/mlx-rs` is. GitHub's API settles it rather than the pages do:
+
+| | `fork` | created | stars |
+|---|---|---|---|
+| `oxiglade/mlx-rs` | **false**, no parent | 2023-12-23 | 371 |
+| `OminiX-ai/OminiX-MLX` | **false**, no parent | **2026-01-26** | |
+
+The first is the original: not a fork, created when mlx-rs began, holding
+the stars and the docs, and published to crates.io by minghuaw and dcvz,
+who are the authors of most of the history in both. `oxideai/mlx-rs`
+redirects to it, so that was a rename and not a move to a fork.
+
+The second is not a GitHub fork of anything. It was created on 2026-01-26,
+**the day after** `753d289 Move original mlx-rs components into mlx-rs
+directory` in its own history: a restructured clone, pushed as a new
+repository rather than forked.
+
+**That is why this is confusing, and the reason is worth stating.** The
+descent is real in git and invisible to GitHub: no parent link, no fork
+banner, and crate metadata that names a third URL. Nothing you can click
+on tells you what was compiled. Only the git history and `Cargo.lock` do.
 
 ## Is the fork's mlx-rs the same as the one on crates.io
 
@@ -34,9 +58,10 @@ Float64 in safetensors, a deployment-target override, IO extensions, and
 
 **The version numbers do not compare.** The fork renumbered to 1.0.0 in
 `e5aed65 feat: v1.0.0 - version alignment with OminiX-API` and is 1.2.0
-now; crates.io's mlx-rs is on its own 0.x line. Neither number tells you
-anything about the other, and `Cargo.lock`'s commit is the only version
-that means something here.
+now; crates.io's newest is 0.25.3, and upstream's own README still tells
+you to install 0.21.0. Three numbers, no relation between any two of
+them. `Cargo.lock`'s commit is the only version that means anything
+here.
 
 **The crate metadata points at the wrong one.** OminiX's workspace still
 carries upstream's `repository = "https://github.com/oxideai/mlx-rs"`, so
