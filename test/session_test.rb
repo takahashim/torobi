@@ -52,10 +52,10 @@ class SessionTest < Minitest::Test
 
       # It recovered the coefficients behind every batch.
       weight = s.fetch("spike.linear.weight")
-      assert_equal [1, 2], weight[:shape]
-      assert_in_delta 3.0, weight[:data][0], 5e-2
-      assert_in_delta(-2.0, weight[:data][1], 5e-2)
-      assert_in_delta 1.0, s.fetch("spike.linear.bias")[:data][0], 5e-2
+      assert_equal [1, 2], weight.shape
+      assert_in_delta 3.0, weight.to_a[0], 5e-2
+      assert_in_delta(-2.0, weight.to_a[1], 5e-2)
+      assert_in_delta 1.0, s.fetch("spike.linear.bias").to_a[0], 5e-2
     end
   end
 
@@ -75,13 +75,13 @@ class SessionTest < Minitest::Test
       b = batch(8, seed: 1)
       grads = s.gradients(b)
       assert_equal %w[spike.linear.weight spike.linear.bias], grads.keys
-      assert_equal [1, 2], grads["spike.linear.weight"][:shape]
+      assert_equal [1, 2], grads["spike.linear.weight"].shape
       # At w = 0, the gradient of the bias is -2 * mean(y).
       ys = b[:y][:data]
-      assert_in_delta(-2 * ys.sum / ys.size, grads["spike.linear.bias"][:data][0], 1e-5)
+      assert_in_delta(-2 * ys.sum / ys.size, grads["spike.linear.bias"].to_a[0], 1e-5)
 
       # A different batch, a different gradient; and asking did not train.
-      refute_equal grads["spike.linear.bias"][:data], s.gradients(batch(8, seed: 2))["spike.linear.bias"][:data]
+      refute_equal grads["spike.linear.bias"].to_a, s.gradients(batch(8, seed: 2))["spike.linear.bias"].to_a
       assert_equal 0, s.step
     end
   end

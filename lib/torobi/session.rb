@@ -113,7 +113,7 @@ module Torobi
                                           JSON.generate(Array(fresh).map(&:to_s)),
                                           JSON.generate(optimizer))
         else
-          Native::Session.open(config.canonical_json, JSON.generate(weights),
+          Native::Session.open(config.canonical_json, JSON.generate(inline(weights)),
                                JSON.generate(optimizer))
         end
       # Gathered whether or not anything is journalling: a checkpoint
@@ -407,27 +407,49 @@ module Torobi
     # What the last step's taps saw, by name. Read-only, so it needs no
     # journal entry of its own; `observe` is how a decision made on one
     # gets recorded.
+    # What the last step's taps saw, by tap name. A scalar tap (a loss,
+    # say) comes back as a Float, since a caller compares it or writes it
+    # down; anything with a shape comes back as a TensorData.
     def tapped
-      @native.tapped.to_h do |name, shape, data|
-        [name, shape.empty? ? data.first : { shape:, data: }]
+      @native.tapped.to_h do |name, dtype, shape, bytes|
+        data = TensorData.new(shape, bytes, dtype: dtype.to_sym)
+        [name, shape.empty? ? data.to_a.first : data]
       end
     end
 
     def parameter_paths = @native.parameter_paths
     def input_names = @native.input_names
 
-    # A copy of one parameter, as {shape:, data:}. Copies, never handles.
+    # A copy of one parameter, as a TensorData. Copies, never handles.
+    #
+    # The copy is bytes rather than numbers, and stays that way until a
+    # caller asks for `to_a`: ruri-v3's embedding table is 200 MB of bytes
+    # and was 600 MB of resident memory as a Ruby Array, for a value most
+    # callers save or compare rather than read.
     def fetch(path)
-      shape, data = @native.fetch(path.to_s)
-      { shape:, data: }
+      dtype, shape, bytes = @native.fetch(path.to_s)
+      TensorData.new(shape, bytes, dtype: dtype.to_sym)
     end
 
     # The gradients for `batch`, by parameter path. Does not update anything.
     def gradients(batch)
-      @native.gradients(Batch.pack(batch)).to_h { |path, shape, data| [path, { shape:, data: }] }
+      @native.gradients(Batch.pack(batch)).to_h do |path, dtype, shape, bytes|
+        [path, TensorData.new(shape, bytes, dtype: dtype.to_sym)]
+      end
     end
 
     private
+
+    # Inline weights as JSON: a TensorData spells its numbers out here.
+    #
+    # That is what this path is, and part of why it is the small one. A
+    # parameter worth keeping as bytes arrives as `weights_file:` or
+    # `pretrained:`, which never becomes numbers in Ruby at all.
+    def self.inline(weights)
+      params = weights.fetch(:params) { weights.fetch("params") }
+      { params: params.to_h { |path, t| [path, t.is_a?(TensorData) ? t.to_h : t] } }
+    end
+    private_class_method :inline
 
     # Runs an engine change and the journal's record of it as one, so an
     # asynchronous interrupt cannot land between them.

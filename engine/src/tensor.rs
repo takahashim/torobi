@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use mlx_rs::transforms::eval;
 use mlx_rs::{Array, Dtype};
 
@@ -63,31 +63,23 @@ impl Tensor {
             Values::I32(data) => Array::from_slice(data, &self.shape),
         }
     }
-}
 
-/// The same tensor, with its data as native-endian f32 bytes rather than
-/// JSON numbers.
-///
-/// Measurement drove this (docs/plan.md section 5A.2.1): serializing a
-/// batch as JSON cost two thirds of a step at 512 rows, while the call
-/// boundary itself was noise. The shape stays JSON - it is a handful of
-/// integers, and readable - and only the payload goes packed.
-pub struct PackedTensor {
-    /// "f32" or "i32", as the graph declares dtypes.
-    pub dtype: String,
-    pub shape: Vec<i32>,
-    pub bytes: Vec<u8>,
-}
-
-impl PackedTensor {
-    pub fn to_tensor(&self, name: &str) -> Result<Tensor> {
+    /// From the bytes the boundary carries: native-endian, four to a value.
+    ///
+    /// Measurement chose this over JSON (docs/plan.md section 5A.2.1):
+    /// serializing a batch as JSON cost two thirds of a step at 512 rows,
+    /// while the call boundary itself was noise. The shape travels
+    /// separately, being a handful of integers and readable.
+    ///
+    /// `name` is only for saying which input was wrong.
+    pub fn from_bytes(dtype: &str, shape: Vec<i32>, bytes: &[u8], name: &str) -> Result<Self> {
         anyhow::ensure!(
-            self.bytes.len() % 4 == 0,
+            bytes.len() % 4 == 0,
             "input {name:?}: {} bytes is not a whole number of 4-byte values",
-            self.bytes.len()
+            bytes.len()
         );
-        let words = self.bytes.chunks_exact(4).map(|b| [b[0], b[1], b[2], b[3]]);
-        let (dtype, values) = match self.dtype.as_str() {
+        let words = bytes.chunks_exact(4).map(|b| [b[0], b[1], b[2], b[3]]);
+        let (dtype, values) = match dtype {
             "f32" => (
                 Dtype::Float32,
                 Values::F32(words.map(f32::from_ne_bytes).collect()),
@@ -98,27 +90,41 @@ impl PackedTensor {
             ),
             other => anyhow::bail!("input {name:?}: dtype {other:?} does not cross the boundary"),
         };
-        Ok(Tensor {
+        Ok(Self {
             dtype,
-            shape: self.shape.clone(),
+            shape,
             values,
         })
+    }
+
+    /// The same tensor as the boundary carries it: the dtype spelled the
+    /// way a graph names it, and the values as bytes.
+    ///
+    /// The inverse of [`Tensor::from_bytes`], and the reason a caller does
+    /// not get numbers: reading ruri-v3's embedding table as a Ruby Array
+    /// added 600 MB of resident memory where its bytes are 200 MB, and
+    /// most of what a caller does with a parameter is save it or compare
+    /// it rather than look at fifty million numbers.
+    ///
+    /// A view rather than a copy, since the caller's next act is to copy
+    /// it somewhere (into a Ruby String, say) and 200 MB is worth not
+    /// doing twice.
+    pub fn as_bytes(&self) -> Result<(&'static str, &[u8])> {
+        let spelling = dtype_spelling(self.dtype)
+            .with_context(|| format!("{:?} is not a dtype the boundary carries", self.dtype))?;
+        // Safety: any f32 or i32 is a valid sequence of bytes, and u8
+        // needs no alignment beyond what the source already has. This is
+        // what bytemuck's cast_slice does, without the dependency.
+        let bytes = match &self.values {
+            Values::F32(values) => unsafe { as_byte_slice(values) },
+            Values::I32(values) => unsafe { as_byte_slice(values) },
+        };
+        Ok((spelling, bytes))
     }
 }
 
 /// One step's inputs, by graph input name.
 pub type Batch = BTreeMap<String, Tensor>;
-
-/// The same, packed. Converted to a [`Batch`] on arrival.
-pub type PackedBatch = BTreeMap<String, PackedTensor>;
-
-/// Unpacks a batch, naming the input if the bytes do not divide.
-pub fn unpack(packed: &PackedBatch) -> Result<Batch> {
-    packed
-        .iter()
-        .map(|(name, t)| Ok((name.clone(), t.to_tensor(name)?)))
-        .collect()
-}
 
 
 /// The dtypes the IR speaks, and what MLX calls them.
@@ -174,25 +180,28 @@ pub fn to_tensor(array: &Array) -> Result<Tensor> {
     })
 }
 
+/// Reads a slice of 4-byte values as the bytes they are.
+///
+/// # Safety
+///
+/// `T` must have no padding and no invalid bit patterns (f32 and i32,
+/// here), so that every byte of it is initialized and readable.
+unsafe fn as_byte_slice<T>(values: &[T]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values)) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn packed(dtype: &str, shape: &[i32], bytes: Vec<u8>) -> PackedTensor {
-        PackedTensor {
-            dtype: dtype.to_string(),
-            shape: shape.to_vec(),
-            bytes,
-        }
+    fn bytes_of<T: Copy, const N: usize>(values: [T; N], to_ne: fn(T) -> [u8; 4]) -> Vec<u8> {
+        values.iter().flat_map(|v| to_ne(*v)).collect()
     }
 
     #[test]
-    fn unpacks_f32_in_native_order() {
-        let bytes = [1.5f32, -2.0]
-            .iter()
-            .flat_map(|v| v.to_ne_bytes())
-            .collect();
-        let t = packed("f32", &[2], bytes).to_tensor("x").unwrap();
+    fn reads_f32_in_native_order() {
+        let bytes = bytes_of([1.5f32, -2.0], f32::to_ne_bytes);
+        let t = Tensor::from_bytes("f32", vec![2], &bytes, "x").unwrap();
         assert_eq!(t.dtype, Dtype::Float32);
         assert_eq!(t.shape, vec![2]);
         match t.values {
@@ -202,9 +211,9 @@ mod tests {
     }
 
     #[test]
-    fn unpacks_i32_because_an_embedding_reads_ids() {
-        let bytes = [7i32, 0].iter().flat_map(|v| v.to_ne_bytes()).collect();
-        let t = packed("i32", &[2], bytes).to_tensor("ids").unwrap();
+    fn reads_i32_because_an_embedding_reads_ids() {
+        let bytes = bytes_of([7i32, 0], i32::to_ne_bytes);
+        let t = Tensor::from_bytes("i32", vec![2], &bytes, "ids").unwrap();
         assert_eq!(t.dtype, Dtype::Int32);
         match t.values {
             Values::I32(v) => assert_eq!(v, vec![7, 0]),
@@ -214,7 +223,7 @@ mod tests {
 
     #[test]
     fn refuses_bytes_that_do_not_divide_and_says_which_input() {
-        let e = packed("f32", &[1], vec![0, 1, 2]).to_tensor("x").unwrap_err();
+        let e = Tensor::from_bytes("f32", vec![1], &[0, 1, 2], "x").unwrap_err();
         let message = e.to_string();
         assert!(message.contains("\"x\""), "{message}");
         assert!(message.contains("3 bytes"), "{message}");
@@ -222,20 +231,19 @@ mod tests {
 
     #[test]
     fn refuses_a_dtype_the_boundary_does_not_carry() {
-        let e = packed("f64", &[1], vec![0; 8]).to_tensor("x").unwrap_err();
+        let e = Tensor::from_bytes("f64", vec![1], &[0; 8], "x").unwrap_err();
         assert!(e.to_string().contains("f64"), "{e}");
     }
 
     #[test]
-    fn unpack_names_the_input_that_failed() {
-        let batch: PackedBatch = [
-            ("good".to_string(), packed("f32", &[1], vec![0; 4])),
-            ("bad".to_string(), packed("f32", &[1], vec![0; 5])),
-        ]
-        .into_iter()
-        .collect();
-        let e = unpack(&batch).unwrap_err();
-        assert!(e.to_string().contains("\"bad\""), "{e}");
+    fn the_bytes_that_went_in_are_the_bytes_that_come_out() {
+        for (dtype, bytes) in [
+            ("f32", bytes_of([1.5f32, -2.0, 0.0], f32::to_ne_bytes)),
+            ("i32", bytes_of([7i32, 0, -1], i32::to_ne_bytes)),
+        ] {
+            let t = Tensor::from_bytes(dtype, vec![3], &bytes, "x").unwrap();
+            assert_eq!(t.as_bytes().unwrap(), (dtype, bytes.as_slice()));
+        }
     }
 
     #[test]

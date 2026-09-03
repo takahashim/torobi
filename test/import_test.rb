@@ -48,7 +48,7 @@ class ImportTest < Minitest::Test
     trained = Torobi::Session.open(config, weights: weights) do |s|
       s.adjust(lr: 0.2)
       s.repeat(batch, steps: 20)
-      [s.step, s.fetch("m.l.weight")[:data], s.loss]
+      [s.step, s.fetch("m.l.weight").to_a, s.loss]
     end
     steps, reached, loss = trained
     checkpoint = File.join(@dir, "run")
@@ -60,7 +60,7 @@ class ImportTest < Minitest::Test
     file = File.join(checkpoint, "parameters.safetensors")
 
     Torobi::Session.open(config, weights_file: file) do |s|
-      assert_equal reached, s.fetch("m.l.weight")[:data], "the parameters came over"
+      assert_equal reached, s.fetch("m.l.weight").to_a, "the parameters came over"
       # And nothing else did. This is an import, not a resume.
       assert_equal 0, s.step
       assert_predicate s.loss, :nan?
@@ -121,8 +121,8 @@ class ImportTest < Minitest::Test
     Torobi::Session.open(config, weights_file: path) do |s|
       # These survive bf16 exactly (few enough mantissa bits), so the
       # comparison is about the conversion happening, not about rounding.
-      assert_equal values, s.fetch("m.l.weight")[:data]
-      assert_equal [0.75], s.fetch("m.l.bias")[:data]
+      assert_equal values, s.fetch("m.l.weight").to_a
+      assert_equal [0.75], s.fetch("m.l.bias").to_a
       s.step!(batch)
       assert_predicate s.loss, :finite?
     end
@@ -152,11 +152,11 @@ class ImportTest < Minitest::Test
 
     Torobi::Session.open(config, pretrained: { m: file }, fresh: ["m.head.*"]) do |s|
       assert_equal %w[m.body.weight m.head.weight], s.parameter_paths.sort
-      body = s.fetch("m.body.weight")[:data]
+      body = s.fetch("m.body.weight").to_a
 
       assert_equal DIM * DIM, body.size
       body.each { |v| assert_in_delta 0.1, v, 1e-6, "the body came from the file" }
-      head = s.fetch("m.head.weight")[:data]
+      head = s.fetch("m.head.weight").to_a
 
       refute(head.all?(&:zero?), "the head was drawn, not left empty")
       # kaiming_uniform on a [1, DIM] weight: bound is sqrt(6 / DIM).
@@ -208,7 +208,7 @@ class ImportTest < Minitest::Test
 
     drawn = 2.times.map do
       Torobi::Session.open(config, pretrained: { m: file }, fresh: ["m.*"]) do |s|
-        s.fetch("m.head.weight")[:data]
+        s.fetch("m.head.weight").to_a
       end
     end
 
@@ -236,6 +236,7 @@ class ImportTest < Minitest::Test
   # has not written.
   def safetensors(tensors, dtype: "F32", width: 4, &block)
     pack = block || ->(values) { values.pack("e*") }
+    tensors = tensors.transform_values { |t| t.is_a?(Torobi::TensorData) ? t.to_h : t }
     offset = 0
     header = tensors.to_h do |name, t|
       bytes = t[:data].size * width

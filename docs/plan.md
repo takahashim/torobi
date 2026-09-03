@@ -1416,6 +1416,44 @@ kohagi との数値 parity は 3 例とも**まったく同じ**まま(cos 0.999
 
 この時点で Ruby 200 件 / Rust 109 件。
 
+### 15.24 型を 1 つにした。`PackedTensor` を消し、出口をバイト列にした(2026-09-03)
+
+境界の型が 3 つあった。engine の `Tensor`(値)、engine の `PackedTensor`
+(バイト列)、Ruby の `TensorData`(バイト列)である。うち `PackedTensor` は
+「入る方向に 1 回だけ使われる変換関数が、型の帽子をかぶっているもの」だった。
+`Tensor::from_bytes` / `Tensor::as_bytes` に変えて消した。話はこうなる。
+
+> **`Tensor` が境界を渡るもの(バイト列として)であり、engine が扱うもの
+> (値として)でもある。`TensorData` は同じ 3 つ組の Ruby 側の名前。**
+
+出口も揃えた。`fetch` / `gradients` / `tapped` は `{shape:, data:}` の Hash では
+なく `TensorData` を返す。数値になるのは `to_a` を呼んだときだけで、そこに費用が
+見える。
+
+**測ったもの**(ruri-v3-130m、`m.embeddings.tok_embeddings.weight`、
+52,428,800 値 = 200MB)
+
+| | RSS | 時間 |
+| --- | --- | --- |
+| 変更前(Ruby Array を返す) | +600MB | 0.142s |
+| 変更後(`TensorData` を返す) | +400MB | 0.101s |
+| その `to_a` まで呼んだとき | +490MB | +0.278s |
+
++400MB は 200MB のコピーが 2 回である。MLX の array から `Vec<f32>` へ、そこから
+Ruby の String へ。前者はすぐ解放されるが RSS には残る。3 回目(`Vec<f32>` から
+`Vec<u8>`)は `as_bytes` が借用を返すことで消した。`&[f32]` を `&[u8]` として読む
+のは bytemuck の `cast_slice` と同じで、u8 に整列の要求が無く f32 に不正なビット列が
+無いから成り立つ(依存は足していない)。
+
+**ついでに直したもの**: `weights:`(inline)は JSON なので `TensorData` を渡されたら
+そこで数値に展開する。これで `s.fetch(p)` の結果をそのまま次の run の初期値にできる。
+inline が小さいもの専用の道であることは変わらない。
+
+`plan.rs` のテストが 1 件、赤いまま残っていた。エラー文言を書き直したときに
+assertion を追随させ忘れたもので、この変更とは無関係。文言を直した。
+
+この時点で Ruby 200 件 / Rust 109 + 28 件、kohagi との forward 一致は変わらず。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

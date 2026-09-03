@@ -100,6 +100,11 @@ module Torobi
       end
     end
 
+    # The {shape:, data:} pair the JSON paths speak (inline weights, and
+    # `put` before it packs). Spells every number out, so it is a request,
+    # not something the boundary does on its own.
+    def to_h = { shape:, data: to_a }
+
     def rank = shape.size
 
     # How many values, not how many bytes.

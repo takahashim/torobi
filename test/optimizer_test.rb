@@ -96,8 +96,8 @@ class OptimizerTest < Minitest::Test
         b = expected.fetch("b")
 
         session.step!(b_batch)
-        engine_w = session.fetch("m.l.weight")[:data]
-        engine_b = session.fetch("m.l.bias")[:data]
+        engine_w = session.fetch("m.l.weight").to_a
+        engine_b = session.fetch("m.l.bias").to_a
 
         w.each_with_index do |value, i|
           assert_in_delta value, engine_w[i], 1e-5, "weight[#{i}] after step #{step + 1}"
@@ -113,9 +113,9 @@ class OptimizerTest < Minitest::Test
   def test_the_first_adamw_step_moves_by_the_learning_rate
     lr = 0.01
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :adamw, lr: }) do |session|
-      before = session.fetch("m.l.weight")[:data]
+      before = session.fetch("m.l.weight").to_a
       session.step!(batch)
-      after = session.fetch("m.l.weight")[:data]
+      after = session.fetch("m.l.weight").to_a
       before.each_with_index do |value, i|
         assert_in_delta lr, (value - after[i]).abs, lr * 0.01,
                         "the first step should move by about lr"
@@ -127,12 +127,12 @@ class OptimizerTest < Minitest::Test
     lr = 0.01
     plain = Torobi::Session.open(config, weights: weights, optimizer: { kind: :adamw, lr: }) do |s|
       3.times { s.step!(batch) }
-      s.fetch("m.l.weight")[:data]
+      s.fetch("m.l.weight").to_a
     end
     decayed = Torobi::Session.open(config, weights: weights,
                                    optimizer: { kind: :adamw, lr:, weight_decay: 0.5 }) do |s|
       3.times { s.step!(batch) }
-      s.fetch("m.l.weight")[:data]
+      s.fetch("m.l.weight").to_a
     end
     # w0 starts positive, w1 negative; decay moves both toward zero.
     assert_operator decayed[0], :<, plain[0]
@@ -148,11 +148,11 @@ class OptimizerTest < Minitest::Test
 
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: }) do |session|
       session.step!(b_batch)
-      engine_w = session.fetch("m.l.weight")[:data]
+      engine_w = session.fetch("m.l.weight").to_a
       w.each_with_index do |value, i|
         assert_in_delta value - (lr * dw[i]), engine_w[i], 1e-6
       end
-      assert_in_delta b[0] - (lr * db[0]), session.fetch("m.l.bias")[:data][0], 1e-6
+      assert_in_delta b[0] - (lr * db[0]), session.fetch("m.l.bias").to_a[0], 1e-6
     end
   end
 

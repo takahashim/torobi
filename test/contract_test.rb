@@ -131,10 +131,10 @@ class ContractTest < Minitest::Test
 
       Torobi::Session.open(config, weights: weights, optimizer: { kind: :adamw, lr: 0.01 }) do |s|
         s.step!(batch)
-        before = { step: s.step, weight: s.fetch("m.l.weight")[:data], seed: s.seed }
+        before = { step: s.step, weight: s.fetch("m.l.weight").to_a, seed: s.seed }
         assert_raises(Torobi::StepError) { s.restore(path) }
         assert_equal before[:step], s.step
-        assert_equal before[:weight], s.fetch("m.l.weight")[:data]
+        assert_equal before[:weight], s.fetch("m.l.weight").to_a
         assert_equal before[:seed], s.seed
         # And it still runs.
         s.step!(batch)
@@ -154,13 +154,13 @@ class ContractTest < Minitest::Test
 
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :adamw, lr: 0.05 }) do |s|
       s.step!(good)
-      before = s.fetch("m.l.weight")[:data]
+      before = s.fetch("m.l.weight").to_a
 
       assert_raises(Torobi::StepError) do
         s.step!({ x: { shape: [2, 3], data: [0.0] * 6 } })
       end
       assert_equal 1, s.step
-      assert_equal before, s.fetch("m.l.weight")[:data]
+      assert_equal before, s.fetch("m.l.weight").to_a
 
       # The next step continues the same trajectory: run the same batch
       # twice from a fresh session and compare.

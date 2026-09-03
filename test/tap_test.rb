@@ -56,9 +56,9 @@ class TapTest < Minitest::Test
       s.tap("first", stat: :extent)
       s.step!(batch)
       extent = s.tapped.fetch("first")
-      assert_equal [2], extent.fetch(:shape)
-      assert_in_delta 0.4, extent.fetch(:data).first, 1e-6
-      assert_in_delta 0.4, extent.fetch(:data).last, 1e-6
+      assert_equal [2], extent.shape
+      assert_in_delta 0.4, extent.to_a.first, 1e-6
+      assert_in_delta 0.4, extent.to_a.last, 1e-6
     end
   end
 
@@ -67,9 +67,9 @@ class TapTest < Minitest::Test
       s.tap("second", stat: :full)
       s.step!(batch)
       value = s.tapped.fetch("second")
-      assert_equal [ROWS, 1], value.fetch(:shape)
-      assert_equal ROWS, value.fetch(:data).size
-      assert(value.fetch(:data).all? { |v| (v - 0.16).abs < 1e-6 })
+      assert_equal [ROWS, 1], value.shape
+      assert_equal ROWS, value.size
+      assert(value.to_a.all? { |v| (v - 0.16).abs < 1e-6 })
     end
   end
 
@@ -92,12 +92,12 @@ class TapTest < Minitest::Test
   def test_watching_does_not_change_what_is_learned
     without = Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
       s.run([batch] * 5)
-      s.fetch("m.second.weight")[:data]
+      s.fetch("m.second.weight").to_a
     end
     with = Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
       s.tap("first", stat: :norm)
       s.run([batch] * 5)
-      s.fetch("m.second.weight")[:data]
+      s.fetch("m.second.weight").to_a
     end
     assert_equal without, with
   end

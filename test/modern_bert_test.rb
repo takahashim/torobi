@@ -132,11 +132,11 @@ class ModernBertTest < Minitest::Test
       assert_predicate loss, :finite?
       assert_operator loss, :>, 0, "the mean of squared hidden states is positive"
 
-      before = s.fetch("m.layers.0.attn.Wqkv.weight")[:data].first(4)
+      before = s.fetch("m.layers.0.attn.Wqkv.weight").to_a.first(4)
       s.step!(batch(seq))
 
       assert_equal 1, s.step
-      refute_equal before, s.fetch("m.layers.0.attn.Wqkv.weight")[:data].first(4),
+      refute_equal before, s.fetch("m.layers.0.attn.Wqkv.weight").to_a.first(4),
                    "a step should have moved the weights"
     end
   end
@@ -203,7 +203,7 @@ class ModernBertTest < Minitest::Test
                          pretrained: { m: File.join(dir, "model.safetensors") }) do |s|
       s.tap("hidden", stat: :full)
       s.evaluate(Torobi::Models::ModernBERT.batch(config, [ids], seq:))
-      rows = s.tapped.fetch("hidden")[:data].each_slice(dim).to_a
+      rows = s.tapped.fetch("hidden").to_a.each_slice(dim).to_a
       pooled = Array.new(dim) { |j| rows.sum { |row| row[j] } / rows.size }
       length = Math.sqrt(pooled.sum { |v| v * v })
       pooled.map { |v| v / length }

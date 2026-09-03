@@ -49,7 +49,7 @@ class DtypeTest < Minitest::Test
   def test_only_the_rows_that_were_read_receive_gradient
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 1.0 }) do |s|
       s.step!(ids_batch([2, 2]))
-      table = s.fetch("m.emb.weight")[:data].each_slice(DIM).to_a
+      table = s.fetch("m.emb.weight").to_a.each_slice(DIM).to_a
       refute_equal [2.0] * DIM, table[2], "row 2 was read and should have moved"
       VOCAB.times do |i|
         next if i == 2

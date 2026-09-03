@@ -33,7 +33,7 @@ use magnus::exception::ExceptionClass;
 use magnus::value::ReprValue;
 use magnus::{function, method, prelude::*, Error, RArray, RHash, RString, Ruby, Value};
 use torobi_engine::plan::Weights;
-use torobi_engine::tensor::{unpack, Batch, PackedBatch, PackedTensor, Tensor, Values};
+use torobi_engine::tensor::{Batch, Tensor};
 use torobi_engine::{RuntimeError, Session as EngineSession};
 
 use gvl::{OnRefusal, Outcome};
@@ -602,13 +602,13 @@ impl Session {
         Ok(ruby.ary_from_vec(names))
     }
 
-    /// What the last step's taps saw: [name, shape, data] each.
+    /// What the last step's taps saw: [name, dtype, shape, bytes] each.
     fn tapped(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
         let seen = rb_self.with_engine(ruby, |engine| engine.tapped())?;
         let out = ruby.ary_new_capa(seen.len());
         for (name, tensor) in seen {
-            let (shape, data) = tensor_to_ruby(ruby, tensor);
-            out.push((name, shape, data))?;
+            let (dtype, shape, bytes) = tensor_to_ruby(ruby, tensor)?;
+            out.push((name, dtype, shape, bytes))?;
         }
         Ok(out)
     }
@@ -623,9 +623,9 @@ impl Session {
         Ok(ruby.ary_from_vec(names))
     }
 
-    fn fetch(ruby: &Ruby, rb_self: &Self, path: String) -> Result<(RArray, RArray), Error> {
+    fn fetch(ruby: &Ruby, rb_self: &Self, path: String) -> Result<(String, RArray, RString), Error> {
         let tensor = rb_self.with_engine(ruby, |engine| engine.fetch(&path))?;
-        Ok(tensor_to_ruby(ruby, tensor))
+        tensor_to_ruby(ruby, tensor)
     }
 
     fn gradients(ruby: &Ruby, rb_self: &Self, batch: RHash) -> Result<RArray, Error> {
@@ -633,8 +633,8 @@ impl Session {
         let grads = rb_self.with_engine(ruby, |engine| engine.gradients(&batch))?;
         let out = ruby.ary_new_capa(grads.len());
         for (path, tensor) in grads {
-            let (shape, data) = tensor_to_ruby(ruby, tensor);
-            out.push((path, shape, data))?;
+            let (dtype, shape, bytes) = tensor_to_ruby(ruby, tensor)?;
+            out.push((path, dtype, shape, bytes))?;
         }
         Ok(out)
     }
@@ -648,7 +648,7 @@ impl Session {
 /// what an embedding reads (docs/plan.md section 5A.2).
 fn read_batch(ruby: &Ruby, batch: RHash) -> Result<Batch, Error> {
     let bad = |what: String| Error::new(ruby.exception_arg_error(), what);
-    let mut packed = PackedBatch::new();
+    let mut read = Batch::new();
     batch.foreach(|name: String, triple: RArray| {
         let dtype: String = triple
             .entry::<String>(0)
@@ -659,26 +659,32 @@ fn read_batch(ruby: &Ruby, batch: RHash) -> Result<Batch, Error> {
         let data: RString = triple
             .entry::<RString>(2)
             .map_err(|e| bad(format!("input {name:?}: data must be a packed String ({e})")))?;
-        // Safety: the bytes are copied immediately, under the GVL, and the
-        // string is not modified in between.
-        let bytes = unsafe { data.as_slice() }.to_vec();
-        packed.insert(name, PackedTensor { dtype, shape, bytes });
+        // Safety: the bytes are read while the GVL is held and copied
+        // before it is released. Borrowing them across that would be
+        // unsound rather than merely fast: another thread can trigger a
+        // compacting GC, and Ruby is free to move the string's buffer.
+        let bytes = unsafe { data.as_slice() };
+        let tensor = Tensor::from_bytes(&dtype, shape, bytes, &name)
+            .map_err(|e| bad(format!("{e:#}")))?;
+        read.insert(name, tensor);
         Ok(magnus::r_hash::ForEach::Continue)
     })?;
-    unpack(&packed).map_err(|e| bad(format!("{e:#}")))
+    Ok(read)
 }
 
 /// A tensor leaves as its shape and its flat data, both plain Ruby arrays.
-fn tensor_to_ruby(ruby: &Ruby, tensor: Tensor) -> (RArray, RArray) {
-    let data = match tensor.values {
-        Values::F32(values) => ruby.ary_from_vec(values),
-        Values::I32(values) => ruby.ary_from_vec(values),
-    };
-    (ruby.ary_from_vec(tensor.shape), data)
+/// A tensor on its way out: dtype, shape, and the bytes.
+///
+/// The same three the boundary carries inward, and bytes rather than
+/// numbers for the same reason. The Ruby side wraps them in a
+/// `Torobi::TensorData`, and turning them into numbers is `to_a`, where a
+/// caller can see the cost.
+fn tensor_to_ruby(ruby: &Ruby, tensor: Tensor) -> Result<(String, RArray, RString), Error> {
+    let shape = ruby.ary_from_vec(tensor.shape.clone());
+    let (dtype, bytes) = tensor.as_bytes().map_err(|e| to_error(ruby, e))?;
+    Ok((dtype.to_string(), shape, ruby.str_from_slice(bytes)))
 }
 
-/// What the device is holding, as a Ruby Hash: active, cache, peak and the
-/// limit, in bytes. Process-wide, because MLX's allocator is.
 /// Runs one of the engine's process-global calls with the GVL released.
 /// The engine serializes them against every running session, because they
 /// reach the allocator those sessions share.

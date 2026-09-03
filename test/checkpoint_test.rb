@@ -46,7 +46,7 @@ class CheckpointTest < Minitest::Test
   end
 
   def state_of(session)
-    session.parameter_paths.to_h { |path| [path, session.fetch(path)[:data]] }
+    session.parameter_paths.to_h { |path| [path, session.fetch(path).to_a] }
   end
 
   # The heart of it: with AdamW, whose moments and step count both matter,

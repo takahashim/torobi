@@ -170,13 +170,13 @@ class HooksTest < Minitest::Test
     Torobi::Session.open(config, weights: weights(w: [0.5, 0.5]),
                          optimizer: { kind: :sgd, lr: 0.1 }) do |s|
       s.run([batch] * 3)
-      before = s.fetch("m.l.weight")[:data]
+      before = s.fetch("m.l.weight").to_a
 
       s.use(Torobi::Policies::NaNGuard.new(lr_factor: 1.0))
       s.run([poisoned_batch])
 
       refute_predicate s.loss, :finite?, "the bad batch is reported"
-      assert_equal before, s.fetch("m.l.weight")[:data], "and not applied"
+      assert_equal before, s.fetch("m.l.weight").to_a, "and not applied"
       assert_equal 4, s.step, "the step still counts: its batch was consumed"
 
       s.run([batch] * 3)
@@ -208,12 +208,12 @@ class HooksTest < Minitest::Test
       Torobi::Session.open(config, weights: weights(w: [0.5, 0.5]),
                            optimizer: { kind: :sgd, lr: 50.0 }) do |s|
         s.checkpoint!(path)
-        at_checkpoint = s.fetch("m.l.weight")[:data]
+        at_checkpoint = s.fetch("m.l.weight").to_a
         s.use(Torobi::Policies::NaNGuard.new(rollback: path, lr_factor: 0.001))
         s.run([batch] * 20)
 
         assert_predicate s.loss, :finite?
-        refute_equal at_checkpoint, s.fetch("m.l.weight")[:data],
+        refute_equal at_checkpoint, s.fetch("m.l.weight").to_a,
                      "it went back and then kept training"
       end
     end
@@ -225,14 +225,14 @@ class HooksTest < Minitest::Test
       s.run([batch] * 3)
       step = s.step
       training_loss = s.loss
-      before = s.fetch("m.l.weight")[:data]
+      before = s.fetch("m.l.weight").to_a
 
       seen = s.evaluate(batch)
 
       assert_predicate seen, :finite?
       assert_equal step, s.step
       assert_in_delta training_loss, s.loss, 0.0, "the training loss is untouched"
-      assert_equal before, s.fetch("m.l.weight")[:data]
+      assert_equal before, s.fetch("m.l.weight").to_a
     end
   end
 end

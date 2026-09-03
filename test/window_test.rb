@@ -43,10 +43,10 @@ class WindowTest < Minitest::Test
       assert_equal %w[m.first.weight m.first.bias], moved
       assert_equal %w[m.second.weight m.second.bias], s.trainable
 
-      before = s.fetch("m.first.weight")[:data]
+      before = s.fetch("m.first.weight").to_a
       s.run([batch] * 5)
-      assert_equal before, s.fetch("m.first.weight")[:data], "a frozen layer must not move"
-      refute_equal Array.new(DIM, 0.1), s.fetch("m.second.weight")[:data]
+      assert_equal before, s.fetch("m.first.weight").to_a, "a frozen layer must not move"
+      refute_equal Array.new(DIM, 0.1), s.fetch("m.second.weight").to_a
     end
   end
 
@@ -54,11 +54,11 @@ class WindowTest < Minitest::Test
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
       s.freeze!("m.first.*")
       s.run([batch] * 3)
-      frozen = s.fetch("m.first.weight")[:data]
+      frozen = s.fetch("m.first.weight").to_a
 
       assert_equal %w[m.first.weight m.first.bias], s.unfreeze!("m.first.*")
       s.run([batch] * 3)
-      refute_equal frozen, s.fetch("m.first.weight")[:data]
+      refute_equal frozen, s.fetch("m.first.weight").to_a
     end
   end
 
@@ -95,7 +95,7 @@ class WindowTest < Minitest::Test
   def test_a_parameter_can_be_written_from_the_window
     Torobi::Session.open(config, weights: weights) do |s|
       s.put("m.second.weight", { shape: [1, DIM], data: [1.0, 2.0, 3.0, 4.0] })
-      assert_equal [1.0, 2.0, 3.0, 4.0], s.fetch("m.second.weight")[:data]
+      assert_equal [1.0, 2.0, 3.0, 4.0], s.fetch("m.second.weight").to_a
 
       e = assert_raises(Torobi::StepError) do
         s.put("m.second.weight", { shape: [DIM], data: Array.new(DIM, 0.0) })

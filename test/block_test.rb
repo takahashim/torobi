@@ -127,12 +127,12 @@ class BlockTest < Minitest::Test
     Torobi::Session.open(config, weights: weights,
                          optimizer: { kind: :adamw, lr: 0.02 }) do |s|
       before = s.evaluate(b)
-      before_weight = s.fetch("m.q.weight")[:data]
+      before_weight = s.fetch("m.q.weight").to_a
       s.repeat(b, steps: 30)
       after = s.evaluate(b)
 
       assert_operator after, :<, before * 0.9, "the block should learn its own batch"
-      refute_equal before_weight, s.fetch("m.q.weight")[:data]
+      refute_equal before_weight, s.fetch("m.q.weight").to_a
     end
   end
 
@@ -145,10 +145,10 @@ class BlockTest < Minitest::Test
       analytic = s.gradients(b)
       # Without this the comparison could pass on gradients that are all
       # zero, which would agree with anything.
-      biggest = analytic.values.flat_map { |g| g[:data] }.map(&:abs).max
+      biggest = analytic.values.flat_map { |g| g.to_a }.map(&:abs).max
 
       assert_operator biggest, :>, 1e-2, "the block should have gradients worth checking"
-      assert(analytic.all? { |_, g| g[:data].any? { |v| v.abs > 1e-6 } },
+      assert(analytic.all? { |_, g| g.to_a.any? { |v| v.abs > 1e-6 } },
              "every parameter should be reached by the backward pass")
 
       worst = { path: nil, at: nil, delta: 0.0 }
@@ -157,10 +157,10 @@ class BlockTest < Minitest::Test
         held = s.fetch(path)
         # A few positions per parameter: every one would be thousands of
         # forwards, and a wrong backward is wrong everywhere.
-        positions = sample(held[:data].size)
+        positions = sample(held.to_a.size)
         positions.each do |i|
           numeric = central_difference(s, path, held, i)
-          delta = (analytic.fetch(path)[:data][i] - numeric).abs
+          delta = (analytic.fetch(path).to_a[i] - numeric).abs
           worst = { path:, at: i, delta: } if delta > worst[:delta]
         end
         s.put(path, held)
@@ -185,9 +185,9 @@ class BlockTest < Minitest::Test
   # randomness, which is what makes this comparable at all).
   def central_difference(session, path, held, index, step: 1e-2)
     moved = ->(delta) do
-      data = held[:data].dup
+      data = held.to_a
       data[index] += delta
-      session.put(path, { shape: held[:shape], data: })
+      session.put(path, Torobi::TensorData.from_a(held.shape, data))
       session.evaluate(@differences_batch)
     end
     (moved.call(step) - moved.call(-step)) / (2 * step)

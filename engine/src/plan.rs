@@ -748,7 +748,7 @@ mod tests {
             Err(e) => format!("{e:#}"),
         };
         assert!(e.contains("m.w"), "{e}");
-        assert!(e.contains("named the way the graph names them"), "{e}");
+        assert!(e.contains("qualified paths"), "{e}");
     }
 
     #[test]

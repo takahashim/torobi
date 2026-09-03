@@ -84,7 +84,7 @@ class RngTest < Minitest::Test
       continuous = Torobi::Session.open(config, weights: weights, optimizer:) do |s|
         s.adjust(seed: 5)
         s.run(all)
-        s.parameter_paths.to_h { |p| [p, s.fetch(p)[:data]] }
+        s.parameter_paths.to_h { |p| [p, s.fetch(p).to_a] }
       end
 
       Torobi::Session.open(config, weights: weights, optimizer:) do |s|
@@ -96,7 +96,7 @@ class RngTest < Minitest::Test
         s.restore(path)
         assert_equal 5, s.seed, "the seed came back with the checkpoint"
         s.run(all.drop(4))
-        s.parameter_paths.to_h { |p| [p, s.fetch(p)[:data]] }
+        s.parameter_paths.to_h { |p| [p, s.fetch(p).to_a] }
       end
 
       continuous.each do |path_name, values|
