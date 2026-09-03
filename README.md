@@ -71,6 +71,25 @@ around it: a teacher's scores, a validation metric, and a record. It is
 the run described in [docs/plan.md](docs/plan.md) section 15.28, where a
 130M encoder reached nDCG@10 0.7680 against its 310M teacher's 0.7770.
 
+## Training a sentence embedder
+
+An embedder is the encoder, a mean over the tokens a row actually has,
+and the normalization that makes a dot product a cosine. The contrastive
+loss is not in the model: it reads across the batch, which makes it the
+recipe's. `GradCache` is how the batch gets larger than the machine,
+encoding the parts one at a time and still taking the loss over all of
+them:
+
+```ruby
+model = Torobi::Models::ModernBERT.embedder(config, seq: 128, pooling: :mean)
+cache = Torobi::GradCache.new(session, loss: over_vectors,
+                              tap: "student.embedding", into: :vectors, seed: :seed)
+cache.step(parts)   # one optimizer step over every part
+```
+
+`test/contrastive_test.rb` is the whole of it on a tiny model, held to
+the step the same batch would have taken in one piece.
+
 ## Running a long one
 
 A training run belongs in a process of its own with a cap on what it may

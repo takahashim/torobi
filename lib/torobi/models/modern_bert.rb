@@ -95,12 +95,8 @@ module Torobi
       def classifier(config, seq:, encoder_prefix: "model", rows: nil)
         config.check!
         Torobi.graph do |g|
-          x = if encoder_prefix.to_s.empty?
-                encode(g, config, seq:, rows:)
-              else
-                g.scope(encoder_prefix) { encode(g, config, seq:, rows:) }
-              end
-          pooled = pool(g, x, config, seq:)
+          x = body(g, config, seq:, rows:, encoder_prefix:)
+          pooled = pool(g, x, config, seq:, rows:)
           # ModernBERT's head: a dense, gelu, a norm, then the classifier.
           pooled = norm(g, g.linear(pooled, config.hidden_size, name: "head.dense",
                                     bias: false).gelu,
@@ -112,21 +108,68 @@ module Torobi
         end
       end
 
-      # One vector per row, the way `classifier_pooling` asks for.
+      # A sentence embedder: token ids in, one vector per row out.
+      #
+      # What a sentence-transformers checkpoint is, as a graph: the
+      # encoder, a pooling, and the normalization that turns a dot product
+      # into a cosine. ruri-v3 is this, and `Torobi::Export` writes the
+      # `modules.json` and `1_Pooling/config.json` that say so.
+      #
+      # The vector is named, so a tap reads it without a second graph:
+      # "embedding" is what a gradient cache back-propagates through
+      # (`Torobi::GradCache`), and "hidden" is what it was pooled from.
+      #
+      # No loss. A contrastive objective reads across the batch, which
+      # makes it the recipe's rather than the model's; this stops at the
+      # vector. `rows:` is for the objective that does read across, which
+      # cannot be written against a dimension nothing knows.
+      def embedder(config, seq:, pooling: :mean, encoder_prefix: "", rows: nil,
+                   normalize: true)
+        config.check!
+        Torobi.graph do |g|
+          x = g.name("hidden", body(g, config, seq:, rows:, encoder_prefix:))
+          pooled = pool(g, x, config, seq:, rows:, mode: pooling)
+          pooled = normalized(g, pooled) if normalize
+          g.output :embedding, g.name("embedding", pooled)
+        end
+      end
+
+      # The encoder under wherever its parameters sit. Published
+      # classifiers keep them under `model.` and bare encoders at the root,
+      # and that is the only difference between the two graphs above.
+      def body(g, config, seq:, rows:, encoder_prefix:)
+        return encode(g, config, seq:, rows:) if encoder_prefix.to_s.empty?
+
+        g.scope(encoder_prefix) { encode(g, config, seq:, rows:) }
+      end
+
+      # A vector of length one, so a dot product is a cosine.
+      def normalized(g, x)
+        x / g.sum(x.square, axes: [-1], keepdims: true).sqrt
+      end
+
+      # One vector per row, the way `mode` asks for.
       #
       # `cls` is the first position, which for these tokenizers is the
       # sentence-start token: [batch, seq, hidden] keeping only seq 0.
-      # `mean` is over the sequence, and takes no account of padding here,
-      # so a caller pooling that way should pass rows of equal length.
-      def pool(g, x, config, seq:)
-        case config.classifier_pooling
+      #
+      # `mean` is over the tokens a row actually has. Padding is weighed
+      # out of both the sum and the count, so a row's vector does not
+      # depend on how much padding followed it, and two batches that
+      # differ only in their longest row give the same answer for every
+      # other row. The weights arrive as `:tokens` rather than being
+      # derived from the attention mask: what a mask holds is whatever the
+      # caller built it from, and a weight that must be exactly one or
+      # exactly zero should not be read out of a large negative number.
+      def pool(g, x, config, seq:, rows: nil, mode: config.classifier_pooling)
+        case mode
         when :cls
           x.slice(axis: 1, start: 0, length: 1).reshape(shape: [-1, config.hidden_size])
         when :mean
-          g.mean(x, axes: [1])
+          weights = g.input(:tokens, [rows, seq, 1])
+          g.sum(x * weights, axes: [1]) / g.sum(weights, axes: [1])
         else
-          raise ConfigError,
-                "unknown classifier_pooling #{config.classifier_pooling.inspect}"
+          raise ConfigError, "unknown pooling #{mode.inspect}"
         end
       end
 
@@ -253,7 +296,10 @@ module Torobi
       # for; there is no other length it could be. A row longer than that
       # is refused rather than truncated, because which end to drop is a
       # decision about the data and not about the model.
-      def batch(config, rows, seq:)
+      # `pooling:` is what the graph this feeds pools like, and adds the
+      # per-token weights a mean over real tokens needs (`tokens`). It is
+      # the same word `embedder` and `pool` take.
+      def batch(config, rows, seq:, pooling: nil)
         lengths = rows.map(&:size)
         too_long = lengths.each_with_index.select { |length, _| length > seq }
         unless too_long.empty?
@@ -265,8 +311,32 @@ module Torobi
         end
 
         ids = rows.flat_map { |row| row + Array.new(seq - row.size, config.pad_token_id) }
-        { input_ids: TensorData.from_a([rows.size, seq], ids, dtype: :i32) }
-          .merge(masks(config, seq:, lengths:))
+        fields = { input_ids: TensorData.from_a([rows.size, seq], ids, dtype: :i32) }
+                 .merge(masks(config, seq:, lengths:))
+        return fields unless pooling.to_s == "mean"
+
+        fields.merge(tokens: tokens(seq:, lengths:))
+      end
+
+      # Which positions are tokens and which are padding, [rows, seq, 1]:
+      # one where a position is real and zero where it is not.
+      #
+      # What a mean over the real tokens weighs with, shaped to multiply a
+      # [rows, seq, hidden] hidden state as it stands. Only a graph that
+      # pools that way declares it, and a field nothing reads is refused
+      # at the boundary rather than ignored, so `batch` is told which
+      # pooling it is feeding rather than guessing.
+      #
+      # Public for a caller who has already padded its own ids.
+      def tokens(seq:, lengths:)
+        empty = lengths.index(0)
+        if empty
+          raise ConfigError,
+                "row #{empty} has no tokens, and a mean over no tokens is not a vector"
+        end
+
+        TensorData.runs([lengths.size, seq, 1],
+                        lengths.flat_map { |length| [[length, 1.0], [seq - length, 0.0]] })
       end
 
       # The two masks a batch must carry, as {mask:, local_mask:} ready to

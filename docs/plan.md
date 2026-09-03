@@ -2236,6 +2236,49 @@ claim 無しで読める) の第 1 区切りから取る。
 
 この時点で Ruby 237 件 / Rust 122 + 37 件。
 
+### 15.45 padding を平均から外し、4 つが噛み合うことを 1 度通した(2026-09-04)
+
+tech-ruri-data と同じ学習を書けるか、で挙げた残り 2 つを片付けた。
+
+**mean pooling が padding を数えていた。** `pool` の `:mean` は `g.mean(x, axes: [1])`
+で、系列全体を割っていた。**行のベクトルが、同じ batch に入った他の行の長さで動く**。
+padding は batch についての事実であってテキストについての事実ではないので、そのまま
+学習すると batch の組み方を学ぶことになる。
+
+重みは batch フィールド `tokens` [rows, seq, 1] として渡し、`pool` が
+`sum(x * w) / sum(w)` を組む。**attention mask から導出しなかった**: mask は加算マスク
+で、中身は caller が作ったものである (-1e9 かもしれないし -inf かもしれない)。
+1 か 0 でなければならない重みを、大きな負数から割り算で読み出すべきではない。
+
+`batch` は `pooling:` を受け取る。「常に載せる」を先に試して、**engine が読まれない
+batch フィールドを拒否する**ことに当たった。これは正しい厳しさ (フィールド名の打ち間違いが
+黙って無視されない) なので、載せる側が何を養っているかを言う形にした。
+
+**`embedder` を足した。** encoder + pooling + 正規化で、sentence-transformers の
+checkpoint がグラフとして何であるかそのもの。`hidden` と `embedding` に名前が付いて
+いるので tap で読める。**損失は入れていない**: 対照損失は行をまたいで読むので recipe の
+ものであり、model は vector で止まる。
+
+**4 つを 1 度通した** (`test/contrastive_test.rb`)。ModernBERT + masked mean +
+MNRL + GradCache で、主張は「動いた」ではなく**厳密一致**である:
+
+| | |
+| --- | --- |
+| cached step の loss vs whole batch | 1e-5 以内 |
+| パラメータ全体の最大差 | < 1e-5 |
+| 分割の仕方 (6 / 3 / 2 / 1 行ずつ) | 答えが変わらない |
+| 5 step | loss 0.5196 → 0.0 |
+
+単調には落ちない。plain SGD が最小値を跨いで戻るからで、これは optimizer についての
+事実であって組み合わせについての事実ではない。テストもそう書いた。
+
+pooling 側 (`test/pooling_test.rb`) は padding 不変性を **seq 6 と seq 3 の 2 つの
+グラフ**で示した。実トークンは同じ 3 つに attend するので、padding を数える pooling
+だけがこの 2 つを違えられる。対照として、padding 込みの平均なら 1e-3 以上ずれることも
+確かめている (直したものが自明に真ではないこと)。
+
+この時点で Ruby 246 件 / Rust 122 + 37 件。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。
