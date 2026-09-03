@@ -1,9 +1,14 @@
-# Torobi(とろ火)実装計画 v3.1
+# Torobi(とろ火)実装計画 v3.2
 
-- Status: Proposal(v3 を外部レビューと介入モデルの議論を受けて改訂)
+- Status: Proposal(v3.1 への外部レビューを受けて改訂。M2 着手の前提)
 - Date: 2026-09-03
 - Primary target: Apple Silicon macOS
 - 名称: gem / リポジトリ = `torobi`、エンジン crate = `torobi-engine`、namespace = `Torobi::`
+- v3.2 の変更(2026-09-03、外部レビュー反映): 実行契約を新設(§5A: batch 経路、
+  状態遷移、model/objective 接続、エラー分類)、native 境界の見積もりを訂正(§4.1、
+  実測で反証された)、replay を 2 モードに分離(§8.6)、マイルストーンを G0/M1〜M4 に
+  再分割(§9.1)、v1 文書への規範参照を本文に取り込み(§11、§12)、配布 feasibility を
+  M1 に前倒し、計測主張を仕様化
 - 再検討反映(2026-09-03): burn-rb は参考に格下げ、プロセス同居禁止の撤回を明文化、
   ModernBERT を「最初のとっかかり」に一般化、製品面を 3 層構造に再編、配布方針を未確定に変更
 - v3 からの主な変更: エンジンを in-process(狭い腰の native 拡張)に転換、
@@ -36,6 +41,9 @@
   であり、「静的への回帰」ではない。
 - Torobi は define-and-run 側に立つが、これは PyTorch と競う選択ではなく、
   ONNX / MIL と同じ層(交換・実行 IR)をフロントエンドごと所有する選択である。
+- **数値の主張は計測仕様とセットでしか書かない。** 「境界コスト 0.1% 未満」「cosine ≈ 1.0」
+  「一晩以内」の類は、hardware / shape / dtype / dataset / 許容値を明示した出口条件
+  (§9)に置き換える。裸の比率や倍率を設計根拠にしない。
 - アーキテクチャ差分が config に縮退した、とも主張しない。Torobi の扱う範囲では
   そう見なせるモデルが十分多い、に留める。IR の語彙は
   「config パラメータ + 少数の block variant + named semantic ops」で構成する(§6)。
@@ -81,8 +89,9 @@ torobi gem
 | 事前学習済み重み | 対象外 | 一級市民 | 同左 |
 | oracle | Python MLX | + kohagi | 同左 + **評価 3 軸**(§9.2) |
 
-v1 の GraphConfig 設計(§6)、op registry manifest(§7)、乱数と checkpoint(§13〜14)、
-correctness 戦略の骨格(§18)は引き続き継承する。
+v1(mlx-graph-rb 案)の GraphConfig 設計と op registry manifest の考え方は §6 に、
+乱数・checkpoint・correctness の規範は §11・§12 に**本文として取り込んだ**。v1 文書は
+`notes/`(git 管理外)にしか無く、規範をそこへ参照で預けることはしない。
 
 ## 3. Goals / Non-goals
 
@@ -100,8 +109,13 @@ correctness 戦略の骨格(§18)は引き続き継承する。
 - step 内部での Ruby コード実行(数式・微分経路への介入)。行き先は §8.4 / §10
 - in-process の広い eager Array API、custom VJP、Metal カーネル注入
 - リモートエンジン、分散
-- スループット競争、CUDA / Linux(MLX の CUDA backend 成熟後に再訪)
-- v1 の non-goals(Python API 互換、Marshal 等)は維持
+- スループット競争、および CUDA / Linux 対応。MLX 自体には CUDA と Linux CPU の backend が
+  あるので「使えないから」ではなく、**製品スコープ上の選択**として当面対象外にする
+  (対象は手元の Mac での FT / 蒸留)
+- 以下は引き続き対象外: Python MLX API 互換、Python dunder の再現、学習中の任意 Ruby
+  forward、DLPack、custom Metal kernel、任意 Ruby オブジェクトを含む parameter tree、
+  MLX の全 dtype / 全 op / 全 optimizer の公開、`Marshal` による保存、初期段階での
+  training step 全体の compile
 
 ## 4. native 境界: 狭い腰のセッション API
 
@@ -119,8 +133,25 @@ correctness 戦略の骨格(§18)は引き続き継承する。
 - native 側に Ruby が保持する長寿命オブジェクトはセッション 1 個。GC 連携は
   TypedData の free のみで、mark / compact を要する型を作らない
 
-この構成により、v1 で計画の過半を占めた native 境界の設計・試験は
-「一度書いて閉じる有界な問題」になる。ASan 等の検査は通常の Rust / 拡張テストとして行う。
+### 4.1 境界は狭いが、閉じてはいない(v3.1 の見積もりの訂正)
+
+v3.1 は「native 境界は一度書いて閉じる有界な問題」と書いた。**これは楽観であり、
+実測で反証された**。現 HEAD で確認した事実:
+
+| 失敗 | 実際の挙動 |
+| --- | --- |
+| MLX が C エラーハンドラ経由で報告する失敗(shape 不一致など) | Ruby の例外になる。`rescue` できる |
+| デバイス / ライブラリ初期化の失敗(metallib 不在) | **プロセスが exit 255 で死ぬ**。C++ 例外は Rust が捕捉できず、Ruby に届かない |
+| Rust の panic | GVL トランポリンが `catch_unwind` し、GVL 復帰後に resume。C を貫通しない |
+
+したがって境界の性質は「狭い」であって「安全」ではない。方針:
+
+- 予見できる致命は **MLX に触れる前に Ruby 側で拒否する**(`Torobi::Preflight`)。
+- 予見できないものは残る。**subprocess で異常系を回すテスト**を常設し、abort する事実
+  そのものをテストで固定する(挙動が黙って変わらないように)。
+- ASan / UBSan は Rust・拡張の通常テストとして CI に置く。
+
+境界の出口条件は §9.1 の M1 に列挙する。
 
 なお、プロセス分離は要件ではない(v3 の「同居させない」原則は撤回済み)。腰の狭さも
 教義ではなく費用対効果の姿勢であり、価値が実証されれば面を広げる選択(例: 読み取り専用の
@@ -133,6 +164,85 @@ correctness 戦略の骨格(§18)は引き続き継承する。
 - nn / optimizer はエンジン内で所有(mlx-rs は参考)。AdamW は oracle の数 step と照合する。
 - vendoring 台帳(元コミット、刈った物、MLX / mlx-c / mlx-rs の exact revision)を維持し、
   `Torobi.build_info` が全 revision を報告する。更新は一版ずつの明示作業。
+
+## 5A. 実行契約(G0。M2 着手の前提)
+
+v3.1 は責務分離を書いたが、**実行の契約を書いていなかった**。以下を IR とセッション API の
+仕様として先に確定する。ここが決まるまで M2 には入らない。
+
+### 5A.1 状態遷移としての step
+
+```text
+(state', outputs) = step(state, batch, knobs)
+
+state = parameters + optimizer slots + RNG state + counters(step / epoch)
+        + sampler position
+batch = 名前つきテンソルの束(§5A.2 の経路で供給される)
+knobs = lr、損失重み、freeze 集合、…(§8.3 の A)
+```
+
+不変条件(§8.1)はこの形で読む: step は state と batch と knobs の関数であり、
+Ruby は state を直接書き換えない(ノブと §8.3 B の put を通す)。
+
+**freeze / unfreeze はスカラーノブではない。** 変更すると (1) autodiff の対象集合が変わり、
+(2) optimizer slot の保持 / 初期化 / 破棄が要り、(3) compile cache key が変わる。よって
+freeze はスパン境界でのみ有効になる**構造変更**として扱い、journal には「どの集合が
+いつ変わったか」を記録する。tap 集合の変更、入力 shape / dtype の変更も同じ理由で
+再コンパイル要因であり、同じ扱いにする。
+
+### 5A.2 batch の供給経路
+
+Ruby がデータを所有し、かつ計算中に Ruby コードを呼ばない、を両立させる経路を選ぶ。
+候補と評価:
+
+| 案 | 形 | 評価 |
+| --- | --- | --- |
+| (a) per-step 供給 | `run_step(batch)` を Ruby が毎 step 呼ぶ | span = 1 に固定される。境界コストは実測次第(§9.1 M1 の出口条件) |
+| (b) 事前投入キュー | Ruby が N batch を native キューへコピー → `run_steps(n)` が消費 | 長いスパンが可能。backpressure と prefetch の設計が要る |
+| (c) native BatchSource | データ供給を engine に持たせる(ファイル読み) | Ruby がデータを所有する目標に反する。採らない |
+
+**方針: (a) を基本、(b) を最適化として後から足す。** (a) は契約が単純で、Ruby のデータ層
+(ActiveRecord / pgvector / JSONL)がそのまま活き、可変長 batch も自然に扱える。(b) は
+実測で (a) の境界コストが問題になったときにだけ導入する。どちらでも
+**batch はコピーで渡る**(ハンドルなし)ことは変えない。
+
+決めるべき細部(G0 の成果物):
+- 可変長 batch の表現(shape はリクエストごとに変わる。§6.2 の static topology ≠ static shape)
+- コピーのコストと、それが step 時間に占める割合(計測して記録する)
+- キャンセル(§8 の窓が開く前に止めたい場合の意味論)
+
+### 5A.3 model graph と objective graph の接続
+
+以下を GraphConfig の正式な型として定義する(v3.1 は「入力に取る」としか書いていなかった)。
+
+- **`ModelOutputRef`**: objective の入力として `{"model": "student", "output": "logits"}`
+  を指す参照型。model graph の出力に**名前**を要求する(現状の位置指定 outputs を
+  名前つきに拡張する)。
+- **`BatchRef`**: batch のフィールドを指す参照型 `{"batch": "teacher_logits"}`。
+- **model output の契約**: 名前・shape・dtype を model graph 側が宣言し、objective の
+  shape 推論はそれを使う。不一致は構築時に拒否。
+- **`stop_gradient`**: op として IR に持つ。teacher の出力は既定で stop_gradient を通す
+  (オンライン teacher を student と同じ step で forward する場合に必須)。
+- **parameter ownership**: パラメータは model graph に属し、path は
+  `student.layers.0.wqkv.weight` のように **model 名で名前空間化**する。
+- **autodiff の対象**: `trainable == true` かつ freeze されていないパラメータのうち、
+  **学習対象と宣言された model のもの**だけを argnums に含める。teacher のパラメータは
+  含めない。この集合は GraphConfig と knobs から決定的に定まる。
+- **weight sharing と複数回呼び出し**: 同一 model を objective 内で複数回参照できる。
+  同じ parameter id を参照するので共有は IR レベルで自然に成立する。オンライン teacher の
+  重複実行は、同じ `ModelOutputRef` を複数箇所で使った場合に **1 回に畳む**(共通部分式の
+  除去)ことを engine 側の契約とする。
+
+### 5A.4 エラーの分類
+
+§4.1 の実測に基づき、3 分類を仕様とする。
+
+1. **構築時エラー**(`ConfigError`): 構造・shape・dtype・所有権。Ruby、native に触れない。
+2. **実行時エラー**(`RuntimeError`): MLX が C エラーハンドラ経由で報告するもの。
+   例外に変換され、セッションは生存する(次の step を試せる)。
+3. **致命**(`EngineUnavailable` で予防、あるいはプロセス終了): 初期化・デバイス・
+   ライブラリ不在。予見できるものは preflight で拒否し、できないものは
+   **プロセスが死ぬことを仕様として認める**(supervisor 前提。§9.1 M1 の異常系テスト)。
 
 ## 6. GraphConfig: model graph + objective graph の 2 部構成
 
@@ -170,6 +280,11 @@ topk / gather(MoE ルーティング)、データ依存 masking は、制御流�
 ParameterSpec の initializer に `{"type": "pretrained", "source": …, "tensor": …}` を追加。
 HF 名との写像は GraphConfig に記録され、shape / dtype 不一致は load 時に fail closed。
 `trainable: false` と組み合わせて freeze を表現し、LoRA はその上の定型とする。
+
+### 6.3A 接続の型
+
+§5A.3 の `ModelOutputRef` / `BatchRef` / `stop_gradient` / 名前つき model output /
+model 名による parameter 名前空間は、GraphConfig の型として定義する(G0 の成果物)。
 
 ### 6.4 ノードの自動命名
 
@@ -253,37 +368,75 @@ Ruby に住む。除外されるのは「経路を通らない実行」(Ruby コ
 - 標準ポリシー: NaNGuard(rollback)、BestCheckpoint、LrOnPlateau、EarlyStopping、Progress。
 - 規範: **実験の主筋はセッションプログラム(上から読める)、横断的関心はフック**。
 
-### 8.5 journal と replay
+### 8.5 journal
 
-窓での操作(ノブ、put、データ切替)は名前付きで journal に自動記録され、
-`torobi replay` が同一 seed から決定的に再演する。読み取り(A の読み、B+ タップ)は
-記録不要(再演で再現される)。安定したセッションプログラムは recipe(宣言)へ昇格できる。
+窓での操作(ノブ、put、データ切替、freeze の変更)は名前付きで journal に自動記録される。
+安定したセッションプログラムは recipe(宣言)へ昇格できる。
 
+**記録対象は操作だけではない。** 再現に必要なものを列挙する(v1 §13 を本文化した §11 と対):
+
+- GraphConfig の digest と semantics version
+- dataset / sampler の状態と、データ成果物の digest
+- optimizer の種別と設定、RNG state、step / epoch / batch position
+- Ruby 側 policy / hook のコード版(gem version と、ユーザーコードの digest)
+- runtime / build 情報(gem、Ruby、MLX、mlx-c、mlx-rs の revision、macOS / arch)
+- dtype、backend、compile signature
+- **窓で読んだ値**(metrics、tap)。v3.1 は「読み取りは journal 不要」としたが、
+  **読んだ値から Ruby が判断する以上、判断の入力は記録が要る**。訂正する。
+
+### 8.6 replay の 2 モード(v3.1 の「決定的に再演」の精密化)
+
+「同一 seed から決定的に再演」は曖昧であり、2 つの別の目的を混ぜていた。分離する。
+
+| モード | policy | 照合対象 | 用途 |
+| --- | --- | --- | --- |
+| **action replay** | 再実行しない。journal の操作をそのまま適用 | 最終 state と metrics | 学習の再生産、CI |
+| **deterministic rerun** | 再実行する(同じ Ruby コード) | 観測値と判断まで含めて照合 | policy の回帰検出 |
+
+一致条件も 3 段に分ける(§9.2 の 3 軸と同じ精神):
+
+1. **bitwise**: 同一マシン・同一 build・同一 dtype で期待する。checkpoint の round-trip など
+2. **dtype 別 tolerance**: 演算順序が変わりうる経路(fused / decomposition、並び替え)
+3. **統計的一致**: 最終 metric の一致(学習全体の再現。乱数と非決定性を含む場合)
+
+どの一致条件を要求するかは、テストごとに明示する。
 ## 9. 北極星と検証
 
-### 9.1 マイルストーン(v3 から微修正)
+### 9.1 マイルストーン(v3.2 で再分割)
+
+v3.1 の M2 / M3 は大きすぎ、M3 の出口条件(logit 一致)では backward も optimizer も
+memory も検証できないまま M4 の蒸留に入る構造だった。分割し直す。
 
 | | 内容 | 出口条件 |
-|---|---|---|
-| M0 | 純 Ruby DSL(2 部 GraphConfig、自動命名、objective の語彙) | native 無しで全テスト、同一定義 → 同一 digest |
-| M1 | エンジン最小(線形回帰)+ 狭い腰の拡張 | oracle と forward / gradient 一致、GVL ラッパ経由で 100 step |
-| M2 | 学習核 + 窓の契約(スパン、ノブ、フック、journal / replay、checkpoint / resume) | AdamW が oracle と一致、resume = 連続実行、replay = 再演一致 |
-| M3 | semantic ops + pretrained import + 最初のアーキテクチャ(ModernBERT) | base-v2 の logit が kohagi-rerank と一致 |
-| M4 | 蒸留初号機(310m 教師 → 130m 級) | 自前評価で素の base-v2 と同等以上(対照実験込み) |
-| M5 | embedder FT(pooling / InfoNCE / Matryoshka) | kohagi --text と cosine ≈ 1.0、--dims 256 評価 |
-| M6(将来) | decoder 系アーキテクチャの追加 + LLM LoRA(1〜3B)、量子化 op、varlen | M5 Pro クラスで一晩以内 |
+| --- | --- | --- |
+| M0 ✅ | 純 Ruby の IR と Graph DSL | 同一定義 → 同一 digest、構造検証、shape エラーの構築時報告。native 不要 |
+| **G0** | **実行契約(§5A)** | batch 経路の決定、`ModelOutputRef` / `BatchRef` / `stop_gradient` / 名前つき output / parameter 名前空間 / argnums 規則を型として実装、エラー 3 分類の実装 |
+| M1 | single-step とその境界 | (1) **異なる batch** で forward / grad / update が回る。(2) FFI 異常系: MLX の報告エラーが例外になる、Rust panic が C を貫通しない、致命は preflight で拒否されるか死ぬことをテストで固定、close / 二重 close / 部分初期化失敗。(3) GVL 解放中に別スレッドが進む。(4) **境界コストの実測**(batch サイズ × 系列長ごと。比率の主張はこの数値に置き換える)。(5) **配布 smoke**: 隔離環境へ gem install → require → 1 step |
+| M2 | stateful core | AdamW(oracle の最初の数 step と一致)、RNG state、checkpoint / resume(resume = 連続実行) |
+| M2.5 | 窓 | ノブ、フック、journal、**2 種の replay**(§8.6)、freeze の構造変更としての扱い |
+| M3a | model import | safetensors ロード、**1 ブロックの forward と gradient の parity** |
+| M3b | ModernBERT | 全体の forward / gradient parity、tiny dataset の過学習、memory 予算の実測 |
+| M4 | 蒸留実験 | 固定 dataset / metric / seed での実験が**完走し、記録が残る**こと |
+
+**M4 の出口条件を訂正した。** v3.1 は「素の base-v2 と同等以上」としていたが、それは
+データとハイパーパラメータに依存する**研究成果**であり、フレームワークの完成条件ではない。
+Torobi の出口条件は「実験が再現可能な形で回ること」であり、蒸留が成功するかは別の問い。
+
+M6(decoder 系 + LLM LoRA、量子化 op、varlen)は M3b 以降の将来として据え置く。
 
 ### 9.2 数値評価の 3 軸
 
 fused kernel と decomposition、実装間の比較は次を**別軸で**評価する(「速くて正しい」を
 一括りにしない):
 
-1. **semantic equivalence**: 数学的に同じ関数か(FlashAttention 系は exact)
+1. **semantic equivalence**: 数学的に同じ関数か(FlashAttention 系は数学的意味としては
+   同じ関数であり、数値の一致は 2 の tolerance 評価に委ねる。「exact だから一致する」とは
+   書かない)
 2. **numerical tolerance**: 演算順序由来の差を dtype ごとの許容誤差で判定
 3. **performance**: モデル・系列長・ハードごとに実測(一般化した倍率を主張しない)
 
 oracle は Python MLX(fail closed、版付き成果物)と kohagi(encoder 系)。
-有限差分・収束テスト・memory plateau・resume 一致は v1 §18 の構成を継承する。
+検証は §12 の層構成による。
 
 ## 10. Python MLX の二役(oracle かつ遊び場)
 
@@ -291,17 +444,83 @@ GraphConfig を Python MLX で実行するランナーを、検証専用でな�
 define-by-run の自由(任意 forward、custom VJP、カーネル実験)が必要な瞬間はここで実験し、
 収束したらエンジンの機能・DSL の語彙へ戻す。GraphConfig が両世界の共通言語。
 
-## 11. 配布(方針は未確定。M2 以降、利用者像が見えてから決める)
+## 11. 状態、checkpoint、配布
 
-選択肢を開いたまま進める:
+v1 文書(`notes/`、git 管理外)にあった規範をここに取り込む。参照ではなく本文とする。
 
-- arm64-darwin platform gem(native 拡張ビルド済み。導入は最軽量、リリース工程は重い)
+### 11.1 再現に必要な状態
+
+明示的に管理する: parameter 初期化 seed、dataset shuffle の seed / state、MLX の RNG
+state、dropout の state、global step、epoch、batch position(または sampler state)。
+compile を導入するときは model / optimizer / random state を compile の入力・出力に
+含める(**RNG を hidden capture にしない**)。
+
+同じ seed と同じ checkpoint から再開した実行が、parameter・optimizer state・次 batch の
+順序まで連続実行と一致することをテストする(§9.1 M2)。
+
+### 11.2 checkpoint の形式
+
+`Marshal` は使わない。
+
+```text
+checkpoint/000003/
+├── manifest.json
+├── graph.json
+├── parameters.safetensors
+├── optimizer.safetensors
+└── random.safetensors
+```
+
+`manifest.json` に持つもの: checkpoint schema version、GraphConfig digest、semantics
+version、gem / Ruby / MLX / mlx-c / mlx-rs の version と revision、macOS と arch、
+step / epoch / batch position、optimizer の種別と設定、dataset sampler の metadata、
+parameter の path・shape・dtype の inventory。
+
+書き込みは一時ディレクトリに行い、flush と検証の後に atomic rename する。読み込み時は
+digest・path・shape・dtype・optimizer 種別を検証し、**不一致を silent に無視しない**。
+
+### 11.3 メモリ
+
+Ruby の GC は device memory を把握しない。対策: 中間値を engine の内部に閉じ込める、
+Ruby へ返すのは loss・metrics・明示的に copy したテンソルに限る、step 末に state を
+まとめて eval する、MLX の active / peak / cache memory を Ruby へ公開する、
+1,000 / 10,000 step の plateau テストを持つ。
+
+### 11.4 配布(方針は未確定。ただし feasibility は M1 で確かめる)
+
+選択肢は開いたまま進める:
+
+- arm64-darwin platform gem(拡張ビルド済み。導入は最軽量、リリース工程は重い)
 - source gem(要 Rust toolchain + cmake。工程は軽いが導入者に要求が乗る)
 - 併用(source を正、platform を利便として)
 
-開発期は source checkout で進める。Python ランナーは optional な開発依存(不変)。
+**ただし決定を遅らせることと、可能性を確かめないことは別である。** 現時点で判明している
+制約(`docs/vendoring.md`):
 
-## 12. リスク台帳(v3 から更新)
+- MLX の exact revision が不明(OminiX のビルド済みバイナリを使っている)
+- `mlx.metallib` が約 100 MB あり、**dladdr で拡張バンドルの隣に置く必要がある**
+- それが無いとプロセスが死ぬ(§4.1)
+
+よって **M1 の出口条件に「隔離環境へ gem install → require → 1 step」の smoke test を
+含める**(§9.1)。開発期は source checkout で進める。Python ランナーは optional な開発依存。
+
+## 12. 検証の層(v1 §18 を本文化)
+
+1. **純 Ruby の構造テスト**: 所有権、位相順序、安定した parameter path、直列化の
+   round-trip、決定的 digest、shape / dtype 推論、config 検証。native 不要
+2. **native 境界テスト**(§4.1): 例外変換、panic が C を貫通しないこと、致命の挙動、
+   GVL 解放、GC 下での生存、二重 close。**subprocess で回す**
+3. **Python MLX との differential**: forward、scalar loss、parameter path ごとの
+   gradient、optimizer state、更新後 parameter、checkpoint load 後の最初の step。
+   oracle は版付きの成果物として生成し、**生成できない場合は fail closed**(pass 扱いにしない)
+4. **数学的テスト**: 小さいテンソルでの有限差分、broadcasting と reduction の property、
+   weight sharing 時の勾配加算、softmax / cross entropy の数値安定性、極値・zero-size・
+   singleton、dtype ごとの tolerance
+5. **収束テスト**: 線形回帰、小さな MLP、tiny dataset の過学習、そして M3b の parity
+6. **運用テスト**: memory plateau(1,000 / 10,000 step)、強制 GC、checkpoint の中断と
+   resume、スレッドの進行、隔離環境での installed-gem smoke
+
+## 13. リスク台帳(v3.2 で更新)
 
 | Risk | 対処 |
 |---|---|
@@ -309,12 +528,15 @@ define-by-run の自由(任意 forward、custom VJP、カーネル実験)が必�
 | 狭い腰の劣化(関数が増え広い binding 化する) | セッション API の関数数を計測対象にする。テンソル越境と callback の禁止を review 基準に |
 | IR と engine の意味ずれ | 単一 manifest から両面生成、differential test |
 | resume / replay 非再現 | TrainState(乱数込み)の明示管理、resume=連続・replay=再演のテスト |
-| checkpoint 破損 | manifest + atomic rename + inventory 検証(v1 §14) |
+| checkpoint 破損 | manifest + atomic rename + inventory 検証(§11.2) |
+| **致命が Ruby に届かない**(初期化失敗でプロセス死) | preflight の拒否リストを増やす、subprocess 異常系テスト、supervisor 前提を文書化(§4.1) |
+| **batch 経路の性能** | M1 で計測し、必要なら投入キュー(§5A.2 (b))へ |
+| **配布(metallib 100 MB と配置制約)** | M1 の installed-gem smoke で早期に確かめる(§11.4) |
 | タップの常設によるメモリ / fusion 劣化 | stats 縮約を既定に、full タップは debug 用と明記 |
 | 窓能力の際限ない要望 | 能力は列挙制。新規はエンジンの名前付き機能として審査 |
 | DSL の自由度肥大 | op registry 制。escape hatch は §10 |
 
-## 13. 関連プロジェクト
+## 14. 関連プロジェクト
 
 - kohagi / kohagi-serve: encoder のサービング、教師採点、パリティ oracle。Torobi の出力
   (HF 配置 fp32 safetensors + 1_Pooling)は無変換で載る。
@@ -322,11 +544,19 @@ define-by-run の自由(任意 forward、custom VJP、カーネル実験)が必�
   目的にしない。教訓は「直接実行の追求ではなく、記述の所有」。
 - 本番 LLM サービング: 買う(llama-server / vLLM)。Torobi は merge / GGUF 変換ブリッジまで。
 
-## 14. 最初のワークパッケージ(M0)
+## 15. 次のワークパッケージ(G0: 実行契約)
 
-1. `torobi` リポジトリと gem skeleton(純 Ruby から開始)。
-2. GraphConfig(model + objective)の Data 定義、deep-freeze、決定的 JSON / digest。
-3. op manifest(初期セット + semantic ops)と Ruby 側 registry / 自動命名。
-4. Linear lowering、shape 推論、所有権検証。objective graph の最小語彙(mse、重み付き和)。
-5. ここまで native もエンジンも無しでテストが通ること。
-6. 並行して torobi-engine crate の M1 スパイク(線形回帰、oracle 照合)。
+M0 と M1 の一部(§9.1 の M1 のうち single-step とその境界の初期形)は実装済み。
+次は M2 ではなく **G0** から始める。
+
+1. **batch 経路**: `run_step(batch)` を追加し、bindings 固定の現状(セッション開始時の
+   入力を全 step で使い回す)を置き換える。可変長 batch のコピー経路と、その境界コストの
+   計測(§9.1 M1 の出口条件)
+2. **接続の型**: 名前つき model output、`ModelOutputRef`、`BatchRef`、`stop_gradient` op、
+   model 名による parameter 名前空間、argnums 規則(§5A.3)
+3. **エラー 3 分類の実装**(§5A.4)と、preflight の拒否リストの整備
+4. **journal のスキーマ**(§8.5)と replay 2 モードの骨格(§8.6)。実装は M2.5 だが、
+   何を記録するかは G0 で決める
+
+その後 M1 の残り(異なる batch での学習、境界コスト実測、installed-gem smoke)を閉じ、
+M2(stateful core)に進む。
