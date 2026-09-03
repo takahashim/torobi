@@ -121,9 +121,19 @@ class Qwen2Test < Minitest::Test
   end
 
   # How far two implementations of the same arithmetic may be, in a
-  # different order, over 24 layers. Relative, because a hidden state
-  # deep in a decoder is tens (docs/plan.md section 15.52).
-  PARITY = 2e-3
+  # different order, over 24 layers.
+  #
+  # Relative, because Qwen2's hidden states are not small: the largest is
+  # 207 in the first case, and an absolute tolerance would be a statement
+  # about this model rather than about the arithmetic.
+  #
+  # Measured rather than guessed (MARGIN=1): the hidden states agree to
+  # 1.4e-5 and 7.7e-6, the scores to 2.7e-6 and 3.6e-6. That is what two
+  # f32 implementations of the same graph look like, and it leaves an
+  # order of magnitude for another machine's kernels while still
+  # refusing anything that is wired differently, which is off by orders
+  # rather than by rounding.
+  PARITY = 2e-4
 
   def test_the_recorded_config_is_the_one_this_builder_understands
     c = published
