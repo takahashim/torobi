@@ -573,6 +573,23 @@ impl Session {
         rb_self.with_engine(ruby, |engine| engine.save(&dir, &run))
     }
 
+    /// Writes one model's parameters as an HF-compatible fp32 safetensors
+    /// file. Returns [[old_path, new_path], ...] so the caller can write
+    /// metadata that names what was saved.
+    fn export_model(
+        ruby: &Ruby,
+        rb_self: &Self,
+        model: String,
+        dir: String,
+    ) -> Result<RArray, Error> {
+        let pairs = rb_self.with_engine(ruby, |engine| engine.export_model(&model, &dir))?;
+        let out = ruby.ary_new_capa(pairs.len());
+        for (old, new) in pairs {
+            out.push((old, new))?;
+        }
+        Ok(out)
+    }
+
     /// Restores state written by `save`, refusing what does not belong.
     /// Returns the caller's record as JSON.
     fn restore(ruby: &Ruby, rb_self: &Self, dir: String) -> Result<String, Error> {
@@ -902,6 +919,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("discard", method!(Session::discard, 0))?;
     class.define_method("evaluate", method!(Session::evaluate, 1))?;
     class.define_method("save", method!(Session::save, 2))?;
+    class.define_method("export_model", method!(Session::export_model, 2))?;
     class.define_method("restore", method!(Session::restore, 1))?;
     class.define_method("close", method!(Session::close, 0))?;
     class.define_method("closed?", method!(Session::closed, 0))?;

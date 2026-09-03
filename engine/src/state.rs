@@ -8,9 +8,11 @@
 //! before any of it is assigned, so a step that fails leaves the run
 //! exactly as it was (docs/plan.md section 5A.4).
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use mlx_rs::transforms::eval;
-use mlx_rs::Array;
+use mlx_rs::{Array, Dtype};
 
 use crate::checkpoint;
 use crate::optimizer::{Config as OptimizerConfig, Optimizer};
@@ -407,6 +409,59 @@ impl TrainState {
         Ok(checkpoint::write(dir, state)?.display().to_string())
     }
 
+    /// Writes one model's parameters to `dir` as an HF-compatible fp32
+    /// safetensors checkpoint. The GraphConfig model name is stripped from
+    /// each qualified path, so a model declared with `encoder_prefix:`
+    /// keeps that prefix and the file's keys match the published layout.
+    ///
+    /// Returns the (old, new) path pairs so the caller can write metadata
+    /// that names what was saved.
+    pub fn export_model(
+        &self,
+        plan: &Plan,
+        model: &str,
+        dir: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let model = plan
+            .models
+            .iter()
+            .find(|m| m.name == model)
+            .with_context(|| {
+                format!(
+                    "no model named {model:?} (this run has {:?})",
+                    plan.models.iter().map(|m| &m.name).collect::<Vec<_>>()
+                )
+            })?;
+        let dir = Path::new(dir);
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating {}", dir.display()))?;
+
+        let prefix = format!("{}.", model.name);
+        let mut renamed = Vec::new();
+        let mut owned: Vec<(String, Array)> = Vec::new();
+        for (path, array) in plan.paths[model.slice.clone()]
+            .iter()
+            .zip(&self.params[model.slice.clone()])
+        {
+            let new_path = path.strip_prefix(&prefix).unwrap_or(path).to_string();
+            renamed.push((path.clone(), new_path.clone()));
+            let array = if array.dtype() == Dtype::Float32 {
+                array.clone()
+            } else {
+                array.as_dtype(Dtype::Float32)?
+            };
+            owned.push((new_path, array));
+        }
+        eval(owned.iter().map(|(_, a)| a))?;
+        Array::save_safetensors(
+            owned.iter().map(|(path, array)| (path.as_str(), array)),
+            None,
+            dir.join("model.safetensors"),
+        )
+        .context("writing model.safetensors")?;
+        Ok(renamed)
+    }
+
     /// Restores state written by [`TrainState::save`], refusing anything
     /// that does not belong to this run: another description, another
     /// optimizer, a parameter of another shape, a missing slot.
@@ -799,5 +854,39 @@ mod tests {
         assert!(into.restore(&plan2, &path).is_err());
         assert_eq!(into.step(), 1);
         assert_eq!(values(&into.fetch(&plan2, "m.w").unwrap()), before);
+    }
+
+    #[test]
+    fn export_writes_one_models_parameters_with_prefix_stripped() {
+        // student.scale exports as "scale": the GraphConfig model name is
+        // the one thing a serving consumer does not carry.
+        let (plan, state) = open(fixtures::teacher_and_student(), sgd(0.1));
+        let dir = tempfile::tempdir().unwrap();
+        let export_to = dir.path().join("out").display().to_string();
+
+        let renamed = state.export_model(&plan, "student", &export_to).unwrap();
+        assert_eq!(renamed, vec![("student.scale".to_string(), "scale".to_string())]);
+
+        let file = std::path::Path::new(&export_to).join("model.safetensors");
+        let arrays = Array::load_safetensors(&file).unwrap();
+        assert_eq!(arrays.len(), 1, "only the student's parameter is exported");
+        let array = &arrays["scale"];
+        assert_eq!(array.dtype(), Dtype::Float32);
+        assert_eq!(crate::tensor::to_tensor(array).unwrap().shape, vec![2]);
+        let exported = values(&crate::tensor::to_tensor(array).unwrap());
+        let held = values(&state.fetch(&plan, "student.scale").unwrap());
+        for (got, want) in exported.iter().zip(&held) {
+            assert!((got - want).abs() < 1e-6, "{exported:?} against {held:?}");
+        }
+    }
+
+    #[test]
+    fn export_refuses_a_model_name_this_run_does_not_have() {
+        let (plan, state) = open(fixtures::scaled_mean(), sgd(0.1));
+        let dir = tempfile::tempdir().unwrap();
+        let e = state
+            .export_model(&plan, "elsewhere", &dir.path().display().to_string())
+            .unwrap_err();
+        assert!(e.to_string().contains("no model named"), "{e}");
     }
 }

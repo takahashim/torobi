@@ -315,6 +315,12 @@ impl SessionCore {
         self.state.save(&self.plan, dir, run)
     }
 
+    /// Writes one model's parameters as an HF-compatible fp32 safetensors
+    /// file, stripping the GraphConfig model name from each path.
+    pub(crate) fn export_model(&self, model: &str, dir: &str) -> Result<Vec<(String, String)>> {
+        self.state.export_model(&self.plan, model, dir)
+    }
+
     /// Restores state written by [`Session::save`], refusing anything that
     /// does not belong to this session. Returns the caller's record.
     pub(crate) fn restore(&mut self, dir: &str) -> Result<String> {
@@ -584,6 +590,13 @@ impl Session {
     pub fn save(&self, dir: &str, run: &str) -> Outcome<String> {
         let core = self.core()?;
         runtime().execute(|| core.save(dir, run))
+    }
+
+    /// Writes one model's parameters as an HF-compatible fp32 safetensors
+    /// file, stripping the GraphConfig model name from each path.
+    pub fn export_model(&self, model: &str, dir: &str) -> Outcome<Vec<(String, String)>> {
+        let core = self.core()?;
+        runtime().execute(|| core.export_model(model, dir))
     }
 
     /// Restores state written by [`Session::save`], refusing anything that
@@ -1271,5 +1284,32 @@ mod checkpoint_tests {
         assert_eq!(m["step"], 1);
         assert_eq!(m["run"]["epoch"], 2);
         assert_eq!(m["seed"], 0);
+    }
+
+    #[test]
+    fn a_session_exports_one_models_parameters_through_the_runtime() {
+        // The facade path: the runtime serializes this against any step in
+        // flight, and the model name is stripped from the saved keys.
+        let session = open(fixtures::teacher_and_student());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out").display().to_string();
+
+        let pairs = session.export_model("student", &out).unwrap();
+        assert_eq!(pairs, vec![("student.scale".to_string(), "scale".to_string())]);
+
+        let arrays = mlx_rs::Array::load_safetensors(std::path::Path::new(&out).join("model.safetensors")).unwrap();
+        assert!(arrays.contains_key("scale"));
+        assert!(!arrays.contains_key("student.scale"));
+        assert!(!arrays.contains_key("teacher.scale"), "only one model is exported");
+    }
+
+    #[test]
+    fn a_session_refuses_to_export_a_model_that_is_not_here() {
+        let session = open(fixtures::scaled_mean());
+        let dir = tempfile::tempdir().unwrap();
+        let e = session
+            .export_model("elsewhere", &dir.path().display().to_string())
+            .unwrap_err();
+        assert!(e.to_string().contains("no model named"), "{e}");
     }
 }

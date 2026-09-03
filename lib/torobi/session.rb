@@ -347,6 +347,43 @@ module Torobi
       values
     end
 
+    # Writes one model's parameters to `dir` as an HF-compatible fp32
+    # safetensors checkpoint, plus the sentence-transformers metadata files
+    # that let it load without conversion (docs/plan.md section 14).
+    #
+    # `model:` is the GraphConfig model name to export (defaults to the
+    # only model when there is just one). The GraphConfig model name is
+    # stripped from each parameter path, so a model declared with
+    # `encoder_prefix:` keeps that prefix and the file's keys match the
+    # published layout.
+    #
+    # `pooling:` is :cls or :mean, and `pooling_dim:` is the model's hidden
+    # size (the pooling layer's word_embedding_dimension). `config_json:`
+    # is the underlying transformer's config.json text, copied as-is if
+    # given.
+    #
+    #   s.export_model!("out/ruri-ft", model: "student",
+    #                   pooling: :cls, pooling_dim: 768,
+    #                   config_json: File.read("ruri/config.json"))
+    #
+    # This is not a checkpoint: it has no optimizer state, no RNG, no
+    # counters. It is the shape a distillation produces for serving.
+    def export_model!(dir, model: nil, pooling: :cls, pooling_dim:, config_json: nil)
+      models = @provenance.dig("config", "models") || []
+      model ||= models.first if models.size == 1
+      raise ArgumentError, "model: is required (this run has #{models.inspect})" unless model
+
+      pairs = atomically do
+        written = @native.export_model(model.to_s, dir.to_s)
+        @journal&.note(step: @native.step, event: "exported", model: model.to_s,
+                       paths: written.map { |_, new| new })
+        written
+      end
+      Export.write_metadata(dir, pooling:, pooling_dim:,
+                            config_json: config_json&.to_s)
+      pairs.to_h
+    end
+
     # Writes the run's state to `dir`, atomically: parameters, optimizer
     # slots, the step counts, the description they belong to, and this
     # run's provenance. Returns the path. Interrupting it leaves no

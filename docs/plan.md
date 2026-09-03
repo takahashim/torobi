@@ -2204,3 +2204,29 @@ engine のレビューで 🟡 に残していたものを、Runtime の移動�
 読み戻しのコストは M3a / M3b の判断として残している。前者は model import で
 ノード数が 3 桁になってから、後者は実測してから決める。**両方とも片付いた**
 (§15.15 と §15.27)。
+
+### 15.44 学習結果を HF / sentence-transformers で書ける(2026-09-03)
+
+M3b / M4 を進めるうちに「学習結果を出力できない」ことが欠けとして出た。checkpoint
+は run の record であり optimizer 状態・RNG・counter を含むので、serving (kohagi-serve)
+へ渡すには **既知の配置に置き直す**必要がある。§14 の「Torobi の出力 (HF 配置 fp32
+safetensors + 1_Pooling)は無変換で載る」を満たす出口を `Session#export_model!` として
+追加した。
+
+- engine に `TrainState::export_model` (state.rs) と `Session::export_model` (session.rs)。
+  **GraphConfig のモデル名を parameter path から剥がす**ので、`encoder_prefix: "model"`
+  で作った ModernBERT は `student.model.embeddings.*` → `model.embeddings.*` になり、
+  公開された配置 (safetensors key) と 1:1 で並ぶ。非 f32 は f32 へ変換する。
+- Ruby 側は `Session#export_model!(dir, model:, pooling:, pooling_dim:, config_json:)`。
+  モデル名を省略できるのは**単一モデルのときだけ** (`@provenance["config"]["models"]`)。
+  `Torobi::Export` (export.rb) が modules.json / 1_Pooling/config.json /
+  config_sentence_transformers.json を書き、`config_json` を渡すと config.json を
+  そのまま置く。
+- これは checkpoint ではない。optimizer 状態・RNG・counter は無いので、**serve する
+  ものを reset なしに直せる**。保存は名前の剥がししかせず、値は f32 への変換のみ。
+- 検証: Ruby 6 件 (`test/export_test.rb`、prefix 剥がし / pooling :cls / :mean /
+  dim 必須 / 曖昧名 / 未知モデル拒否、**export した safetensors を `pretrained:` で
+  読み戻せて値が一致**)、engine 4 件 (state 2 + session facade 2)。`load_safetensors`
+  で読むと `__metadata__` が `null` で入る (mlx-rs の仕様) ことに注意。
+
+この時点で Ruby 231 件 / Rust 121 件 (lib、`--test-threads=1`)。
