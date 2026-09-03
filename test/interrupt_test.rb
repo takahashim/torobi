@@ -111,6 +111,53 @@ class InterruptTest < Minitest::Test
     session.close
   end
 
+  # Two sessions, two threads, one MLX. A per-session mutex says nothing
+  # about this pair: they used to submit to the same default stream at once
+  # and Metal ended the process ("commit command buffer with uncommitted
+  # encoder"). They now take turns
+  # (notes/SESSION_CONCURRENCY_SPEC.md section 9). In a subprocess, because
+  # the failure it pins is a crash, not an exception.
+  def test_two_sessions_stepped_at_once_take_turns_rather_than_crash
+    script = <<~SCRIPT
+      $LOAD_PATH.unshift(#{File.expand_path("../lib", __dir__).inspect})
+      require "torobi"
+      model = Torobi.graph do |g|
+        x = g.input :x, [nil, #{DIM}]
+        g.output :loss, g.mean(g.linear(x, #{DIM}, name: "l"))
+      end
+      config = Torobi::GraphConfig.new(models: { "m" => model })
+      weights = #{weights.inspect}
+      batch = #{batch.inspect}
+      a = Torobi::Session.open(config, weights)
+      b = Torobi::Session.open(config, weights)
+      [a, b].map { |s| Thread.new { 200.times { s.step!(batch) } } }.each(&:join)
+      puts "BOTH \#{a.step} \#{b.step}"
+      a.close
+      b.close
+    SCRIPT
+    output = IO.popen([RbConfig.ruby, "-e", script], err: %i[child out], &:read)
+
+    assert_match(/BOTH 200 200/, output, output)
+  end
+
+  # The interrupted entry path, hammered. `rb_nogvl` can refuse to start
+  # its region, and a binding that had already taken the engine out of its
+  # slot would lose it there. Nothing is taken before the region, so this
+  # only has to show that it holds under repetition.
+  def test_repeated_interruption_never_loses_the_engine
+    session = Torobi::Session.open(config, weights)
+    20.times do
+      assert_raises(Timeout::Error) { Timeout.timeout(0.02) { session.run(endless) } }
+      refute_predicate session, :closed?
+      refute_predicate session, :poisoned?
+    end
+    took = session.step
+    session.step!(batch)
+
+    assert_equal took + 1, session.step
+    assert session.close
+  end
+
   # A signal is the case a caller actually meets: Ctrl-C during training.
   # In a subprocess, because an unhandled INT would end this one.
   def test_a_signal_during_a_span_leaves_the_session_usable

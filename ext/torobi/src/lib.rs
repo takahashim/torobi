@@ -8,13 +8,112 @@
 mod gvl;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use magnus::exception::ExceptionClass;
 use magnus::value::ReprValue;
 use magnus::{function, method, prelude::*, Error, RArray, RHash, RString, Ruby, Value};
 use torobi_engine::tensor::{unpack, Batch, PackedBatch, PackedTensor, Tensor, Values};
 use torobi_engine::Session as EngineSession;
+
+/// One MLX, one command queue.
+///
+/// A session's mutex keeps one thread inside one session; it says nothing
+/// about two sessions. Two threads running two sessions submit to the same
+/// MLX default stream at once, and Metal ends the process for it
+/// ("commit command buffer with uncommitted encoder", reproduced). So
+/// everything that runs MLX takes this first, whichever session it belongs
+/// to, and two sessions in a process take turns rather than race
+/// (notes/SESSION_CONCURRENCY_SPEC.md section 9).
+///
+/// Held only with the GVL released, so waiting on it never stops other
+/// Ruby threads.
+static MLX: Mutex<()> = Mutex::new(());
+
+/// The process this extension was loaded in.
+///
+/// A Metal device does not survive fork. Ruby's preflight refuses to open
+/// a session in a child, but it cannot speak for a session the parent
+/// already opened, nor for anyone calling `Torobi::Native` directly. This
+/// is the check that can (the spec, sections 3 and 9).
+static ORIGIN_PID: OnceLock<u32> = OnceLock::new();
+
+/// Whether this is the process that loaded the extension.
+fn native_process() -> bool {
+    ORIGIN_PID.get().is_none_or(|origin| *origin == std::process::id())
+}
+
+fn foreign_process(ruby: &Ruby) -> Error {
+    Error::new(
+        error_class(ruby, "EngineUnavailable"),
+        "this process is not the one that loaded Torobi (a fork). A Metal \
+         device does not survive fork: open a session in the child, or run \
+         the work in a process of its own.",
+    )
+}
+
+/// What a refused entry into the blocking region is allowed to do.
+enum OnRefusal {
+    /// Hand control back to Ruby, which raises whatever it was holding,
+    /// then try again. What ordinary work does: the caller asked for an
+    /// interrupt and should get it.
+    AskRuby,
+    /// Never raise. Take the gate with the GVL held instead.
+    ///
+    /// `close` needs this. It runs from `ensure`, where raising would
+    /// replace the exception being handled, and where the unwind would
+    /// drop the engine outside the gate, freeing device memory beside
+    /// another session's step.
+    PressOn,
+}
+
+/// Runs MLX work with the GVL released and the gate held.
+///
+/// `work` waits in an Option rather than being captured by value: the
+/// blocking region can refuse to start, dropping the closure with whatever
+/// it holds, and for `close` that would be the engine itself. Returns the
+/// message of a panic inside `work` rather than resuming it.
+fn in_mlx<W, R>(work: W, refusal: OnRefusal) -> Result<R, String>
+where
+    W: FnOnce() -> R,
+{
+    let attempts = match refusal {
+        OnRefusal::AskRuby => ENTRY_ATTEMPTS,
+        OnRefusal::PressOn => 1,
+    };
+    let mut pending = Some(work);
+    for _ in 0..attempts {
+        let outcome = gvl::without_gvl(|| {
+            let work = pending.take().expect("the region is entered at most once");
+            let _gate = MLX.lock().unwrap_or_else(|e| e.into_inner());
+            work()
+        });
+        match outcome {
+            gvl::Outcome::Done(value) => return Ok(value),
+            gvl::Outcome::Panicked(what) => return Err(what),
+            gvl::Outcome::Interrupted => {
+                // The region was never entered, so nothing ran and nothing
+                // was taken. The work is still here, in `pending`.
+                if matches!(refusal, OnRefusal::AskRuby) {
+                    // A real interrupt raises here, safely: this frame
+                    // holds nothing but the work. The scheduler's timer,
+                    // which is what usually sets that flag, is cleared.
+                    unsafe { rb_sys::rb_thread_check_ints() };
+                }
+            }
+        }
+    }
+
+    // Ruby's flag stayed set. Do the work with the GVL held rather than
+    // refuse it: impolite for one call, but nothing is lost and this
+    // terminates.
+    let work = pending.take().expect("no attempt entered the region");
+    let _gate = MLX.lock().unwrap_or_else(|e| e.into_inner());
+    match catch_unwind(AssertUnwindSafe(work)) {
+        Ok(value) => Ok(value),
+        Err(panic) => Err(gvl::describe(panic)),
+    }
+}
 
 /// The engine's session, owned by one Ruby object.
 ///
@@ -34,6 +133,9 @@ use torobi_engine::Session as EngineSession;
 /// left to do after the boundary (notes/SESSION_CONCURRENCY_SPEC.md 0, 3.1).
 #[magnus::wrap(class = "Torobi::Native::Session", free_immediately, size)]
 struct Session {
+    /// The process this session was opened in. Checked before every use,
+    /// because a session that crossed a fork must not reach MLX.
+    origin_pid: u32,
     slot: Mutex<Slot>,
     /// The numbers a watcher reads, kept apart from the engine so that
     /// reading them never waits on a step. Its lock is held for a copy and
@@ -190,11 +292,15 @@ impl Session {
         weights_json: String,
         optimizer_json: String,
     ) -> Result<Self, Error> {
+        if !native_process() {
+            return Err(foreign_process(ruby));
+        }
         let optimizer = serde_json::from_str(&optimizer_json).map_err(|e| {
             Error::new(ruby.exception_arg_error(), format!("bad optimizer: {e}"))
         })?;
         EngineSession::open_with(&graph_json, &weights_json, optimizer)
             .map(|session| Self {
+                origin_pid: std::process::id(),
                 snapshot: Mutex::new(Snapshot::of(&session)),
                 slot: Mutex::new(Slot::Ready(Box::new(session))),
             })
@@ -218,46 +324,35 @@ impl Session {
     fn with_engine<T>(
         &self,
         ruby: &Ruby,
-        release_gvl: bool,
+        runs_mlx: bool,
         work: impl FnOnce(&mut EngineSession) -> anyhow::Result<T>,
     ) -> Result<T, Error> {
-        if !release_gvl {
-            // A reading: short, and it touches no Ruby either way.
+        // Before anything else, and before any lock: a session that has
+        // crossed a fork must not reach MLX, and must not wait on a gate
+        // that was held by a thread the fork did not bring along.
+        if !self.here() {
+            return Err(foreign_process(ruby));
+        }
+
+        if !runs_mlx {
+            // Reading what the plan already knows: no MLX, so no gate and
+            // no reason to hand back the GVL.
             return self.run(work).into_result(ruby);
         }
 
-        // `work` waits here rather than being captured by value: the region
-        // can refuse to start, and a closure dropped without running would
-        // take `work` with it, leaving nothing to retry with.
-        let mut pending = Some(work);
-        for _ in 0..ENTRY_ATTEMPTS {
-            let outcome = gvl::without_gvl(|| {
-                let work = pending.take().expect("the region is entered at most once");
-                self.run(work)
-            });
-            match outcome {
-                gvl::Outcome::Done(ran) => return ran.into_result(ruby),
-                gvl::Outcome::Panicked(what) => return Err(poisoned(ruby, &what)),
-                gvl::Outcome::Interrupted => {
-                    // The region was never entered, so nothing was taken
-                    // and nothing ran. Let Ruby act on whatever it was
-                    // flagging: a real interrupt raises here, safely,
-                    // because this frame holds nothing, and the scheduler's
-                    // timer is simply cleared. Then try again.
-                    unsafe { rb_sys::rb_thread_check_ints() };
-                }
-            }
+        match in_mlx(|| self.run(work), OnRefusal::AskRuby) {
+            Ok(ran) => ran.into_result(ruby),
+            Err(what) => Err(poisoned(ruby, &what)),
         }
+    }
 
-        // Ruby's flag stayed set through every round. Do the work with the
-        // GVL held rather than refuse it: impolite to the other threads for
-        // one call, but nothing is lost and this terminates.
-        let work = pending.take().expect("no attempt entered the region");
-        self.run(work).into_result(ruby)
+    /// Whether this session belongs to the running process.
+    fn here(&self) -> bool {
+        self.origin_pid == std::process::id() && native_process()
     }
 
     /// Take the engine, use it, put it back. Touches no Ruby, so this is
-    /// the whole of what runs with the GVL released.
+    /// the whole of what runs with the GVL released and the gate held.
     fn run<T>(&self, work: impl FnOnce(&mut EngineSession) -> anyhow::Result<T>) -> Ran<T> {
         let mut engine = match self.take() {
             Ok(engine) => engine,
@@ -366,15 +461,32 @@ impl Session {
 
     /// Releases the engine and its device memory. Idempotent, and the
     /// session refuses everything afterwards rather than pretending.
+    ///
+    /// Freeing device memory is MLX work like any other, so it goes
+    /// through the gate rather than happening wherever the guard is
+    /// dropped. In a forked child it is not done at all: the device those
+    /// arrays belong to did not come along, and the child is leaving.
     fn close(ruby: &Ruby, rb_self: &Self) -> Result<bool, Error> {
-        let mut guard = rb_self.slot.try_lock().map_err(|_| busy(ruby))?;
-        // A running session is not closed out from under its own step:
-        // the caller closes it at a step boundary (the spec, section 8).
-        if matches!(*guard, Slot::Running) {
-            return Err(busy(ruby));
+        let engine = {
+            let mut guard = rb_self.slot.try_lock().map_err(|_| busy(ruby))?;
+            // A running session is not closed out from under its own step:
+            // the caller closes it at a step boundary (the spec, section 8).
+            if matches!(*guard, Slot::Running) {
+                return Err(busy(ruby));
+            }
+            match std::mem::replace(&mut *guard, Slot::Closed) {
+                Slot::Ready(engine) => Some(engine),
+                _ => None,
+            }
+        };
+        let was_live = engine.is_some();
+        if let Some(engine) = engine {
+            if rb_self.here() {
+                let _ = in_mlx(move || drop(engine), OnRefusal::PressOn);
+            } else {
+                std::mem::forget(engine);
+            }
         }
-        let was_live = matches!(*guard, Slot::Ready(_));
-        *guard = Slot::Closed;
         Ok(was_live)
     }
 
@@ -548,24 +660,37 @@ fn tensor_to_ruby(ruby: &Ruby, tensor: Tensor) -> (RArray, RArray) {
 
 /// What the device is holding, as a Ruby Hash: active, cache, peak and the
 /// limit, in bytes. Process-wide, because MLX's allocator is.
+/// Runs one of MLX's process-global calls under the same gate a step
+/// takes. These reach the allocator every running session is also using,
+/// so they are not free to happen alongside one.
+fn global_mlx<R>(ruby: &Ruby, work: impl FnOnce() -> anyhow::Result<R>) -> Result<R, Error> {
+    if !native_process() {
+        return Err(foreign_process(ruby));
+    }
+    match in_mlx(work, OnRefusal::AskRuby) {
+        Ok(result) => result.map_err(|e| to_error(ruby, e)),
+        Err(what) => Err(poisoned(ruby, &what)),
+    }
+}
+
 fn memory(ruby: &Ruby) -> Result<Value, Error> {
-    let report = torobi_engine::memory::report().map_err(|e| to_error(ruby, e))?;
+    let report = global_mlx(ruby, torobi_engine::memory::report)?;
     json_to_ruby(ruby, report)
 }
 
 /// Frees what the allocator holds but is not using. Returns [before, after].
 fn clear_cache(ruby: &Ruby) -> Result<(usize, usize), Error> {
-    torobi_engine::memory::clear_cache().map_err(|e| to_error(ruby, e))
+    global_mlx(ruby, torobi_engine::memory::clear_cache)
 }
 
 /// Caps what this process may allocate on the device, in bytes; 0 lifts the
 /// cap. Returns the cap now in force.
 fn set_memory_limit(ruby: &Ruby, bytes: usize) -> Result<usize, Error> {
-    torobi_engine::memory::set_limit(bytes).map_err(|e| to_error(ruby, e))
+    global_mlx(ruby, || torobi_engine::memory::set_limit(bytes))
 }
 
 fn reset_peak_memory(ruby: &Ruby) -> Result<(), Error> {
-    torobi_engine::memory::reset_peak().map_err(|e| to_error(ruby, e))
+    global_mlx(ruby, torobi_engine::memory::reset_peak)
 }
 
 fn json_to_ruby(ruby: &Ruby, value: serde_json::Value) -> Result<Value, Error> {
@@ -592,6 +717,8 @@ fn checkpoint_manifest(ruby: &Ruby, dir: String) -> Result<Value, Error> {
 
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
+    // Recorded here, before anything can fork: everything native checks it.
+    let _ = ORIGIN_PID.set(std::process::id());
     let torobi = ruby.define_module("Torobi")?;
     let native = torobi.define_module("Native")?;
     native.define_singleton_method("build_info", function!(build_info, 0))?;

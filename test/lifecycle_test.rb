@@ -205,6 +205,70 @@ class LifecycleTest < Minitest::Test
                     "twenty opened and closed sessions should not leave megabytes behind"
   end
 
+  # A session the parent opened does not become the child's. Ruby's
+  # preflight cannot speak for this one: it was opened before the fork, so
+  # nothing of Ruby's is asked again. The check that catches it is native,
+  # and it runs before any lock or any MLX call
+  # (notes/SESSION_CONCURRENCY_SPEC.md sections 3 and 9).
+  def test_a_session_that_crossed_a_fork_is_refused
+    session = Torobi::Session.open(config, weights)
+    session.step!(batch)
+
+    reader, writer = IO.pipe
+    pid = fork do
+      reader.close
+      begin
+        session.step!(batch)
+        writer.puts "STEPPED"
+      rescue Torobi::EngineUnavailable => e
+        writer.puts "REFUSED #{e.message[0, 80].tr("\n", " ")}"
+      rescue StandardError => e
+        writer.puts "OTHER #{e.class}"
+      end
+      # And watching still answers: it reads no device.
+      writer.puts "WATCHED #{session.step}"
+      writer.close
+      exit!(0)
+    end
+    writer.close
+    output = reader.read
+    reader.close
+    Process.wait(pid)
+    session.close
+
+    assert_match(/REFUSED/, output, output)
+    assert_match(/fork/, output, output)
+    assert_match(/WATCHED 1/, output, output)
+  end
+
+  # The same for the process-global calls: they reach the allocator every
+  # session shares, so a child must not make them either.
+  def test_the_global_memory_calls_are_refused_after_a_fork
+    Torobi::Session.open(config, weights) { |s| s.step!(batch) }
+
+    reader, writer = IO.pipe
+    pid = fork do
+      reader.close
+      %i[report clear_cache!].each do |call|
+        Torobi::Memory.public_send(call)
+        writer.puts "RAN #{call}"
+      rescue Torobi::EngineUnavailable
+        writer.puts "REFUSED #{call}"
+      rescue StandardError => e
+        writer.puts "OTHER #{call} #{e.class}"
+      end
+      writer.close
+      exit!(0)
+    end
+    writer.close
+    output = reader.read
+    reader.close
+    Process.wait(pid)
+
+    assert_match(/REFUSED report/, output, output)
+    assert_match(/REFUSED clear_cache!/, output, output)
+  end
+
   # A Metal device does not survive fork, so a child is refused here rather
   # than at the GPU.
   def test_a_forked_child_is_refused

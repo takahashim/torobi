@@ -773,4 +773,18 @@ spec から**落としたもの**: `Arc<SessionCore>` (保持者が 1 つしか�
 駆動しているので Ruby のループ自体が cancellation point)、実行中の非同期 `close`
 (single writer 契約の外)。
 
-この時点で Ruby 150 件 / Rust 74 件。
+**レビュー後に足したもの** (同日): Session ごとの排他では足りないことが分かった。
+`Mutex<Slot>` は 1 Session に 1 thread しか入れないが、**2 つの Session は同時に MLX へ
+入れる**。2 Session × 2 thread × 300 step で 3 回中 3 回プロセスが落ちた
+(`commit command buffer with uncommitted encoder`)。MLX を走らせるものは Session を
+問わず **process-global なゲート**を取るようにした。GVL を解放した状態でのみ取るので
+待っても他の Ruby thread は止まらず、拒否ではなく交代になる。`close` の device memory
+解放と `Torobi::Memory` の process-global な呼び出しも同じゲートを通る。
+
+fork guard も native へ移した。Ruby の `Preflight` は新しい `open` しか拒否できず、
+**親で作った Session を子で使う**経路と `Torobi::Native` の直接利用を素通りさせていた。
+拡張ロード時の PID と Session 作成時の PID を native に持ち、lock を取る前・ゲートに
+触る前に確認する (fork 時に他 thread が握っていたゲートは子では永久に閉じているので、
+順序が重要である)。子での `close` は engine を drop せず `forget` する。
+
+この時点で Ruby 154 件 / Rust 74 件。
