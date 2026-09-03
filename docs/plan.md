@@ -1371,10 +1371,25 @@ kohagi との数値 parity は 3 例とも**まったく同じ**まま(cos 0.999
 
 1. **「拡張のあらゆる公開関数は net を通る」**(`ext/burn/src/error.rs` の
    `boundary`)。Torobi は session の口と process-global な MLX の口は panic を
-   捕まえていたが、**`build_info` と `checkpoint_manifest` は素通しだった**。panic が
-   C 境界を越えると magnus が `fatal` にし、どの `rescue` も拾えずプロセスが終わる。
-   `plainly` を足して、公開の口を 3 つ(`with_engine` / `global` / `plainly`)に
-   揃えた。
+   捕まえていたが、**`build_info` と `checkpoint_manifest` は素通しだった**。
+
+   正確に言うと、素通しでもプロセスは落ちない。magnus が `method!` の出口で panic を
+   捕まえるからである。ただし magnus が作るのは Ruby の **`fatal`** で、これは
+   `rescue` で拾えない。**捕まえる価値は abort を防ぐことではなく、`fatal` を
+   `Torobi::SessionPoisoned`(拾えて、判断できて、記録できるもの)に変えること**に
+   ある。
+
+   `plainly` を足し、入口を 3 つの口に整理した。
+
+   | 口 | 何のため | 何を足すか |
+   | --- | --- | --- |
+   | `Session::with_engine` | session の engine を使うもの | session の状態機械(busy / closed / poisoned)、GVL、engine の Runtime |
+   | `global` | process-global な MLX(`Torobi::Memory`) | GVL、engine の Runtime |
+   | `plainly` | MLX に触れないもの(`build_info`、`checkpoint_manifest`) | 捕まえること、それだけ |
+
+   `closed?` と `poisoned?` の 2 つだけは意図的に外にある。この crate 自身のロックを
+   取って値を照合するだけで、engine にも MLX にも届かず、panic しうるものが無い。
+   口を通しても closure が増えるだけで安全は増えない。
 
 2. **左辺がスカラーの式**(`lib/burn/scalar.rb`)。`1.0 - x` は損失を紙に書くときの
    形なのに、Ruby は `Float#-` が Handle を知らないので書けなかった。burn-rb と同じく

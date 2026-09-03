@@ -4,6 +4,24 @@
 //! read numbers off it, turn its knobs, and copy a parameter or a gradient
 //! out by name. No tensor handles cross this line, no Ruby block ever runs
 //! inside a computation, and the only unsafe code is `gvl`.
+//!
+//! # Every entry point goes through one of three doors
+//!
+//! A panic in Rust does not abort here: magnus catches it leaving a
+//! `method!` and raises a Ruby `fatal`. But a `fatal` is not rescuable, so
+//! a caller cannot tell one from a crash or decide anything about it.
+//! Catching first is what makes it an error.
+//!
+//! | door | for | what it adds |
+//! | --- | --- | --- |
+//! | [`Session::with_engine`] | anything that uses a session's engine | the session's state machine (busy, closed, poisoned), the GVL, the engine's runtime |
+//! | [`global`] | the process-wide MLX calls (`Torobi::Memory`) | the GVL and the engine's runtime |
+//! | [`plainly`] | what touches no MLX (`build_info`, `checkpoint_manifest`) | the catch, and nothing else |
+//!
+//! Two methods are outside them on purpose: `closed?` and `poisoned?` take
+//! this crate's own lock and match on a value. They reach no engine, run
+//! no MLX, and have nothing in them that can panic, so a door would add a
+//! closure and no safety.
 
 mod gvl;
 
@@ -673,8 +691,10 @@ fn global<R>(ruby: &Ruby, work: impl FnOnce() -> Result<R, RuntimeError>) -> Res
 }
 
 fn memory(ruby: &Ruby) -> Result<Value, Error> {
+    // The reading is MLX's and goes through the gate; turning it into a
+    // Ruby Hash is not, and happens after.
     let report = global(ruby, torobi_engine::memory::Memory::report)?;
-    json_to_ruby(ruby, report)
+    plainly(ruby, || json_to_ruby(ruby, report))
 }
 
 /// Frees what the allocator holds but is not using. Returns [before, after].
@@ -698,15 +718,17 @@ fn json_to_ruby(ruby: &Ruby, value: serde_json::Value) -> Result<Value, Error> {
         .and_then(|json| json.funcall("parse", (value.to_string(),)))
 }
 
-/// Runs work that touches no MLX, catching a panic rather than letting it
-/// reach Ruby as a `fatal` no `rescue` can hold.
+/// Runs work that touches no MLX, turning a panic into an error a caller
+/// can rescue.
 ///
-/// Everything the extension exposes goes through one of three doors:
-/// `Session::with_engine` for a session, `global` for the process-wide MLX
-/// calls, and this for the rest. Each of them catches, because a panic
-/// that crosses the C boundary ends the process (burn-rb reached the same
-/// rule from the same place: every public function of an extension needs
-/// a net under it).
+/// magnus already catches a panic on its way out of a `method!`, so the
+/// process does not abort. What it makes of it is a Ruby `fatal`, which no
+/// `rescue` holds and which ends the run anyway. Catching first is what
+/// turns that into a `Torobi::SessionPoisoned` a caller can see, decide
+/// about, and log. burn-rb's `boundary` is the same move for the same
+/// reason.
+///
+/// See the module comment for which door each entry point uses.
 fn plainly<T>(ruby: &Ruby, work: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
     match catch_unwind(AssertUnwindSafe(work)) {
         Ok(result) => result,
