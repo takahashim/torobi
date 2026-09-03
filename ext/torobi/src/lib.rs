@@ -643,7 +643,7 @@ fn build_info(ruby: &Ruby) -> Result<Value, Error> {
 /// For a caller deciding which one to resume from, and for anyone asking
 /// what a directory on disk actually holds.
 fn checkpoint_manifest(ruby: &Ruby, dir: String) -> Result<Value, Error> {
-    let json = torobi_engine::session::read_manifest(&dir).map_err(|e| to_error(ruby, e))?;
+    let json = torobi_engine::checkpoint::read_manifest_json(&dir).map_err(|e| to_error(ruby, e))?;
     ruby.class_object()
         .const_get::<_, magnus::RModule>("JSON")
         .and_then(|module| module.funcall("parse", (json,)))

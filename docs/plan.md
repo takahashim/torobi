@@ -948,3 +948,20 @@ extension に残したのは Ruby runtime の制約だけである: 値の変換
   facade を作る作業は、公開 API から MLX handle が漏れていないかの点検も兼ねた。
 
 この時点で Ruby 168 件 / Rust 79 件。
+
+### 15.12 レビューの残りを片付ける(2026-09-03)
+
+engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。
+
+| | 直し方 |
+| --- | --- |
+| dtype 語彙が `tensor` と `checkpoint` に分かれ、**内容もずれていた** (checkpoint は `f16` を書けるが graph はその名前を解決できない) | `tensor::VOCABULARY` を単一の表にし、`dtype_named` / `dtype_spelling` を両向きの読み出しにした。語彙外の dtype は綴りを発明せず、checkpoint 書き込みを**拒否する** |
+| `checkpoint::write` が 100 行の手続き | `Manifest::of` / `lay_out` / `publish` に分けた。`write` は「並べる、読み戻す、名前を渡す」の 3 行になった |
+| `state::restore` が検証と commit を同居させ、不変条件がコメントでしか表現されていない | `accept` が `Restored` を返し、`restore` はそれを commit するだけになった。**全部の検査を通らないと `Restored` は存在しない**ので、不変条件が型の事実になった |
+| `Plan` が「open で確定」と言いながら `input_names` を step ごと、`node_names` を 1 関数内で 2 回計算していた | 両方を `open` で確定してフィールドに持つ |
+| `TrainState` の `params` / `argnums` / `rng` が pub で、`Session` が 3 つ掴んで executor を組み立てていた | `Pass<'a>` ビュー 1 つに畳み、3 フィールドを private に戻した。`differentiate` の引数も 6 個から 4 個へ |
+| `Session::read_manifest` が session の関連関数 | `checkpoint::read_manifest_json` へ移した |
+
+`interp` の op 事前解決 (文字列 match と JSON 属性参照が step ごと) と、checkpoint
+読み戻しのコストは M3a / M3b の判断として残している。前者は model import で
+ノード数が 3 桁になってから、後者は実測してから決める。

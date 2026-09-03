@@ -33,6 +33,7 @@ use mlx_rs::Array;
 use serde::{Deserialize, Serialize};
 
 use crate::optimizer::Config as OptimizerConfig;
+use crate::tensor::dtype_spelling;
 
 pub const SCHEMA_VERSION: u32 = 2;
 
@@ -101,7 +102,51 @@ pub struct State<'a> {
     pub run: serde_json::Value,
 }
 
+impl Manifest {
+    /// What a checkpoint claims, read off the state it is being written
+    /// from.
+    fn of(state: &State<'_>) -> Result<Self> {
+        Ok(Self {
+            schema_version: SCHEMA_VERSION,
+            config_digest: state.config_digest.to_string(),
+            semantics_version: state.semantics_version,
+            step: state.step,
+            optimizer: state.optimizer.clone(),
+            optimizer_steps: state.optimizer_steps,
+            seed: state.seed,
+            parameters: state
+                .parameters
+                .iter()
+                .enumerate()
+                .map(|(i, (path, array))| {
+                    let dtype = dtype_spelling(array.dtype()).with_context(|| {
+                        format!(
+                            "parameter {path:?} holds {:?}, which the graph vocabulary \
+                             cannot name; a checkpoint that recorded it could not be \
+                             read back into any graph",
+                            array.dtype()
+                        )
+                    })?;
+                    Ok(ParameterEntry {
+                        path: path.clone(),
+                        shape: array.shape().to_vec(),
+                        dtype: dtype.to_string(),
+                        trained: state.argnums.contains(&(i as i32)),
+                    })
+                })
+                .collect::<Result<_>>()?,
+            build: crate::build_info(),
+            platform: platform(),
+            run: state.run.clone(),
+        })
+    }
+}
+
 /// Writes a checkpoint, atomically. Returns where it landed.
+///
+/// Three steps, and the order is the point: lay the whole thing out
+/// somewhere it does not yet count, read it back, and only then let it
+/// take the name.
 pub fn write(dir: impl AsRef<Path>, state: State<'_>) -> Result<PathBuf> {
     let dir = dir.as_ref();
     let staging = dir.with_extension("writing");
@@ -111,32 +156,17 @@ pub fn write(dir: impl AsRef<Path>, state: State<'_>) -> Result<PathBuf> {
     std::fs::create_dir_all(&staging)
         .with_context(|| format!("creating {}", staging.display()))?;
 
-    let manifest = Manifest {
-        schema_version: SCHEMA_VERSION,
-        config_digest: state.config_digest.to_string(),
-        semantics_version: state.semantics_version,
-        step: state.step,
-        optimizer: state.optimizer.clone(),
-        optimizer_steps: state.optimizer_steps,
-        seed: state.seed,
-        parameters: state
-            .parameters
-            .iter()
-            .enumerate()
-            .map(|(i, (path, array))| ParameterEntry {
-                path: path.clone(),
-                shape: array.shape().to_vec(),
-                dtype: dtype_name(array.dtype()),
-                trained: state.argnums.contains(&(i as i32)),
-            })
-            .collect(),
-        build: crate::build_info(),
-        platform: platform(),
-        run: state.run.clone(),
-    };
+    lay_out(&staging, &state)?;
+    // Nothing claims the name before it reads back: the manifest parses,
+    // every tensor loads, and each one is what the manifest says.
+    read(&staging).context("the checkpoint just written does not read back")?;
+    publish(&staging, dir)?;
+    Ok(dir.to_path_buf())
+}
 
-    std::fs::write(staging.join(GRAPH_FILE), state.graph_json)
-        .context("writing the graph")?;
+/// Writes the five files into a directory that does not count yet.
+fn lay_out(staging: &Path, state: &State<'_>) -> Result<()> {
+    std::fs::write(staging.join(GRAPH_FILE), state.graph_json).context("writing the graph")?;
 
     Array::save_safetensors(
         state.parameters.iter().map(|(path, array)| (path, *array)),
@@ -156,33 +186,33 @@ pub fn write(dir: impl AsRef<Path>, state: State<'_>) -> Result<PathBuf> {
                 [(format!("m/{path}"), &m[slot]), (format!("v/{path}"), &v[slot])]
             })
             .collect();
-        Array::save_safetensors(named.iter().map(|(k, a)| (k, *a)), None,
-                                staging.join("optimizer.safetensors"))
-            .context("writing optimizer state")?;
+        Array::save_safetensors(
+            named.iter().map(|(k, a)| (k, *a)),
+            None,
+            staging.join("optimizer.safetensors"),
+        )
+        .context("writing optimizer state")?;
     }
 
-    Array::save_safetensors(
-        [("key", state.rng)],
-        None,
-        staging.join("random.safetensors"),
-    )
-    .context("writing the RNG state")?;
+    Array::save_safetensors([("key", state.rng)], None, staging.join("random.safetensors"))
+        .context("writing the RNG state")?;
 
     std::fs::write(
         staging.join("manifest.json"),
-        serde_json::to_vec_pretty(&manifest)?,
+        serde_json::to_vec_pretty(&Manifest::of(state)?)?,
     )
-    .context("writing the manifest")?;
+    .context("writing the manifest")
+}
 
-    // Everything is on disk and reads back before anything claims the
-    // name: the manifest parses, and every tensor loads.
-    read(&staging).context("the checkpoint just written does not read back")?;
-    sync_dir(&staging)?;
+/// Lets a finished directory take the name, and makes that durable.
+///
+/// A rename over an existing directory is not atomic on this platform: the
+/// old one has to go first, and a stop in between would leave neither. So
+/// the previous checkpoint is moved aside, the new one takes the name in
+/// one rename, and only then is the old one dropped.
+fn publish(staging: &Path, dir: &Path) -> Result<()> {
+    sync_dir(staging)?;
 
-    // A rename over an existing directory is not atomic on this platform:
-    // the old one has to go first, and a stop in between would leave
-    // neither. So the previous checkpoint is moved aside, the new one
-    // takes the name in one rename, and only then is the old one dropped.
     let displaced = if dir.exists() {
         let aside = dir.with_extension("replaced");
         if aside.exists() {
@@ -194,7 +224,7 @@ pub fn write(dir: impl AsRef<Path>, state: State<'_>) -> Result<PathBuf> {
     } else {
         None
     };
-    std::fs::rename(&staging, dir)
+    std::fs::rename(staging, dir)
         .with_context(|| format!("renaming {} into place", staging.display()))?;
     if let Some(aside) = displaced {
         std::fs::remove_dir_all(aside).ok();
@@ -202,7 +232,7 @@ pub fn write(dir: impl AsRef<Path>, state: State<'_>) -> Result<PathBuf> {
     if let Some(parent) = dir.parent() {
         sync_dir(parent).ok();
     }
-    Ok(dir.to_path_buf())
+    Ok(())
 }
 
 /// Asks the filesystem to make a directory's entries durable, so that a
@@ -214,26 +244,18 @@ fn sync_dir(dir: &Path) -> Result<()> {
         .with_context(|| format!("syncing {}", dir.display()))
 }
 
-/// How a dtype is spelled in a manifest, in the graph's vocabulary.
-fn dtype_name(dtype: mlx_rs::Dtype) -> String {
-    use mlx_rs::Dtype;
-    match dtype {
-        Dtype::Float32 => "f32",
-        Dtype::Bfloat16 => "bf16",
-        Dtype::Float16 => "f16",
-        Dtype::Int32 => "i32",
-        Dtype::Bool => "bool",
-        other => return format!("{other:?}").to_lowercase(),
-    }
-    .to_string()
-}
-
 /// The machine, for a checkpoint carried between them.
 fn platform() -> serde_json::Value {
     serde_json::json!({
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
     })
+}
+
+/// What a checkpoint says about itself, as JSON: for a caller deciding
+/// which one to resume from, without opening it into a session.
+pub fn read_manifest_json(dir: &str) -> Result<String> {
+    Ok(serde_json::to_string(&read_manifest(dir)?)?)
 }
 
 pub fn read_manifest(dir: impl AsRef<Path>) -> Result<Manifest> {
@@ -292,7 +314,7 @@ pub fn read(dir: impl AsRef<Path>) -> Result<Loaded> {
             array.shape(),
             entry.shape
         );
-        let dtype = dtype_name(array.dtype());
+        let dtype = dtype_spelling(array.dtype()).unwrap_or("(unnameable)");
         anyhow::ensure!(
             dtype == entry.dtype,
             "parameter {:?}: the file holds {dtype}, the manifest says {}",

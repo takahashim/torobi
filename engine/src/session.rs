@@ -130,7 +130,7 @@ impl SessionCore {
 
     /// Every name a tap could ask for.
     pub(crate) fn node_names(&self) -> Vec<String> {
-        self.plan.node_names()
+        self.plan.node_names().to_vec()
     }
 
     /// What the most recent pass's taps saw, by name.
@@ -159,7 +159,7 @@ impl SessionCore {
 
     /// Which parameters are currently differentiated, by qualified path.
     pub(crate) fn trainable(&self) -> Vec<String> {
-        self.plan.paths_of(&self.state.argnums)
+        self.plan.paths_of(self.state.argnums())
     }
 
     /// Every parameter a model declared trainable, whether or not it is
@@ -200,7 +200,7 @@ impl SessionCore {
     pub(crate) fn evaluate(&mut self, batch: &Batch) -> Result<f32> {
         let fields = self.plan.bind(batch)?;
         let (loss, tapped) =
-            executor::evaluate(&self.plan, &self.state.params, &fields, &self.taps)?;
+            executor::evaluate(&self.plan, self.state.pass().params, &fields, &self.taps)?;
         self.record(tapped)?;
         Ok(loss.item::<f32>())
     }
@@ -209,14 +209,8 @@ impl SessionCore {
     /// parameters appear: a frozen model's have none.
     pub(crate) fn gradients(&self, batch: &Batch) -> Result<Vec<(String, Tensor)>> {
         let fields = self.plan.bind(batch)?;
-        let (_, grads, _) = executor::differentiate(
-            &self.plan,
-            &self.state.params,
-            &self.state.argnums,
-            &fields,
-            &self.state.rng,
-            &Taps::new(),
-        )?;
+        let (_, grads, _) =
+            executor::differentiate(&self.plan, self.state.pass(), &fields, &Taps::new())?;
         self.trainable()
             .into_iter()
             .zip(grads)
@@ -237,7 +231,7 @@ impl SessionCore {
 
     /// Every batch field the run reads, across the models and the objective.
     pub(crate) fn input_names(&self) -> Vec<String> {
-        self.plan.input_names()
+        self.plan.input_names().to_vec()
     }
 
     /// Writes the run's state and the description it belongs to. Atomic
@@ -257,14 +251,8 @@ impl SessionCore {
     /// then commit. The taps are converted before the state moves so that
     /// a step either happens whole or not at all.
     fn update(&mut self, fields: &BTreeMap<String, mlx_rs::Array>) -> Result<f32> {
-        let (loss, grads, tapped) = executor::differentiate(
-            &self.plan,
-            &self.state.params,
-            &self.state.argnums,
-            fields,
-            &self.state.rng,
-            &self.taps,
-        )?;
+        let (loss, grads, tapped) =
+            executor::differentiate(&self.plan, self.state.pass(), fields, &self.taps)?;
         // Brought back before the state moves, so a step either happens
         // whole or not at all.
         let tapped = Self::to_host(tapped)?;
@@ -478,7 +466,7 @@ impl Session {
     /// state, and nothing outside has a use for it.
     #[cfg(test)]
     pub(crate) fn rng_for_test(&self) -> &mlx_rs::Array {
-        &self.core.as_ref().expect("open").state.rng
+        self.core.as_ref().expect("open").state.pass().rng
     }
 
     fn core(&self) -> Outcome<&SessionCore> {
@@ -504,14 +492,6 @@ impl Drop for Session {
 fn closed() -> RuntimeError {
     RuntimeError::Engine(anyhow::anyhow!("this session is closed"))
 }
-
-/// What a checkpoint says about itself, without opening it into a session:
-/// for a caller deciding which one to resume from. Reads a directory and
-/// touches no device.
-pub fn read_manifest(dir: &str) -> Result<String> {
-    Ok(serde_json::to_string(&crate::checkpoint::read_manifest(dir)?)?)
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -855,7 +835,7 @@ mod checkpoint_tests {
     }
 
     fn manifest(path: &str) -> serde_json::Value {
-        serde_json::from_str(&read_manifest(path).unwrap()).unwrap()
+        serde_json::from_str(&crate::checkpoint::read_manifest_json(path).unwrap()).unwrap()
     }
 
     #[test]
@@ -976,7 +956,7 @@ mod checkpoint_tests {
             serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         m["schema_version"] = serde_json::json!(1);
         std::fs::write(&file, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
-        let e = read_manifest(&path).unwrap_err().to_string();
+        let e = crate::checkpoint::read_manifest_json(&path).unwrap_err().to_string();
         assert!(e.contains("schema 1 is not 2"), "{e}");
     }
 

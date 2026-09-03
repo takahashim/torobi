@@ -121,15 +121,37 @@ pub fn unpack(packed: &PackedBatch) -> Result<Batch> {
 }
 
 
-/// The dtypes a graph may name, as MLX knows them.
+/// The dtypes the IR speaks, and what MLX calls them.
+///
+/// Deliberately few: what the target models need, not what MLX offers.
+/// The list is the Ruby side's (lib/torobi/ir/dtype.rb), and the two must
+/// agree, so it is written once here and read in both directions rather
+/// than spelled out again wherever a name is needed.
+const VOCABULARY: [(&str, Dtype); 4] = [
+    ("f32", Dtype::Float32),
+    ("bf16", Dtype::Bfloat16),
+    ("i32", Dtype::Int32),
+    ("bool", Dtype::Bool),
+];
+
+/// The dtype a graph means by this name.
 pub fn dtype_named(name: &str) -> Option<Dtype> {
-    match name {
-        "f32" => Some(Dtype::Float32),
-        "bf16" => Some(Dtype::Bfloat16),
-        "i32" => Some(Dtype::Int32),
-        "bool" => Some(Dtype::Bool),
-        _ => None,
-    }
+    VOCABULARY
+        .iter()
+        .find(|(spelled, _)| *spelled == name)
+        .map(|(_, dtype)| *dtype)
+}
+
+/// What to call this dtype, in the graph's vocabulary.
+///
+/// `None` for anything the IR cannot name. A checkpoint that recorded such
+/// a dtype would be one no graph could ask for, so the answer is to refuse
+/// rather than invent a spelling.
+pub fn dtype_spelling(dtype: Dtype) -> Option<&'static str> {
+    VOCABULARY
+        .iter()
+        .find(|(_, known)| *known == dtype)
+        .map(|(spelled, _)| *spelled)
 }
 
 /// A device array as a copy on the host. Contiguous first: a gradient can

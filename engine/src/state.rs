@@ -17,20 +17,49 @@ use crate::optimizer::{Config as OptimizerConfig, Optimizer};
 use crate::plan::{Pattern, Plan};
 use crate::tensor::{to_tensor, Tensor};
 
+/// A checkpoint that has been read and found to belong to this run.
+///
+/// Exists only after every check has passed, which is what makes
+/// [`TrainState::restore`] a commit rather than a sequence of hopes.
+struct Restored {
+    params: Vec<Array>,
+    m: Vec<Array>,
+    v: Vec<Array>,
+    rng: Array,
+    seed: u64,
+    step: usize,
+    optimizer_steps: u64,
+    /// What the caller recorded alongside, handed back unchanged.
+    run: String,
+}
+
+/// One pass's view of the state: what the executor reads, and nothing
+/// more.
+///
+/// These three used to be public fields, which meant a caller assembled
+/// them itself and could put them out of step with each other. The
+/// invariant they are under (the optimizer's slots are parallel to
+/// `argnums`, and `params` is indexed by it) is this module's to keep.
+pub struct Pass<'a> {
+    pub params: &'a [Array],
+    pub argnums: &'a [i32],
+    pub rng: &'a Array,
+}
+
 pub struct TrainState {
     /// Every parameter of every model, model by model in name order. This
     /// order is `Plan::paths`, and the contract the Ruby side follows.
-    pub params: Vec<Array>,
+    params: Vec<Array>,
     /// Positions in `params` that autodiff differentiates now. A subset of
     /// `Plan::candidates`; moves when the window freezes or unfreezes.
-    pub argnums: Vec<i32>,
+    argnums: Vec<i32>,
     /// The update rule and its slots. Half of what a checkpoint restores.
     optimizer: Optimizer,
     /// The RNG, held as state rather than left to a global. Every step
     /// splits it, so the sequence of draws is a function of the seed and
     /// the step count, and a resumed run draws what a continuous one would
     /// (docs/plan.md section 11.1).
-    pub rng: Array,
+    rng: Array,
     seed: u64,
     step: usize,
     last_loss: f32,
@@ -52,6 +81,20 @@ impl TrainState {
             step: 0,
             last_loss: f32::NAN,
         })
+    }
+
+    /// What a pass reads. The only way out of here for the three of them.
+    pub fn pass(&self) -> Pass<'_> {
+        Pass {
+            params: &self.params,
+            argnums: &self.argnums,
+            rng: &self.rng,
+        }
+    }
+
+    /// Which parameters autodiff differentiates now, as positions.
+    pub fn argnums(&self) -> &[i32] {
+        &self.argnums
     }
 
     pub fn step(&self) -> usize {
@@ -252,10 +295,37 @@ impl TrainState {
     /// Returns what the caller recorded in `run`, so that whoever owns the
     /// data can put its sampler back where the checkpoint left it.
     ///
-    /// Nothing is committed until everything has been read, checked and
-    /// evaluated. A checkpoint that turns out to be wrong halfway leaves
-    /// this run exactly as it was.
+    /// Reading and accepting is [`TrainState::accept`]; this is the commit.
+    /// They are separate so that "nothing moves until everything is
+    /// checked" is a fact about the types rather than a claim in a comment:
+    /// a [`Restored`] only exists if every check passed.
     pub fn restore(&mut self, plan: &Plan, dir: &str) -> Result<String> {
+        let accepted = self.accept(plan, dir)?;
+
+        // Everything is here and consistent; make it real before touching
+        // this state, so a failure below cannot leave it half restored.
+        eval(
+            accepted
+                .params
+                .iter()
+                .chain(accepted.m.iter())
+                .chain(accepted.v.iter())
+                .chain(std::iter::once(&accepted.rng)),
+        )?;
+
+        self.params = accepted.params;
+        self.optimizer
+            .restore(accepted.m, accepted.v, accepted.optimizer_steps);
+        self.rng = accepted.rng;
+        self.seed = accepted.seed;
+        self.step = accepted.step;
+        self.last_loss = f32::NAN;
+        Ok(accepted.run)
+    }
+
+    /// Reads a checkpoint and checks all of it against this run. Touches
+    /// nothing.
+    fn accept(&self, plan: &Plan, dir: &str) -> Result<Restored> {
         let loaded = checkpoint::read(dir)?;
         let manifest = &loaded.manifest;
         anyhow::ensure!(
@@ -304,58 +374,59 @@ impl TrainState {
             params.push(array.clone());
         }
 
-        // The optimizer's slots, all of them or none. An AdamW session
-        // restored without moments used to index past the end of an empty
-        // vector on its next step.
-        let (mut m, mut v) = (Vec::new(), Vec::new());
-        if self.optimizer.wants_slots() {
-            anyhow::ensure!(
-                !loaded.slots.is_empty(),
-                "this checkpoint has no optimizer state, and {} needs it",
-                self.optimizer.config().name()
-            );
-            for &i in &self.argnums {
-                let path = &plan.paths[i as usize];
-                let (slot_m, slot_v) = loaded
-                    .slots
-                    .get(path)
-                    .with_context(|| format!("the checkpoint has no optimizer state for {path:?}"))?;
-                anyhow::ensure!(
-                    slot_m.shape() == self.params[i as usize].shape()
-                        && slot_v.shape() == self.params[i as usize].shape(),
-                    "optimizer state for {path:?} has the wrong shape"
-                );
-                m.push(slot_m.clone());
-                v.push(slot_v.clone());
-            }
-        } else {
+        let (m, v) = self.accept_slots(plan, &loaded)?;
+        Ok(Restored {
+            params,
+            m,
+            v,
+            rng: loaded.rng.context("the checkpoint has no RNG state")?,
+            seed: manifest.seed,
+            step: manifest.step,
+            optimizer_steps: manifest.optimizer_steps,
+            run: serde_json::to_string(&manifest.run)?,
+        })
+    }
+
+    /// The optimizer's slots, all of them or none.
+    ///
+    /// An AdamW session restored without moments used to index past the
+    /// end of an empty vector on its next step, which is why this refuses
+    /// rather than filling in.
+    fn accept_slots(
+        &self,
+        plan: &Plan,
+        loaded: &checkpoint::Loaded,
+    ) -> Result<(Vec<Array>, Vec<Array>)> {
+        if !self.optimizer.wants_slots() {
             anyhow::ensure!(
                 loaded.slots.is_empty(),
                 "this checkpoint carries optimizer state, and {} has none",
                 self.optimizer.config().name()
             );
+            return Ok((Vec::new(), Vec::new()));
         }
 
-        let rng = loaded.rng.context("the checkpoint has no RNG state")?;
-        let run = serde_json::to_string(&loaded.manifest.run)?;
-
-        // Everything is here and consistent; make it real before touching
-        // this state, so a failure below cannot leave it half restored.
-        eval(
-            params
-                .iter()
-                .chain(m.iter())
-                .chain(v.iter())
-                .chain(std::iter::once(&rng)),
-        )?;
-
-        self.params = params;
-        self.optimizer.restore(m, v, manifest.optimizer_steps);
-        self.rng = rng;
-        self.seed = manifest.seed;
-        self.step = manifest.step;
-        self.last_loss = f32::NAN;
-        Ok(run)
+        anyhow::ensure!(
+            !loaded.slots.is_empty(),
+            "this checkpoint has no optimizer state, and {} needs it",
+            self.optimizer.config().name()
+        );
+        let (mut m, mut v) = (Vec::new(), Vec::new());
+        for &i in &self.argnums {
+            let path = &plan.paths[i as usize];
+            let (slot_m, slot_v) = loaded
+                .slots
+                .get(path)
+                .with_context(|| format!("the checkpoint has no optimizer state for {path:?}"))?;
+            anyhow::ensure!(
+                slot_m.shape() == self.params[i as usize].shape()
+                    && slot_v.shape() == self.params[i as usize].shape(),
+                "optimizer state for {path:?} has the wrong shape"
+            );
+            m.push(slot_m.clone());
+            v.push(slot_v.clone());
+        }
+        Ok((m, v))
     }
 }
 
@@ -398,22 +469,15 @@ mod tests {
     fn step(plan: &Plan, state: &mut TrainState, rows: &[f32]) -> f32 {
         let batch = fixtures::batch_x(rows);
         let fields = plan.bind(&batch).unwrap();
-        let (loss, grads, _) = executor::differentiate(
-            plan,
-            &state.params,
-            &state.argnums,
-            &fields,
-            &state.rng,
-            &Taps::new(),
-        )
-        .unwrap();
+        let (loss, grads, _) =
+            executor::differentiate(plan, state.pass(), &fields, &Taps::new()).unwrap();
         state.advance(&loss, &grads).unwrap()
     }
 
     #[test]
     fn a_new_state_differentiates_everything_the_plan_allows() {
         let (plan, state) = open(fixtures::teacher_and_student(), sgd(0.1));
-        assert_eq!(state.argnums, plan.candidates);
+        assert_eq!(state.argnums(), plan.candidates);
         assert_eq!(state.step(), 0);
         assert!(state.loss().is_nan());
         assert_eq!(state.seed(), 0);
@@ -450,9 +514,9 @@ mod tests {
         let first = state.rng.clone();
         state.set_seed(7).unwrap();
         assert_eq!(state.seed(), 7);
-        let seven = crate::tensor::to_tensor(&state.rng).unwrap();
+        let seven = crate::tensor::to_tensor(state.pass().rng).unwrap();
         state.set_seed(0).unwrap();
-        let zero = crate::tensor::to_tensor(&state.rng).unwrap();
+        let zero = crate::tensor::to_tensor(state.pass().rng).unwrap();
         assert_eq!(values(&zero), values(&crate::tensor::to_tensor(&first).unwrap()));
         assert_ne!(values(&seven), values(&zero));
     }
@@ -460,12 +524,12 @@ mod tests {
     #[test]
     fn freezing_moves_what_autodiff_differentiates() {
         let (plan, mut state) = open(fixtures::teacher_and_student(), adamw());
-        assert_eq!(plan.paths_of(&state.argnums), vec!["student.scale"]);
+        assert_eq!(plan.paths_of(state.argnums()), vec!["student.scale"]);
         let moved = state.set_frozen(&plan, "student.*", true);
         // Nothing would be left to train, so it is refused whole.
         let e = moved.unwrap_err().to_string();
         assert!(e.contains("would leave nothing to train"), "{e}");
-        assert_eq!(plan.paths_of(&state.argnums), vec!["student.scale"]);
+        assert_eq!(plan.paths_of(state.argnums()), vec!["student.scale"]);
     }
 
     #[test]

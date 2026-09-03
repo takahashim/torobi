@@ -62,6 +62,12 @@ pub struct Plan {
     /// description, it does not reconstruct one (docs/plan.md 11.2).
     pub graph_json: String,
     pub semantics_version: u32,
+    /// Every batch field the run reads, sorted and without repeats.
+    /// Settled here rather than derived per step: this module's whole
+    /// claim is that it does not move after `open`.
+    input_names: Vec<String>,
+    /// Every name a tap could ask for.
+    node_names: Vec<String>,
 }
 
 impl Plan {
@@ -119,18 +125,20 @@ impl Plan {
             config.train
         );
 
-        Ok((
-            Self {
-                models,
-                objective: config.objective,
-                paths,
-                candidates,
-                config_digest,
-                graph_json: graph_json.to_string(),
-                semantics_version: config.semantics_version,
-            },
-            params,
-        ))
+        let mut plan = Self {
+            models,
+            objective: config.objective,
+            paths,
+            candidates,
+            config_digest,
+            graph_json: graph_json.to_string(),
+            semantics_version: config.semantics_version,
+            input_names: Vec::new(),
+            node_names: Vec::new(),
+        };
+        plan.input_names = plan.derive_input_names();
+        plan.node_names = plan.derive_node_names();
+        Ok((plan, params))
     }
 
     /// Every graph a run evaluates, models first.
@@ -139,7 +147,16 @@ impl Plan {
     }
 
     /// Every batch field the run reads.
-    pub fn input_names(&self) -> Vec<String> {
+    pub fn input_names(&self) -> &[String] {
+        &self.input_names
+    }
+
+    /// Every name a tap could ask for.
+    pub fn node_names(&self) -> &[String] {
+        &self.node_names
+    }
+
+    fn derive_input_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .graphs()
             .flat_map(|g| g.inputs.iter().filter_map(|i| i.batch_field()))
@@ -150,8 +167,7 @@ impl Plan {
         names
     }
 
-    /// Every name a tap could ask for.
-    pub fn node_names(&self) -> Vec<String> {
+    fn derive_node_names(&self) -> Vec<String> {
         self.graphs()
             .flat_map(|g| g.nodes.iter().filter_map(|n| n.name.clone()))
             .collect()
@@ -180,11 +196,11 @@ impl Plan {
     /// A null dimension is symbolic and may differ from step to step
     /// (docs/plan.md 6.2).
     pub fn bind(&self, batch: &BTreeMap<String, Tensor>) -> Result<BTreeMap<String, Array>> {
-        let wanted = self.input_names();
         for name in batch.keys() {
             anyhow::ensure!(
-                wanted.iter().any(|w| w == name),
-                "no input named {name:?} is read here (this run reads {wanted:?})"
+                self.input_names.iter().any(|w| w == name),
+                "no input named {name:?} is read here (this run reads {:?})",
+                self.input_names
             );
         }
 

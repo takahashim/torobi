@@ -16,6 +16,7 @@ use mlx_rs::Array;
 use crate::graph::Graph;
 use crate::interp::{self, Stat};
 use crate::plan::{Model, Plan};
+use crate::state::Pass;
 
 /// What a tap asked for, by node name.
 pub type Taps = BTreeMap<String, Stat>;
@@ -126,24 +127,23 @@ fn resolve(
 /// taps are opt-in.
 pub fn differentiate(
     plan: &Plan,
-    params: &[Array],
-    argnums: &[i32],
+    pass: Pass<'_>,
     fields: &BTreeMap<String, Array>,
-    rng: &Array,
     taps: &Taps,
 ) -> Result<(Array, Vec<Array>, Tapped)> {
+    let rng = pass.rng;
     let fun = |ps: &[Array]| -> std::result::Result<Vec<Array>, Exception> {
         let mut inner = Tapped::new();
         forward(plan, ps, fields, Some(rng), &Taps::new(), &mut inner).map(|loss| vec![loss])
     };
-    let mut vg = value_and_grad_with_argnums(fun, argnums);
-    let (mut values, grads) = vg(params)?;
+    let mut vg = value_and_grad_with_argnums(fun, pass.argnums);
+    let (mut values, grads) = vg(pass.params)?;
     let loss = values.remove(0);
     eval(std::iter::once(&loss).chain(grads.iter()))?;
 
     let mut collected = Tapped::new();
     if !taps.is_empty() {
-        forward(plan, params, fields, Some(rng), taps, &mut collected)?;
+        forward(plan, pass.params, fields, Some(rng), taps, &mut collected)?;
         eval(collected.values())?;
     }
     Ok((loss, grads, collected))
