@@ -58,10 +58,28 @@ module Torobi
     def initialize(native, journal: nil)
       @native = native
       @journal = journal
+      @hooks = Hooks.new(self)
     end
 
     # What this session is recording into, if anything.
     attr_reader :journal
+
+    # Registers a hook. Sugar for the window and nothing more: a hook can
+    # do what the window can do, because it fires in one (docs/plan.md
+    # section 8.4).
+    #
+    #   s.on(:step, every: 200) { |e| bar.update(e.step, e.loss) }
+    def on(event, every: 1, &block)
+      @hooks.on(event, every:, &block)
+      self
+    end
+
+    # Registers a policy object: anything answering #call(event). The
+    # standard ones are in Torobi::Policies.
+    def use(policy, event: :step, every: 1)
+      @hooks.use(policy, event:, every:)
+      self
+    end
 
     # One step on `batch`, a Hash of input name => {shape:, data:}. Returns
     # the loss. The GVL is released for the step, so other Ruby threads
@@ -70,6 +88,7 @@ module Torobi
       loss = @native.run_step(Batch.pack(batch))
       @journal&.span(steps: 1, loss:, step: @native.step,
                      batches_digest: Provenance.digest_of(batch.keys.map(&:to_s)))
+      @hooks.fire(:step, step: @native.step, loss:)
       loss
     end
 
@@ -107,6 +126,10 @@ module Torobi
       raise ArgumentError, "this session is closed" if closed?
       empty = true
 
+      if @hooks.firing?
+        raise Error, "a hook cannot run a span (hooks fire in the window, not around it)"
+      end
+
       started = @native.step
       batches.each do |batch|
         empty = false
@@ -117,6 +140,7 @@ module Torobi
 
       @journal&.note(step: @native.step, event: "span", steps: @native.step - started,
                      loss: @native.loss)
+      @hooks.fire(:span_end, step: @native.step, loss: @native.loss)
       @native.loss
     end
 
@@ -170,6 +194,7 @@ module Torobi
     def checkpoint!(dir)
       path = @native.save(dir.to_s)
       @journal&.checkpoint(path:, step: @native.step)
+      @hooks.fire(:checkpoint_written, step: @native.step, loss: @native.loss)
       path
     end
 

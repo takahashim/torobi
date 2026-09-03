@@ -18,6 +18,7 @@ begin
   require_relative "torobi/batch"
   require_relative "torobi/session"
   require_relative "torobi/memory"
+  require_relative "torobi/hooks"
 rescue LoadError
   # Not compiled yet (rake compile); Torobi::Session is simply absent.
 end
