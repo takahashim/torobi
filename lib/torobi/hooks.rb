@@ -204,8 +204,8 @@ module Torobi
         return @on_limit.call(event) if @on_limit
 
         raise Torobi::StepError,
-              "this run has passed through #{@seen / 1024**2} MB on the device by " \
-              "step #{event.step}, past the #{@bytes / 1024**2} MB it was given. " \
+              "this run has passed through #{@seen / (1024**2)} MB on the device by " \
+              "step #{event.step}, past the #{@bytes / (1024**2)} MB it was given. " \
               "Stopping here rather than letting the machine find out"
       end
     end

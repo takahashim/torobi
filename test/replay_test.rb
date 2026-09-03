@@ -59,6 +59,7 @@ class ReplayTest < Minitest::Test
     journal = record(data)
 
     result = Torobi::Replay.action(journal, config:, weights:, batches: data)
+
     assert_predicate result, :agrees?, result.to_s
     assert_equal :action, result.mode
     assert_equal data.size, result.steps
@@ -77,6 +78,7 @@ class ReplayTest < Minitest::Test
       s.run(data)
       s.loss
     end
+
     refute_in_delta without, replayed.final_loss, 1e-9,
                     "ignoring the knob should not land in the same place"
   end
@@ -88,6 +90,7 @@ class ReplayTest < Minitest::Test
     other = batches(8, seed: 99)
 
     result = Torobi::Replay.action(journal, config:, weights:, batches: other)
+
     refute_predicate result, :agrees?
     assert_equal 1, result.divergences.first.fetch(:step), "it should diverge at the first step"
     assert_match(/differs/, result.divergences.first.fetch(:why))
@@ -157,6 +160,7 @@ class ReplayTest < Minitest::Test
 
     silent = ->(session, all) { all.each { |b| session.step!(b) } }
     result = Torobi::Replay.rerun(io.string, config:, weights:, batches: data, &silent)
+
     refute_predicate result, :agrees?
     assert_equal data.size, result.divergences.size
     assert_match(/observed nothing/, result.divergences.first.fetch(:why))
@@ -170,6 +174,7 @@ class ReplayTest < Minitest::Test
     text = io.string
     [text, Torobi::Journal.read(text)].each do |form|
       result = Torobi::Replay.action(form, config:, weights:, batches: data)
+
       assert_predicate result, :agrees?, "#{form.class}: #{result}"
     end
     assert_raises(ArgumentError) { Torobi::Replay.action(42, config:, weights:, batches: data) }
@@ -184,6 +189,7 @@ class ReplayTest < Minitest::Test
       s.run(data)
     end
     result = Torobi::Replay.action(io.string, config:, weights:, batches: data)
+
     assert_predicate result, :agrees?, result.to_s
   end
 end

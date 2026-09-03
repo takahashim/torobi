@@ -7,6 +7,7 @@ class GraphConfigTest < Minitest::Test
     a = Torobi::TestGraphs.config(metadata: { "b" => 1, "a" => { "y" => 2, "x" => 1 } })
     b = Torobi::TestGraphs.config(extra_metadata_order: true,
                                   metadata: { "a" => { "x" => 1, "y" => 2 }, "b" => 1 })
+
     assert_equal a.canonical_json, b.canonical_json
     assert_equal a.digest, b.digest
     assert_match(/\A[0-9a-f]{64}\z/, a.digest)
@@ -26,12 +27,14 @@ class GraphConfigTest < Minitest::Test
     g, objective = two_models
     ab = Torobi::GraphConfig.new(models: { "a" => g, "b" => g }, objective:, train: ["a"])
     ba = Torobi::GraphConfig.new(models: { "b" => g, "a" => g }, objective:, train: ["a"])
+
     assert_equal ab.digest, ba.digest
   end
 
   def test_the_config_round_trips_through_its_canonical_json
     config = Torobi::TestGraphs.config(metadata: { "note" => "roundtrip" })
     revived = Torobi::GraphConfig.from_h(JSON.parse(config.canonical_json))
+
     assert_equal config.digest, revived.digest
     assert_equal config, revived
   end
@@ -39,6 +42,7 @@ class GraphConfigTest < Minitest::Test
   def test_everything_reachable_is_frozen
     config = Torobi::TestGraphs.config
     graph = config.models.fetch("student")
+
     assert_predicate config.models, :frozen?
     assert_predicate graph.nodes, :frozen?
     assert_predicate graph.nodes[0].inputs, :frozen?
@@ -54,6 +58,7 @@ class GraphConfigTest < Minitest::Test
     end
     with = Torobi::GraphConfig.new(models: { "student" => g }, objective:)
     without = Torobi::GraphConfig.new(models: { "student" => g })
+
     refute_equal with.digest, without.digest
     assert_nil without.to_h.fetch("objective")
   end

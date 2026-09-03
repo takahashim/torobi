@@ -11,7 +11,10 @@ module Torobi
     def deep(value)
       case value
       when Hash
-        value.each { |k, v| deep(k); deep(v) }
+        value.each do |k, v|
+          deep(k)
+          deep(v)
+        end
       when Array
         value.each { |v| deep(v) }
       end

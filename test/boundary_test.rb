@@ -67,6 +67,7 @@ class BoundaryTest < Minitest::Test
       end
     RUBY
     output, status = run_isolated(body)
+
     assert_predicate status, :success?, output
     assert_match(/RESCUED Torobi::StepError/, output)
     assert_match(/shapes|broadcast|\(4,1\)/i, output, "the message should say what MLX objected to")
@@ -86,6 +87,7 @@ class BoundaryTest < Minitest::Test
       end
     RUBY
     output, status = run_isolated(body)
+
     assert_predicate status, :success?, output
     assert_match(/dimension 1 is 3, declared 2/, output)
   end
@@ -101,6 +103,7 @@ class BoundaryTest < Minitest::Test
       end
     RUBY
     output, status = run_isolated(body, hide_metallib: true)
+
     assert_predicate status, :success?, output
     assert_match(/REFUSED/, output)
     assert_match(/metallib|kernels/i, output, "the message should say what is missing")
@@ -124,6 +127,7 @@ class BoundaryTest < Minitest::Test
       end
     RUBY
     output, status = run_isolated(body, hide_metallib: true)
+
     assert_predicate status, :success?,
                      "a missing metallib should be an exception now, not an abort (#{output})"
     assert_match(/RESCUED Torobi::EngineUnavailable/, output)
@@ -142,6 +146,7 @@ class BoundaryTest < Minitest::Test
       puts(s.loss.finite? ? "FINITE" : "NOT FINITE")
     RUBY
     output, status = run_isolated(body)
+
     assert_predicate status, :success?, output
     assert_match(/STEPS 200/, output)
     assert_match(/FINITE/, output)
@@ -155,6 +160,7 @@ class BoundaryTest < Minitest::Test
       puts "SURVIVED"
     RUBY
     output, status = run_isolated(body)
+
     assert_predicate status, :success?, output
     assert_match(/SURVIVED/, output)
   end

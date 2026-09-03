@@ -138,6 +138,7 @@ class ContractTest < Minitest::Test
         assert_equal before[:seed], s.seed
         # And it still runs.
         s.step!(batch)
+
         assert_equal 2, s.step
       end
     end
@@ -165,10 +166,12 @@ class ContractTest < Minitest::Test
       # The next step continues the same trajectory: run the same batch
       # twice from a fresh session and compare.
       after_failure = s.step!(good)
-      clean = Torobi::Session.open(config, weights: weights, optimizer: { kind: :adamw, lr: 0.05 }) do |t|
+      clean = Torobi::Session.open(config, weights: weights,
+optimizer: { kind: :adamw, lr: 0.05 }) do |t|
         t.step!(good)
         t.step!(good)
       end
+
       assert_in_delta clean, after_failure, 1e-6,
                       "the failed step should not have moved the optimizer"
     end
@@ -190,6 +193,7 @@ class ContractTest < Minitest::Test
         s.step!(batch)
         s.checkpoint!(path)
       end
+
       assert_equal 2, JSON.parse(File.read(File.join(path, "manifest.json"))).fetch("step")
       refute_path_exists "#{path}.writing"
       refute_path_exists "#{path}.replaced"

@@ -57,7 +57,10 @@ class LifecycleTest < Minitest::Test
     assert_equal steps, steps.sort
     assert_operator steps.max, :<=, 40
     assert(seen.none? { |_, loss, _, _| loss.nil? })
-    assert_equal 40, Torobi::Session.open(config, weights: weights) { |s| s.run([batch] * 40); s.step }
+    assert_equal 40, Torobi::Session.open(config, weights: weights) { |s|
+      s.run([batch] * 40)
+      s.step
+    }
   end
 
   # Watching is not serving. A second thread that tries to *use* the engine
@@ -84,6 +87,7 @@ class LifecycleTest < Minitest::Test
   def test_close_is_idempotent_and_refuses_afterwards
     session = Torobi::Session.open(config, weights: weights)
     session.step!(batch)
+
     refute_predicate session, :closed?
 
     assert session.close, "the first close reports that it closed it"
@@ -129,6 +133,7 @@ class LifecycleTest < Minitest::Test
       assert_equal 3, s.step, "the span stopped where the caller stopped it"
       # And the session is still usable.
       s.step!(batch)
+
       assert_equal 4, s.step
     end
   end
@@ -160,6 +165,7 @@ class LifecycleTest < Minitest::Test
       assert_equal 4, s.step
       assert_equal 4, fired
       spans = s.journal.entries.count { |e| e["kind"] == "span" }
+
       assert_equal 4, spans, "one entry per step"
     end
   end
@@ -201,16 +207,19 @@ class LifecycleTest < Minitest::Test
   # particular figure.
   def test_device_memory_is_observable
     before = Torobi::Memory.report
+
     assert_operator before.fetch(:limit), :>, 0, "this machine reports a cap"
 
     Torobi::Session.open(config, weights: weights) do |s|
       s.run([batch(rows: 512)] * 5)
       during = Torobi::Memory.report
+
       assert_operator during.fetch(:peak), :>, 0, "training should have allocated"
       assert_operator during.fetch(:peak), :>=, during.fetch(:active)
     end
 
     freed = Torobi::Memory.clear_cache!
+
     assert_operator freed, :>=, 0
     assert_equal 0, Torobi::Memory.cache, "the cache is empty after clearing it"
   end
@@ -218,10 +227,12 @@ class LifecycleTest < Minitest::Test
   def test_the_peak_can_be_forgotten_and_the_limit_set
     Torobi::Session.open(config, weights: weights) { |s| s.step!(batch) }
     Torobi::Memory.reset_peak!
+
     assert_operator Torobi::Memory.peak, :<=, Torobi::Memory.active + 1
 
     original = Torobi::Memory.limit
     Torobi::Memory.limit = 1 << 30
+
     assert_equal 1 << 30, Torobi::Memory.limit
   ensure
     Torobi::Memory.limit = original if original
@@ -239,6 +250,7 @@ class LifecycleTest < Minitest::Test
     Torobi::Memory.clear_cache!
 
     grown = Torobi::Memory.active - settled
+
     assert_operator grown, :<, 8 * 1024 * 1024,
                     "twenty opened and closed sessions should not leave megabytes behind"
   end

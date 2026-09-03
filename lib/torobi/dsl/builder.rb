@@ -53,9 +53,7 @@ module Torobi
       def output(name, handle)
         own!(handle, where: "output #{name.to_s.inspect}")
         name = name.to_s
-        if @outputs.key?(name)
-          raise ConfigError, "output #{name.inspect} is declared twice"
-        end
+        raise ConfigError, "output #{name.inspect} is declared twice" if @outputs.key?(name)
 
         @outputs[name] = handle.ref
         handle
@@ -79,7 +77,7 @@ module Torobi
 
       # --- parameters ---
 
-      def param(name, shape, dtype: :f32, init:, trainable: true)
+      def param(name, shape, init:, dtype: :f32, trainable: true)
         spec = IR::ParameterSpec.new(id: @parameters.size, path: scoped(name), shape:,
                                      dtype:, initializer: init, trainable:)
         @parameters << spec
@@ -194,9 +192,7 @@ module Torobi
         end
 
         node = @nodes[id]
-        if node.name
-          raise ConfigError, "#{handle.ref} is already named #{node.name.inspect}"
-        end
+        raise ConfigError, "#{handle.ref} is already named #{node.name.inspect}" if node.name
 
         @nodes[id] = IR::NodeSpec.new(
           id: node.id, op: node.op, name: unique_name(label), inputs: node.inputs,

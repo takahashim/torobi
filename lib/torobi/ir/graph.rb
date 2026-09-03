@@ -97,9 +97,7 @@ module Torobi
           kind, id = Ref.parse(ref)
           case kind
           when :input
-            unless id < inputs.size
-              raise ConfigError, "#{where}: references unknown input:#{id}"
-            end
+            raise ConfigError, "#{where}: references unknown input:#{id}" unless id < inputs.size
           when :node
             unless id < node.id
               raise ConfigError,
@@ -129,6 +127,7 @@ module Torobi
           unless id < limit
             raise ConfigError, "output #{name.inspect} references unknown #{kind}:#{id}"
           end
+
           [-name, -ref.to_s]
         end
         Freeze.deep(named.sort.to_h)

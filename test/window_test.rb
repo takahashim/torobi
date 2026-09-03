@@ -40,11 +40,13 @@ class WindowTest < Minitest::Test
       assert_equal 4, s.trainable.size
 
       moved = s.freeze!("m.first.*")
+
       assert_equal %w[m.first.weight m.first.bias], moved
       assert_equal %w[m.second.weight m.second.bias], s.trainable
 
       before = s.fetch("m.first.weight").to_a
       s.run([batch] * 5)
+
       assert_equal before, s.fetch("m.first.weight").to_a, "a frozen layer must not move"
       refute_equal Array.new(DIM, 0.1), s.fetch("m.second.weight").to_a
     end
@@ -58,6 +60,7 @@ class WindowTest < Minitest::Test
 
       assert_equal %w[m.first.weight m.first.bias], s.unfreeze!("m.first.*")
       s.run([batch] * 3)
+
       refute_equal frozen, s.fetch("m.first.weight").to_a
     end
   end
@@ -72,6 +75,7 @@ class WindowTest < Minitest::Test
       s.run([batch] * 3)
       s.unfreeze!("m.first.*")
       s.run([batch] * 3)
+
       assert_equal 9, s.step
       assert_predicate s.loss, :finite?
     end
@@ -95,6 +99,7 @@ class WindowTest < Minitest::Test
   def test_a_parameter_can_be_written_from_the_window
     Torobi::Session.open(config, weights: weights) do |s|
       s.put("m.second.weight", { shape: [1, DIM], data: [1.0, 2.0, 3.0, 4.0] })
+
       assert_equal [1.0, 2.0, 3.0, 4.0], s.fetch("m.second.weight").to_a
 
       e = assert_raises(Torobi::StepError) do
@@ -120,26 +125,31 @@ class WindowTest < Minitest::Test
 
     entries = Torobi::Journal.read(io.string)
     header = entries.first
+
     assert_equal Torobi::Journal::SCHEMA_VERSION, header.fetch("schema_version")
     assert_equal config.digest, header.dig("provenance", "config", "digest")
     assert_equal({ "digest" => "abc" }, header.dig("provenance", "dataset"))
 
     kinds = entries.drop(1).map { |e| e["kind"] }
+
     assert_equal %w[note adjust span span note observe adjust put span note note], kinds
 
     adjusts = entries.select { |e| e["kind"] == "adjust" }
-    assert_equal 0.25, adjusts.first.fetch("lr")
+
+    assert_in_delta(0.25, adjusts.first.fetch("lr"))
     assert_equal "m.first.*", adjusts.last.fetch("freeze")
     assert_equal %w[m.first.weight m.first.bias], adjusts.last.fetch("moved")
 
     # A put names what was written without holding it.
     put = entries.find { |e| e["kind"] == "put" }
+
     assert_equal "m.second.bias", put.fetch("path")
     assert_match(/\A[0-9a-f]{64}\z/, put.fetch("digest"))
 
     # And what the window read is there, because a policy reading it would
     # have decided on it.
     observed = entries.find { |e| e["kind"] == "observe" }
+
     assert_in_delta entries.select { |e| e["kind"] == "span" }[1].fetch("loss"),
                     observed.fetch("loss"), 1e-9
   end
@@ -149,6 +159,7 @@ class WindowTest < Minitest::Test
       assert_nil s.journal
       s.adjust(lr: 0.1)
       s.run([batch])
+
       assert_equal 1, s.step
     end
   end
@@ -166,6 +177,7 @@ class WindowTest < Minitest::Test
         end
       end
       entries = Torobi::Journal.read(File.read(path))
+
       assert_equal "closed", entries.last.fetch("event")
     end
   end

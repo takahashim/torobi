@@ -47,7 +47,7 @@ rng = Random.new(1)
 Torobi::Session.open(config, weights(DIM)) { |s| 3.times { s.step!(batch(4, DIM, rng)) } }
 
 puts "torobi boundary cost, #{RUBY_PLATFORM}, dim=#{DIM}, #{STEPS} steps each"
-puts format("%8s %10s %10s %10s %10s", "rows", "json", "pack", "step", "span")
+puts "    rows       json       pack       step       span"
 
 [1, 8, 64, 512].each do |rows|
   batches = Array.new(STEPS) { batch(rows, DIM, rng) }

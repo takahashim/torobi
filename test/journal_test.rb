@@ -33,6 +33,7 @@ class JournalTest < Minitest::Test
   def test_the_engine_reports_what_it_was_built_from
     skip "extension not compiled" unless defined?(Torobi::Session)
     info = Torobi::Provenance.runtime.fetch("engine")
+
     assert_equal Torobi::VERSION, info.fetch("torobi_engine")
     assert_includes %w[debug release], info.fetch("profile")
     refute_empty info.fetch("mlx_rs")
@@ -46,10 +47,11 @@ class JournalTest < Minitest::Test
     journal.checkpoint(path: "checkpoint/000001", step: 100)
 
     kinds = journal.entries.map { |e| e["kind"] }
+
     assert_equal %w[span observe adjust checkpoint], kinds
     assert(journal.entries.all? { |e| e["step"] == 100 })
     assert(journal.entries.all? { |e| e.key?("at") })
-    assert_equal 0.05, journal.entries[2].fetch("lr")
+    assert_in_delta(0.05, journal.entries[2].fetch("lr"))
   end
 
   # An observation is recorded because a policy that reads and then decides
@@ -61,7 +63,8 @@ class JournalTest < Minitest::Test
 
     read = journal.entries.find { |e| e["kind"] == "observe" }
     decided = journal.entries.find { |e| e["kind"] == "adjust" }
-    assert_equal 0.9, read.fetch("loss")
+
+    assert_in_delta(0.9, read.fetch("loss"))
     assert_equal read["step"], decided["step"], "the decision and its input are at the same step"
   end
 
@@ -78,6 +81,7 @@ class JournalTest < Minitest::Test
     journal.close
 
     lines = Torobi::Journal.read(io.string)
+
     assert_equal journal.to_a, lines
     assert_equal 1, lines.first.fetch("schema_version")
     assert_equal "span", lines.last.fetch("kind")
@@ -88,6 +92,7 @@ class JournalTest < Minitest::Test
     a = Torobi::Provenance.digest_of({ "x" => [1.0, 2.0] })
     b = Torobi::Provenance.digest_of({ "x" => [1.0, 2.0] })
     c = Torobi::Provenance.digest_of({ "x" => [1.0, 2.5] })
+
     assert_equal a, b
     refute_equal a, c
     assert_match(/\A[0-9a-f]{64}\z/, a)
@@ -151,5 +156,4 @@ class JournalTest < Minitest::Test
 
     assert_equal journal.to_a, Torobi::Journal.read(journal.to_jsonl)
   end
-
 end

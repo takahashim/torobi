@@ -20,6 +20,7 @@ module Torobi
             unless k.is_a?(String)
               raise ConfigError, "#{where}: hash keys must be strings, got #{k.inspect}"
             end
+
             primitive!(v, where:)
           end
           value

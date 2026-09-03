@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require "json"
-require "set"
 require "fileutils"
 
 module Torobi
@@ -56,9 +55,7 @@ module Torobi
       return [] unless from
 
       from = from.to_s
-      unless File.directory?(from)
-        raise ArgumentError, "from: #{from.inspect} is not a directory"
-      end
+      raise ArgumentError, "from: #{from.inspect} is not a directory" unless File.directory?(from)
 
       copied = CARRIED.select { |name| File.file?(File.join(from, name)) }
       copied.each { |name| FileUtils.cp(File.join(from, name), File.join(into, name)) }
@@ -92,10 +89,8 @@ module Torobi
       # than reporting whatever else is wrong downstream of it.
       check_widths(dir, pooling_dim, carried, widths) if widths
       modules = File.exist?(File.join(dir, "modules.json")) ? nil : modules_json
-      pooling_file =
-        if pooling || pooling_dim || carried.nil?
-          pooling_json(pooling, pooling_dim, carried)
-        end
+      asked = pooling || pooling_dim || carried.nil?
+      pooling_file = pooling_json(pooling, pooling_dim, carried) if asked
       described = File.exist?(File.join(dir, "config_sentence_transformers.json"))
 
       FileUtils.mkdir_p(dir)
@@ -172,7 +167,7 @@ module Torobi
       header = File.open(file, "rb") do |io|
         JSON.parse(io.read(io.read(8).unpack1("Q<")))
       end
-      header.reject { |name, _| name == "__metadata__" }
+      header.except("__metadata__")
             .values.filter_map { |entry| Array(entry["shape"]).last }
             .to_set
     end
@@ -225,11 +220,11 @@ module Torobi
 
     def sentence_transformers_json
       JSON.pretty_generate({
-                             "__version__" => { "torobi" => Torobi::VERSION },
-                             "prompts" => {},
-                             "default_prompt_name" => nil,
-                             "similarity_fn_name" => "cosine"
-                           })
+        "__version__" => { "torobi" => Torobi::VERSION },
+        "prompts" => {},
+        "default_prompt_name" => nil,
+        "similarity_fn_name" => "cosine"
+      })
     end
   end
 end

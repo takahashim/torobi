@@ -35,17 +35,19 @@ class ModernBertGradientTest < Minitest::Test
     )
   end
 
-  def encoder = @encoder ||= Torobi::Models::ModernBERT.classifier(config, seq: SEQ,
+  def encoder
+    @encoder ||= Torobi::Models::ModernBERT.classifier(config, seq: SEQ,
                                                                    encoder_prefix: "")
+  end
 
   # A score to regress towards, so the loss is the one a distillation
   # actually differentiates rather than a norm of the output.
   def graph_config
     @graph_config ||= Torobi::GraphConfig.new(
       models: { m: encoder },
-      objective: Torobi.objective(m: encoder) { |g|
+      objective: Torobi.objective(m: encoder) do |g|
         g.output :loss, g.mse(g.from_model(:m, :logits), g.from_batch(:score, [nil, 1]))
-      }
+      end
     )
   end
 

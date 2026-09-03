@@ -87,7 +87,7 @@ namespace :oracle do
     raise "no ruri-v3-130m checkpoint (set RURI_V3_130M)" unless dir && File.directory?(dir)
 
     manifest = File.join(ENV.fetch("KOHAGI", KOHAGI), "tools/reference/Cargo.toml")
-    raise "no kohagi at #{File.dirname(File.dirname(manifest))} (set KOHAGI)" unless File.exist?(manifest)
+    raise "no kohagi at #{File.dirname(manifest, 2)} (set KOHAGI)" unless File.exist?(manifest)
 
     long = "駅前の駐輪場が不足しているため、増設を要望します。" * 30
     sh "cargo run --release --manifest-path #{manifest.shellescape} -- " \
@@ -240,6 +240,19 @@ end
 
 Minitest::TestTask.create
 
+# The lint, and what it is for: .rubocop.yml says which rules are on and
+# why the rest are not. Guarded because a checkout without the
+# development dependencies should still be able to compile.
+begin
+  require "rubocop/rake_task"
+  RuboCop::RakeTask.new
+rescue LoadError
+  nil
+end
+
 task compile: [] # defined by RbSys::ExtensionTask above
 task test: %i[compile metallib]
-task default: %i[test rust_test rust_test:facade engine:check]
+
+# Lint first: it is five seconds, and the rest is a compile.
+DEFAULT = %w[test rust_test rust_test:facade engine:check].freeze
+task default: (Rake::Task.task_defined?(:rubocop) ? ["rubocop", *DEFAULT] : DEFAULT)

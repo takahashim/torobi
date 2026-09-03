@@ -32,11 +32,12 @@ abort "build the engine first (cargo build -p torobi-engine)" unless engine
 
 b = JSON.parse(File.read(bindings_path))
 rows = ->(t) { t["data"].each_slice(t["shape"][1] || 1).to_a }
-x = rows.(b["inputs"]["x"])
-y = rows.(b["inputs"]["y"])
-w = rows.(b["params"]["spike.linear.weight"])
+x = rows.call(b["inputs"]["x"])
+y = rows.call(b["inputs"]["y"])
+w = rows.call(b["params"]["spike.linear.weight"])
 bias = b["params"]["spike.linear.bias"]["data"]
-n, d_out = y.size, y.first.size
+n = y.size
+d_out = y.first.size
 
 pred = x.map { |row| w.map { |wo| row.zip(wo).sum { |a, c| a * c } + bias[w.index(wo)] } }
 diff = pred.zip(y).map { |p, t| p.zip(t).map { |a, c| a - c } }
@@ -55,12 +56,13 @@ check = lambda do |name, want, got|
   puts format("%-14s max|Δ| = %.2e", name, worst)
   raise "#{name}: mismatch (#{worst})" if worst > 1e-4
 end
-check.("loss", [loss], [engine_out["loss"]])
-check.("weight grad", dw.flatten, engine_out.dig("grads", "spike.linear.weight", "data"))
-check.("bias grad", db, engine_out.dig("grads", "spike.linear.bias", "data"))
+check.call("loss", [loss], [engine_out["loss"]])
+check.call("weight grad", dw.flatten, engine_out.dig("grads", "spike.linear.weight", "data"))
+check.call("bias grad", db, engine_out.dig("grads", "spike.linear.bias", "data"))
 
 lines = `#{engine} train #{graph} #{bindings_path} 200 0.5`.lines.map { JSON.parse(_1) }
 raise "engine train failed" unless $?.success?
+
 first = lines.first.fetch("loss")
 final = lines.last.fetch("final_loss")
 puts format("train: loss %.4f -> %.6f over 200 steps", first, final)

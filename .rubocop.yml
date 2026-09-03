@@ -1,0 +1,115 @@
+# What this is for: catching slips, not settling arguments.
+#
+# The rules kept on are the ones a reader cannot be relied on to catch:
+# a shadowed variable, a `File.read` where the argument could be a
+# command, quoting that changes between neighbouring lines. The rules
+# turned off are the ones that would have this file arguing with the
+# code about design, which is not a thing a linter is good at.
+plugins:
+  - rubocop-minitest
+
+AllCops:
+  TargetRubyVersion: "3.2"
+  NewCops: enable
+  # Which plugins to load is a decision, not a thing to be reminded of
+  # on every run.
+  SuggestExtensions: false
+  Exclude:
+    - "target/**/*"
+    - "tmp/**/*"
+    - "vendor/**/*"
+
+# Double quotes throughout, which is what the code already does. The
+# point of the rule is that neighbouring lines agree, not which one wins.
+Style/StringLiterals:
+  EnforcedStyle: double_quotes
+Style/StringLiteralsInInterpolation:
+  EnforcedStyle: double_quotes
+
+# How long a thing may be is a question about what it is, and this
+# repository answers it in review and in docs/plan.md rather than with a
+# number. A method that describes one architecture is long because the
+# architecture is; cutting it into three would not make it two ideas.
+Metrics/AbcSize:
+  Enabled: false
+Metrics/BlockLength:
+  Enabled: false
+Metrics/ClassLength:
+  Enabled: false
+Metrics/CyclomaticComplexity:
+  Enabled: false
+Metrics/MethodLength:
+  Enabled: false
+Metrics/ModuleLength:
+  Enabled: false
+Metrics/ParameterLists:
+  Enabled: false
+Metrics/PerceivedComplexity:
+  Enabled: false
+
+# `g` is the graph, `x` is the input, `q` and `k` and `v` are what
+# attention calls them. A rule that wants three letters is asking the
+# code to stop using the names its subject uses.
+Naming/MethodParameterName:
+  MinNameLength: 1
+
+# What the code already wraps at. The default of 120 is wider than
+# anything here, which would let a line grow without anybody deciding to.
+Layout/LineLength:
+  Max: 100
+
+# A continuation is indented to say it is a continuation. Aligning it
+# under the first key instead pushes it to wherever the call happens to
+# be, and moves every line of it when the call is renamed.
+Layout/HashAlignment:
+  EnforcedLastArgumentHashStyle: ignore_implicit
+Layout/FirstHashElementIndentation:
+  EnforcedStyle: consistent
+
+# Dev dependencies are in the gemspec, where what they are for is next to
+# what they are for.
+Gemspec/DevelopmentDependencies:
+  Enabled: false
+
+# A `Data.define` with a block is the shape the constant assignment
+# already has. Turning it into a superclass reads as a bigger claim than
+# is being made.
+Style/DataInheritance:
+  Enabled: false
+
+# Rake namespaces are blocks, and a constant inside one is where the
+# task that reads it is.
+Lint/ConstantDefinitionInBlock:
+  Exclude:
+    - "Rakefile"
+
+# How many things one test may assert is a question about what the test
+# is claiming. These claim one thing each, in several sentences.
+Minitest/MultipleAssertions:
+  Enabled: false
+
+# `assert_equal true, x` says the value is `true`. `assert x` says it is
+# not nil and not false. Over JSON, where a key may hold the string
+# "true" or a 1, those are different claims and the narrower one is the
+# one being made.
+Minitest/AssertTruthy:
+  Enabled: false
+Minitest/RefuteFalse:
+  Enabled: false
+
+# `$?` in a script that has just run a command is what it is called.
+# Requiring English to spell it differently is a word about spelling.
+Style/SpecialGlobalVars:
+  Enabled: false
+
+# `format("%.4f", loss)` is how a number is printed. Naming the slot
+# adds a word and says nothing.
+Style/FormatStringToken:
+  Enabled: false
+
+# Every file here has a comment above it saying what it is and why. What
+# this cop checks is that the comment is immediately above the class,
+# which several of them deliberately are not: the file's own preamble
+# comes first.
+Style/Documentation:
+  Enabled: false

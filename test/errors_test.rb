@@ -48,6 +48,7 @@ class ErrorsTest < Minitest::Test
 
       # The session took the next one, which is what StepError promises.
       s.step!(good)
+
       assert_equal 1, s.step
       assert_predicate s.loss, :finite?
     end
@@ -88,7 +89,10 @@ class ErrorsTest < Minitest::Test
 
     Torobi::Session.open(config, weights:) do |s|
       target = Thread.current
-      killer = Thread.new { sleep 0.05; target.raise(Interrupt, "stop") }
+      killer = Thread.new do
+        sleep 0.05
+        target.raise(Interrupt, "stop")
+      end
       raised = assert_raises(Interrupt) do
         100_000.times { s.step!(batch) }
       end
@@ -115,10 +119,12 @@ class ErrorsTest < Minitest::Test
   def test_the_device_is_probed_where_an_abort_is_survivable
     skip "extension not compiled" unless defined?(Torobi::Session)
     Torobi::Preflight.forget_probe!
+
     assert Torobi::Preflight.probe!, "MLX should start on this machine"
 
     first = Benchmark.realtime { Torobi::Preflight.check! }
     second = Benchmark.realtime { Torobi::Preflight.check! }
+
     assert_operator second, :<, first, "the probe should be asked once, not per session"
   end
 end

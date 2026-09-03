@@ -108,11 +108,14 @@ class AccumulateTest < Minitest::Test
 
         assert_match(/accumulated/, assert_raises(Torobi::StepError) { s.freeze!("m.*") }.message)
         assert_match(/accumulated/,
-                     assert_raises(Torobi::StepError) { s.checkpoint!(File.join(dir, "c")) }.message)
+                     assert_raises(Torobi::StepError) do
+                       s.checkpoint!(File.join(dir, "c"))
+                     end.message)
 
         # And both work once it is settled.
         s.apply!
         s.checkpoint!(File.join(dir, "c"))
+
         assert_equal ["m.l.weight"], s.freeze!("m.l.weight")
       end
     end
@@ -130,7 +133,7 @@ class AccumulateTest < Minitest::Test
     observed = entries.select { |e| e["kind"] == "observe" }
     span = entries.find { |e| e["kind"] == "span" }
 
-    assert_equal [1, 2], observed.map { |e| e["accumulated"] }
+    assert_equal([1, 2], observed.map { |e| e["accumulated"] })
     assert_equal 2, span.fetch("parts")
     assert_equal 1, span.fetch("steps")
   end

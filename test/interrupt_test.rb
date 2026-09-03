@@ -61,9 +61,11 @@ class InterruptTest < Minitest::Test
     assert_raises(Timeout::Error) { Timeout.timeout(0.3) { session.run(endless) } }
 
     took = session.step
+
     assert_operator took, :>, 0, "the span should have taken some steps"
 
     session.step!(batch)
+
     assert_equal took + 1, session.step, "the session still trains"
     assert session.close, "and it can still be closed"
   end
@@ -71,7 +73,10 @@ class InterruptTest < Minitest::Test
   def test_a_thread_raise_during_a_span_surfaces_the_callers_own_error
     session = Torobi::Session.open(config, weights: weights)
     target = Thread.current
-    killer = Thread.new { sleep 0.2; target.raise(ArgumentError, "the caller's own error") }
+    killer = Thread.new do
+      sleep 0.2
+      target.raise(ArgumentError, "the caller's own error")
+    end
 
     error = assert_raises(ArgumentError) { session.run(endless) }
     killer.join
@@ -80,6 +85,7 @@ class InterruptTest < Minitest::Test
                  "the caller's exception, not one the binding invented"
     took = session.step
     session.step!(batch)
+
     assert_equal took + 1, session.step
     session.close
   end
@@ -93,6 +99,7 @@ class InterruptTest < Minitest::Test
     assert_raises(Timeout::Error) { Timeout.timeout(0.3) { session.run(endless) } }
 
     spans = session.journal.entries.select { |e| e["kind"] == "span" }
+
     refute_empty spans, "the interrupted span should have recorded its steps"
 
     assert_equal session.step, spans.size, "one entry per step the engine took"
@@ -107,13 +114,19 @@ class InterruptTest < Minitest::Test
     readings = Queue.new
     # Sampled rather than spun: the point is to catch the run at many
     # moments, not to see how fast a read is.
-    watcher = Thread.new { loop { readings << [session.step, session.loss]; sleep 0.0005 } }
+    watcher = Thread.new do
+      loop do
+        readings << [session.step, session.loss]
+        sleep 0.0005
+      end
+    end
     steps = 30
     steps.times { session.step!(batch) }
     watcher.kill
     watcher.join
 
     seen = Array.new(readings.size) { readings.pop }
+
     refute_empty seen
     seen.each do |step, loss|
       assert_operator step, :<=, steps, "no step the run has not reached"

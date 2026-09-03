@@ -24,19 +24,19 @@ end
 config = JSON.parse(File.read(File.join(dir, "config.json")))
 tensors = File.open(File.join(dir, "model.safetensors"), "rb") do |f|
   header = JSON.parse(f.read(f.read(8).unpack1("Q<")))
-  header.reject { |k, _| k == "__metadata__" }
+  header.except("__metadata__")
         .transform_values { |v| { "shape" => v["shape"], "dtype" => v["dtype"] } }
 end
 
-File.write(out, "#{JSON.pretty_generate({
+inventory = {
   "schema_version" => 1,
   # The Hub cache spells a repo "models--owner--name"; say it the way a
   # person would.
-  "source" => File.basename(File.dirname(File.dirname(dir)))
-               .delete_prefix("models--").sub("--", "/"),
+  "source" => File.basename(File.dirname(dir, 2)).delete_prefix("models--").sub("--", "/"),
   "revision" => File.basename(dir),
   "generated_at" => Time.now.utc.iso8601,
   "config" => config,
   "parameters" => tensors.sort.to_h
-})}\n")
+}
+File.write(out, "#{JSON.pretty_generate(inventory)}\n")
 puts "wrote #{out}: #{tensors.size} tensors from #{File.basename(dir)}"

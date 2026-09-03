@@ -43,7 +43,9 @@ class OptimizerTest < Minitest::Test
     xs = batch[:x][:data].each_slice(2).to_a
     ys = batch[:y][:data]
     n = ys.size.to_f
-    dpred = xs.each_with_index.map { |row, i| 2.0 * ((row[0] * w[0]) + (row[1] * w[1]) + b[0] - ys[i]) / n }
+    dpred = xs.each_with_index.map do |row, i|
+      2.0 * ((row[0] * w[0]) + (row[1] * w[1]) + b[0] - ys[i]) / n
+    end
     dw = [xs.each_with_index.sum { |row, i| dpred[i] * row[0] },
           xs.each_with_index.sum { |row, i| dpred[i] * row[1] }]
     [dw, [dpred.sum]]
@@ -116,6 +118,7 @@ class OptimizerTest < Minitest::Test
       before = session.fetch("m.l.weight").to_a
       session.step!(batch)
       after = session.fetch("m.l.weight").to_a
+
       before.each_with_index do |value, i|
         assert_in_delta lr, (value - after[i]).abs, lr * 0.01,
                         "the first step should move by about lr"
@@ -149,6 +152,7 @@ class OptimizerTest < Minitest::Test
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: }) do |session|
       session.step!(b_batch)
       engine_w = session.fetch("m.l.weight").to_a
+
       w.each_with_index do |value, i|
         assert_in_delta value - (lr * dw[i]), engine_w[i], 1e-6
       end

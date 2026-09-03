@@ -41,8 +41,9 @@ module Torobi
       end
     end
 
-    def config(extra_metadata_order: false, **kwargs)
-      Torobi::GraphConfig.new(models: { "student" => linear_graph(extra_metadata_order:) }, **kwargs)
+    def config(extra_metadata_order: false, **)
+      Torobi::GraphConfig.new(models: { "student" => linear_graph(extra_metadata_order:) },
+**)
     end
   end
 end

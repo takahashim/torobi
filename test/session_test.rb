@@ -52,6 +52,7 @@ class SessionTest < Minitest::Test
 
       # It recovered the coefficients behind every batch.
       weight = s.fetch("spike.linear.weight")
+
       assert_equal [1, 2], weight.shape
       assert_in_delta 3.0, weight.to_a[0], 5e-2
       assert_in_delta(-2.0, weight.to_a[1], 5e-2)
@@ -65,6 +66,7 @@ class SessionTest < Minitest::Test
     Torobi::Session.open(@config, weights: @weights) do |s|
       s.adjust(lr: 0.3)
       [1, 4, 16, 3].each { |rows| s.step!(batch(rows)) }
+
       assert_equal 4, s.step
       assert_predicate s.loss, :finite?
     end
@@ -74,14 +76,17 @@ class SessionTest < Minitest::Test
     Torobi::Session.open(@config, weights: @weights) do |s|
       b = batch(8, seed: 1)
       grads = s.gradients(b)
+
       assert_equal %w[spike.linear.weight spike.linear.bias], grads.keys
       assert_equal [1, 2], grads["spike.linear.weight"].shape
       # At w = 0, the gradient of the bias is -2 * mean(y).
       ys = b[:y][:data]
+
       assert_in_delta(-2 * ys.sum / ys.size, grads["spike.linear.bias"].to_a[0], 1e-5)
 
       # A different batch, a different gradient; and asking did not train.
-      refute_equal grads["spike.linear.bias"].to_a, s.gradients(batch(8, seed: 2))["spike.linear.bias"].to_a
+      refute_equal grads["spike.linear.bias"].to_a,
+                   s.gradients(batch(8, seed: 2))["spike.linear.bias"].to_a
       assert_equal 0, s.step
     end
   end
@@ -89,10 +94,12 @@ class SessionTest < Minitest::Test
   def test_knobs_are_read_back_and_take_effect
     slow = Torobi::Session.open(@config, weights: @weights) do |s|
       s.adjust(lr: 0.05)
+
       assert_in_delta 0.05, s.lr
       s.run(batches(5))
     end
     fast = Torobi::Session.open(@config, weights: @weights) { |s| s.adjust(lr: 0.5).run(batches(5)) }
+
     assert_operator fast, :<, slow, "a larger lr should get further in the same steps"
   end
 
@@ -110,6 +117,7 @@ class SessionTest < Minitest::Test
       s.adjust(lr: 0.5)
       s.run(batches(400, rows: 4))
       ticker.kill
+
       assert_operator ticks, :>, 1, "the ticker thread did not run during the span"
     end
   end

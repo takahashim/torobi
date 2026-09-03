@@ -44,6 +44,7 @@ module Torobi
       if objective && !objective.is_a?(IR::Graph)
         raise ConfigError, "objective is a #{objective.class}, expected Torobi::IR::Graph"
       end
+
       train = check_train(train, models)
       if objective
         check_objective(objective)
@@ -156,7 +157,7 @@ module Torobi
       end
 
       shape, dtype = objective.output_signature(LOSS)
-      unless shape&.empty?
+      unless shape && shape.empty?
         raise ConfigError,
               "the loss must be a scalar, and this one has shape #{shape.inspect}; " \
               "reduce it (mean or sum) before declaring it"
@@ -184,12 +185,12 @@ module Torobi
       end
 
       shape, dtype = graph.output_signature(names.first)
-      unless shape&.empty? && dtype == :f32
-        raise ConfigError,
-              "without an objective, model #{name.inspect}'s output " \
-              "#{names.first.inspect} is the loss, so it must be an f32 scalar, " \
-              "and it is #{dtype}#{shape.inspect}"
-      end
+      return if shape&.empty? && dtype == :f32
+
+      raise ConfigError,
+            "without an objective, model #{name.inspect}'s output " \
+            "#{names.first.inspect} is the loss, so it must be an f32 scalar, " \
+            "and it is #{dtype}#{shape.inspect}"
     end
 
     # An objective may read a model output only if that model declares it,

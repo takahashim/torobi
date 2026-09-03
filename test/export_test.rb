@@ -55,11 +55,11 @@ class ExportTest < Minitest::Test
     File.write(File.join(dir, "special_tokens_map.json"), '{"pad_token":"<pad>"}')
     File.write(File.join(dir, "modules.json"), "[]")
     File.write(File.join(dir, "1_Pooling", "config.json"), JSON.generate(
-                 "word_embedding_dimension" => DIM,
-                 "pooling_mode_cls_token" => false,
-                 "pooling_mode_mean_tokens" => true,
-                 "include_prompt" => true
-               ))
+                                                             "word_embedding_dimension" => DIM,
+                                                             "pooling_mode_cls_token" => false,
+                                                             "pooling_mode_mean_tokens" => true,
+                                                             "include_prompt" => true
+                                                           ))
     # The same weights before training, which the export must not carry.
     File.write(File.join(dir, "pytorch_model.bin"), "stale")
     File.write(File.join(dir, "README.md"), "# the model this no longer is")
@@ -92,6 +92,7 @@ class ExportTest < Minitest::Test
     refute_path_exists File.join(out, "README.md")
 
     tensors = read_safetensors(File.join(out, "model.safetensors"))
+
     assert_equal %w[l.bias l.weight], tensors.keys.sort
     assert_equal weight, tensors["l.weight"][:data]
     assert_equal "F32", tensors["l.weight"][:dtype]
@@ -141,6 +142,7 @@ class ExportTest < Minitest::Test
     # what was carried are there, and the pooling is still the source's.
     assert_path_exists File.join(out, "model.safetensors")
     pooling = JSON.parse(File.read(File.join(out, "1_Pooling", "config.json")))
+
     assert_equal DIM, pooling["word_embedding_dimension"], "the carried config was rewritten"
   end
 
@@ -227,7 +229,7 @@ class ExportTest < Minitest::Test
       s.export_model!(File.join(@dir, "out"), from: source)
     end
     note = io.string.lines.map { |line| JSON.parse(line) }
-              .find { |entry| entry["event"] == "exported" }
+             .find { |entry| entry["event"] == "exported" }
 
     assert_equal "student", note["model"]
     assert_equal %w[l.bias l.weight], note["paths"].sort
@@ -260,6 +262,7 @@ class ExportTest < Minitest::Test
       y = g.input :y, [nil, 1]
       g.output :loss, g.mse(g.linear(x, 1, name: "model.l"), y)
     end
+
     Torobi::Session.open(Torobi::GraphConfig.new(models: { "m" => bare }),
                          pretrained: { m: File.join(out, "model.safetensors") }) do |s|
       assert_equal weight, s.fetch("m.model.l.weight").to_a
@@ -270,11 +273,11 @@ class ExportTest < Minitest::Test
 
   # A minimal safetensors reader, just enough to check the export layout.
   def read_safetensors(path)
-    bytes = IO.binread(path)
+    bytes = File.binread(path)
     header_len = bytes[0, 8].unpack1("Q<")
     header = JSON.parse(bytes[8, header_len])
     base = 8 + header_len
-    header.reject { |name, _| name == "__metadata__" }
+    header.except("__metadata__")
           .transform_values do |entry|
       start, fin = entry["data_offsets"]
       { dtype: entry["dtype"], shape: entry["shape"],
@@ -283,7 +286,7 @@ class ExportTest < Minitest::Test
   end
 
   def read_metadata(path)
-    bytes = IO.binread(path, 65_536)
+    bytes = File.binread(path, 65_536)
     JSON.parse(bytes[8, bytes[0, 8].unpack1("Q<")])["__metadata__"]
   end
 end

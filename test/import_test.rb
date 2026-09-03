@@ -67,7 +67,8 @@ class ImportTest < Minitest::Test
       # It is a usable starting point: one step and the loss is where the
       # first run left it, not where an untrained run would be.
       s.step!(batch)
-      assert_in_delta loss, s.loss, loss.abs * 0.5 + 1e-6
+
+      assert_in_delta loss, s.loss, (loss.abs * 0.5) + 1e-6
     end
   end
 
@@ -87,6 +88,7 @@ class ImportTest < Minitest::Test
     end
     Torobi::Session.open(config, weights: weights, optimizer:) do |s|
       s.restore(checkpoint)
+
       assert_equal 8, s.step
     end
   end
@@ -97,7 +99,7 @@ class ImportTest < Minitest::Test
     # A file that holds only one of the two the graph declares.
     Torobi::Session.open(config, weights: weights) do |s|
       one = s.fetch("m.l.bias")
-      IO.binwrite(partial, safetensors({ "m.l.bias" => one }))
+      File.binwrite(partial, safetensors({ "m.l.bias" => one }))
     end
 
     e = assert_raises(Torobi::StepError) do
@@ -115,8 +117,8 @@ class ImportTest < Minitest::Test
   def test_a_file_in_another_precision_is_converted
     values = [0.5, -0.25, 0.125, 2.0]
     path = File.join(@dir, "half.safetensors")
-    IO.binwrite(path, bf16_safetensors("m.l.weight" => { shape: [1, DIM], data: values },
-                                       "m.l.bias" => { shape: [1], data: [0.75] }))
+    File.binwrite(path, bf16_safetensors("m.l.weight" => { shape: [1, DIM], data: values },
+                                         "m.l.bias" => { shape: [1], data: [0.75] }))
 
     Torobi::Session.open(config, weights_file: path) do |s|
       # These survive bf16 exactly (few enough mantissa bits), so the
@@ -124,6 +126,7 @@ class ImportTest < Minitest::Test
       assert_equal values, s.fetch("m.l.weight").to_a
       assert_equal [0.75], s.fetch("m.l.bias").to_a
       s.step!(batch)
+
       assert_predicate s.loss, :finite?
     end
   end
@@ -151,8 +154,10 @@ class ImportTest < Minitest::Test
       refute(head.all?(&:zero?), "the head was drawn, not left empty")
       # kaiming_uniform on a [1, DIM] weight: bound is sqrt(6 / DIM).
       bound = Math.sqrt(6.0 / DIM)
+
       assert(head.all? { |v| v.abs <= bound }, "#{head.inspect} is outside +-#{bound}")
       s.step!(batch)
+
       assert_predicate s.loss, :finite?
     end
   end
@@ -186,7 +191,7 @@ class ImportTest < Minitest::Test
     end
     config = Torobi::GraphConfig.new(models: { m: model })
     file = File.join(@dir, "empty.safetensors")
-    IO.binwrite(file, safetensors({ "elsewhere" => { shape: [1], data: [0.0] } }))
+    File.binwrite(file, safetensors({ "elsewhere" => { shape: [1], data: [0.0] } }))
 
     e = assert_raises(Torobi::StepError) do
       Torobi::Session.open(config, pretrained: { m: file })
@@ -213,7 +218,7 @@ class ImportTest < Minitest::Test
     end
     config = Torobi::GraphConfig.new(models: { m: model })
     file = File.join(@dir, "none.safetensors")
-    IO.binwrite(file, safetensors({ "elsewhere" => { shape: [1], data: [0.0] } }))
+    File.binwrite(file, safetensors({ "elsewhere" => { shape: [1], data: [0.0] } }))
 
     drawn = 2.times.map do
       Torobi::Session.open(config, pretrained: { m: file }, fresh: ["m.*"]) do |s|
@@ -251,9 +256,8 @@ class ImportTest < Minitest::Test
       g.output :loss, g.mse(g.linear(body, 1, name: "head", bias: false), y)
     end
     file = File.join(@dir, "body.safetensors")
-    IO.binwrite(file, safetensors({
-      "body.weight" => { shape: [DIM, DIM], data: Array.new(DIM * DIM, 0.1) }
-    }))
+    body = { "body.weight" => { shape: [DIM, DIM], data: Array.new(DIM * DIM, 0.1) } }
+    File.binwrite(file, safetensors(body))
     [Torobi::GraphConfig.new(models: { m: model }), file]
   end
 

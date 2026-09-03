@@ -37,9 +37,11 @@ class DtypeTest < Minitest::Test
   def test_a_graph_reads_i32_ids
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
       loss = s.step!(ids_batch([1, 2, 3]))
+
       assert_in_delta 2.0, loss, 1e-6, "the mean of rows 1, 2 and 3"
 
       loss = s.step!(ids_batch([0, 0, 15]))
+
       assert_in_delta 5.0, loss, 1e-6
     end
   end
@@ -50,6 +52,7 @@ class DtypeTest < Minitest::Test
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 1.0 }) do |s|
       s.step!(ids_batch([2, 2]))
       table = s.fetch("m.emb.weight").to_a.each_slice(DIM).to_a
+
       refute_equal [2.0] * DIM, table[2], "row 2 was read and should have moved"
       VOCAB.times do |i|
         next if i == 2
@@ -80,6 +83,7 @@ class DtypeTest < Minitest::Test
       a: { shape: [3], data: [1.5, -2.5, 0.0] },
       b: { shape: [3], data: [1, -2, 300], dtype: :i32 }
     })
+
     assert_equal %w[f32 i32], packed.values.map(&:first)
     assert_equal [1.5, -2.5, 0.0], Torobi::Batch.unpack(packed.fetch("a")[2])
     assert_equal [1, -2, 300], Torobi::Batch.unpack(packed.fetch("b")[2], dtype: :i32)

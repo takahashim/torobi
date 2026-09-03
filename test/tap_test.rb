@@ -50,15 +50,18 @@ class TapTest < Minitest::Test
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
       s.tap("m.first", stat: :mean)
       s.step!(batch)
+
       assert_in_delta 0.4, s.tapped.fetch("m.first"), 1e-6
 
       s.tap("m.first", stat: :norm)
       s.step!(batch)
-      assert_in_delta Math.sqrt(ROWS * DIM * 0.4**2), s.tapped.fetch("m.first"), 1e-5
+
+      assert_in_delta Math.sqrt(ROWS * DIM * (0.4**2)), s.tapped.fetch("m.first"), 1e-5
 
       s.tap("m.first", stat: :extent)
       s.step!(batch)
       extent = s.tapped.fetch("m.first")
+
       assert_equal [2], extent.shape
       assert_in_delta 0.4, extent.to_a.first, 1e-6
       assert_in_delta 0.4, extent.to_a.last, 1e-6
@@ -70,6 +73,7 @@ class TapTest < Minitest::Test
       s.tap("m.second", stat: :full)
       s.step!(batch)
       value = s.tapped.fetch("m.second")
+
       assert_equal [ROWS, 1], value.shape
       assert_equal ROWS, value.size
       assert(value.to_a.all? { |v| (v - 0.16).abs < 1e-6 })
@@ -79,13 +83,16 @@ class TapTest < Minitest::Test
   def test_several_taps_at_once_and_untapping
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.0 }) do |s|
       s.tap("m.first").tap("m.second", stat: :mean)
+
       assert_equal %w[m.first m.second], s.taps
       s.step!(batch)
+
       assert_equal %w[m.first m.second], s.tapped.keys
 
       assert s.untap("m.first")
       refute s.untap("m.first"), "untapping twice reports that there was nothing to untap"
       s.step!(batch)
+
       assert_equal %w[m.second], s.tapped.keys
     end
   end
@@ -93,15 +100,18 @@ class TapTest < Minitest::Test
   # A tap watches, it does not change: the same run with and without one
   # reaches the same place.
   def test_watching_does_not_change_what_is_learned
-    without = Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
+    without = Torobi::Session.open(config, weights: weights,
+optimizer: { kind: :sgd, lr: 0.05 }) do |s|
       s.run([batch] * 5)
       s.fetch("m.second.weight").to_a
     end
-    with = Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.05 }) do |s|
+    with = Torobi::Session.open(config, weights: weights,
+optimizer: { kind: :sgd, lr: 0.05 }) do |s|
       s.tap("m.first", stat: :norm)
       s.run([batch] * 5)
       s.fetch("m.second.weight").to_a
     end
+
     assert_equal without, with
   end
 
@@ -125,6 +135,7 @@ class TapTest < Minitest::Test
       s.on(:step) { |e| seen << e.session.tapped.fetch("m.first") }
       s.run([batch] * 3)
     end
+
     assert_equal 3, seen.size
     assert(seen.all? { |v| v.is_a?(Float) && v.positive? })
     refute_equal seen.first, seen.last, "the activation should move as it trains"
@@ -138,6 +149,7 @@ class TapTest < Minitest::Test
       2.times { |i| g.scope("layers.#{i}") { h = g.linear(h, DIM, name: "ff") } }
       g.output :loss, g.mean(h)
     end
+
     assert_equal %w[layers.0.ff layers.1.ff], graph.node_names
 
     e = assert_raises(Torobi::ConfigError) do

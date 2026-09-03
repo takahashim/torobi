@@ -94,9 +94,11 @@ module Torobi
     # all there is to say.
     def reason_from(output)
       line = output.lines.map(&:strip).reject(&:empty?).first
-      return "initializing its device ended a probe process rather than raising. " \
-             "Torobi needs Apple silicon with a working Metal device; " \
-             "see docs/vendoring.md." unless line
+      unless line
+        return "initializing its device ended a probe process rather than raising. " \
+               "Torobi needs Apple silicon with a working Metal device; " \
+               "see docs/vendoring.md."
+      end
 
       # An unrescued Ruby exception prints as "-e:12:in '<main>': message".
       line.sub(/\A.*?:\d+:in '.*?': /, "")

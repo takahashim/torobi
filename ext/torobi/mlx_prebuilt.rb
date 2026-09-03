@@ -37,7 +37,7 @@ module MlxPrebuilt
   REPO = PIN.fetch("repo")
   RELEASE = PIN.fetch("release")
   ASSET = PIN.fetch("asset")
-  URL = "https://github.com/#{REPO}/releases/download/#{RELEASE}/#{ASSET}"
+  URL = "https://github.com/#{REPO}/releases/download/#{RELEASE}/#{ASSET}".freeze
 
   # SHA-256 of that asset. The whole point of this file: a release asset
   # can be replaced without its URL changing, and this is what notices.
@@ -64,7 +64,7 @@ module MlxPrebuilt
   # already there. `MLX_PREBUILT_PATH` from the caller wins and is left
   # alone: someone who has built MLX themselves has said so.
   def ensure!(into: cache_dir, io: $stderr)
-    given = ENV["MLX_PREBUILT_PATH"]
+    given = ENV.fetch("MLX_PREBUILT_PATH", nil)
     return given if given && !given.empty?
 
     return libraries(into) if ready?(into)
@@ -202,9 +202,9 @@ module MlxPrebuilt
     got = Digest::SHA256.file(archive).hexdigest
     return if got == DIGEST
 
-    raise Refused, "#{ASSET} is not the archive this was built against.\n" \
-                   "  expected #{DIGEST}\n" \
-                   "  received #{got}\n" \
+    raise Refused, "#{ASSET} is not the archive this was built against.\n  " \
+                   "expected #{DIGEST}\n  " \
+                   "received #{got}\n" \
                    "Nothing was installed. If the release was replaced on " \
                    "purpose, the new digest belongs in " \
                    "ext/torobi/mlx_prebuilt.rb, next to the version of MLX " \

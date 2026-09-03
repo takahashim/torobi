@@ -61,6 +61,7 @@ module Torobi
       unless (0...rank).cover?(normalized)
         raise ConfigError, "#{where}: axis #{axis} is out of range for rank #{rank}"
       end
+
       normalized
     end
 
@@ -128,8 +129,8 @@ module Torobi
     # and assumed to match, anything else must be equal.
     def broadcast(a, b, where:)
       rank = [a.size, b.size].max
-      pad_a = [1] * (rank - a.size) + a
-      pad_b = [1] * (rank - b.size) + b
+      pad_a = ([1] * (rank - a.size)) + a
+      pad_b = ([1] * (rank - b.size)) + b
       pad_a.zip(pad_b).each_with_index.map do |(x, y), i|
         next y if x == 1
         next x if y == 1
@@ -151,11 +152,10 @@ module Torobi
     def slice(inputs, attrs, where:)
       shape = inputs.first.shape.dup
       axis = axis!(attrs.fetch("axis"), shape.size, where:)
-      start, length = attrs.fetch("start"), attrs.fetch("length")
+      start = attrs.fetch("start")
+      length = attrs.fetch("length")
       dim = shape[axis]
-      if dim.nil?
-        raise ConfigError, "#{where}: cannot slice symbolic dimension #{axis}"
-      end
+      raise ConfigError, "#{where}: cannot slice symbolic dimension #{axis}" if dim.nil?
       unless length.positive? && start >= 0 && start + length <= dim
         raise ConfigError,
               "#{where}: slice #{start}...#{start + length} is out of 0...#{dim} on axis #{axis}"
@@ -171,6 +171,7 @@ module Torobi
       if axes.uniq.size != axes.size
         raise ConfigError, "#{where}: duplicate reduction axes #{attrs["axes"].inspect}"
       end
+
       # flat_map rather than filter_map: a dimension that is kept can
       # itself be nil (the batch is symbolic), and dropping those was how
       # a reduction over [nil, seq, hidden] came back as [hidden].
@@ -206,6 +207,7 @@ module Torobi
       if table.shape.size < 2
         raise ConfigError, "#{where}: take table needs rank >= 2, got #{table.shape.inspect}"
       end
+
       [indices.shape + table.shape[1..], table.dtype]
     end
 

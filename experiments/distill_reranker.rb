@@ -32,7 +32,7 @@ require "json"
 # have is drawn from it at open, and the training rows are visited in an
 # order shuffled from it. Two runs that differ only here differ only in
 # their luck, which is the question a seed is varied to ask.
-SEED = 20260903
+SEED = 20_260_903
 SEQ = 128
 BATCH = 8
 EVALUATION_BATCH = 16

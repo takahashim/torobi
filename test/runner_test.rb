@@ -49,6 +49,7 @@ class RunnerTest < Minitest::Test
     r.stop
 
     reported = seen.compact.map { _1[:step] }
+
     refute_empty reported, "the parent should have seen the run move"
     assert_equal reported.sort, reported, "progress only goes forward"
   end
@@ -75,7 +76,7 @@ class RunnerTest < Minitest::Test
     File.open(path, "a") { |f| f.write(JSON.generate(kind: "span", step: 3)) }
 
     assert_equal 2, r.progress.fetch(:step), "an unfinished line is not an entry yet"
-    File.open(path, "a") { |f| f.puts }
+    File.open(path, "a", &:puts)
 
     assert_equal 3, r.progress.fetch(:step)
   end
@@ -136,6 +137,7 @@ class RunnerTest < Minitest::Test
     assert_match(/SIGABRT/, outcome.to_s)
 
     manifest = r.checkpoint_manifest
+
     refute_nil manifest, "the checkpoint written before the crash is still there"
     assert_operator manifest.fetch("step"), :>, 0
     assert_operator manifest.fetch("step"), :<=, 20
@@ -152,6 +154,7 @@ class RunnerTest < Minitest::Test
     reached = Torobi::Checkpoint.manifest(File.join(@dir, "checkpoint")).fetch("step")
 
     second = runner("STEPS" => "20").start
+
     assert_predicate second.wait, :finished?, second.outcome.to_s
     assert_equal reached + 20, second.checkpoint_manifest.fetch("step"),
                  "the second run carried on from the first"
@@ -208,6 +211,7 @@ class RunnerTest < Minitest::Test
 
   def test_the_outcome_of_a_run_that_never_started
     r = runner
+
     assert_nil r.outcome
     assert_raises(Torobi::Error) { r.wait }
   end

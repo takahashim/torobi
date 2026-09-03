@@ -123,8 +123,8 @@ module Torobi
         @session.observe(**values)
       end
 
-      def method_missing(name, *args, **kwargs, &block)
-        @session.public_send(name, *args, **kwargs, &block)
+      def method_missing(name, ...)
+        @session.public_send(name, ...)
       end
 
       def respond_to_missing?(name, include_private = false)
@@ -194,7 +194,7 @@ module Torobi
     end
 
     def values_of(entry)
-      entry.reject { |key, _| %w[kind step at].include?(key) }
+      entry.except("kind", "step", "at")
     end
   end
 end

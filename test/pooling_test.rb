@@ -50,9 +50,9 @@ class PoolingTest < Minitest::Test
   def read_only(graph)
     Torobi::GraphConfig.new(
       models: { m: graph }, train: [],
-      objective: Torobi.objective(m: graph) { |g|
+      objective: Torobi.objective(m: graph) do |g|
         g.output :loss, g.mean(g.from_model(:m, :embedding))
-      }
+      end
     )
   end
 
@@ -84,6 +84,7 @@ class PoolingTest < Minitest::Test
     [LONG, SHORT].each_with_index do |row, r|
       real = states[r].first(row.size)
       want = Array.new(dim) { |j| real.sum { |state| state[j] } / row.size }
+
       want.zip(got[r]).each_with_index do |(w, g), j|
         assert_in_delta w, g, 1e-6, "row #{r} dimension #{j}"
       end

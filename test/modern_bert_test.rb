@@ -37,8 +37,8 @@ class ModernBertTest < Minitest::Test
     assert c.global?(0)
     refute c.global?(1)
     assert c.global?(3)
-    assert_equal 160_000.0, c.theta(0)
-    assert_equal 10_000.0, c.theta(1)
+    assert_in_delta(160_000.0, c.theta(0))
+    assert_in_delta(10_000.0, c.theta(1))
   end
 
   # The claim: every parameter the published model holds is one this graph
@@ -103,9 +103,9 @@ class ModernBertTest < Minitest::Test
     encoder = graph(seq:)
     Torobi::GraphConfig.new(
       models: { m: encoder },
-      objective: Torobi.objective(m: encoder) { |g|
+      objective: Torobi.objective(m: encoder) do |g|
         g.output :loss, g.mean(g.from_model(:m, :hidden).square)
-      }
+      end
     )
   end
 
@@ -161,6 +161,7 @@ class ModernBertTest < Minitest::Test
     skip "cl-nagoya/ruri-v3-130m is not in the cache (set RURI_V3_130M)" unless dir
 
     reference = forward_oracle
+
     assert_equal "mean", reference.dig("settings", "pooling")
     assert reference.dig("settings", "normalized")
 
@@ -195,9 +196,9 @@ class ModernBertTest < Minitest::Test
     encoder = graph(seq:)
     session_config = Torobi::GraphConfig.new(
       models: { m: encoder },
-      objective: Torobi.objective(m: encoder) { |g|
+      objective: Torobi.objective(m: encoder) do |g|
         g.output :loss, g.mean(g.from_model(:m, :hidden))
-      }
+      end
     )
     Torobi::Session.open(session_config,
                          pretrained: { m: File.join(dir, "model.safetensors") }) do |s|
@@ -279,9 +280,9 @@ class ModernBertTest < Minitest::Test
     half = config.local_attention / 2
     w = Torobi::Models::ModernBERT.window(config, seq:).to_a.each_slice(seq).to_a
 
-    assert_equal 0.0, w[0][half], "the far edge of the window is open"
+    assert_in_delta(0.0, w[0][half], 0.001, "the far edge of the window is open")
     assert_operator w[0][half + 1], :<, 0, "one past it is not"
-    assert_equal 0.0, w[200][200 - half]
+    assert_in_delta(0.0, w[200][200 - half])
     assert_operator w[200][200 - half - 1], :<, 0
     assert_operator w[200][200 + half], :>=, 0.0
   end

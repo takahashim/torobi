@@ -45,9 +45,9 @@ def child(run, dir)
   encoder = Torobi::Models::ModernBERT.graph(config, seq: SEQ)
   graph = Torobi::GraphConfig.new(
     models: { m: encoder },
-    objective: Torobi.objective(m: encoder) { |g|
+    objective: Torobi.objective(m: encoder) do |g|
       g.output :loss, g.mean(g.from_model(:m, :hidden).square)
-    }
+    end
   )
   ids = [Array.new(SEQ) { |i| (i * 137) + 11 }]
   batch = Torobi::Models::ModernBERT.batch(config, ids, seq: SEQ)
@@ -71,13 +71,11 @@ def child(run, dir)
     puts format("on disk:     %.0f MB", megabytes(to))
     puts format("the read-back is at most %.0f%% of a checkpoint", 100.0 * back / again)
     puts format("a step is %.3fs, so a checkpoint every 200 steps costs %.2f%% of the run",
-                (step = timed { s.step!(batch) }), 100.0 * again / (200 * step))
+                step = timed { s.step!(batch) }, 100.0 * again / (200 * step))
   end
 end
 
-if ENV[Torobi::Runner::DIRECTORY_VARIABLE]
-  Torobi::Runner.child! { |run| child(run, ARGV.fetch(0)) }
-end
+Torobi::Runner.child! { |run| child(run, ARGV.fetch(0)) } if ENV[Torobi::Runner::DIRECTORY_VARIABLE]
 
 dir = ARGV.fetch(0) { abort "usage: checkpoint.rb <ruri-v3-130m-dir>" }
 run_dir = File.join(Dir.tmpdir, "torobi-checkpoint-#{Process.pid}")

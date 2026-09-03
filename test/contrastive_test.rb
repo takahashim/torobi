@@ -68,9 +68,9 @@ class ContrastiveTest < Minitest::Test
       model = embedder(rows: ROWS)
       Torobi::GraphConfig.new(
         models: { m: model },
-        objective: Torobi.objective(m: model) { |g|
+        objective: Torobi.objective(m: model) do |g|
           g.output :loss, g.mean(mnrl(g, g.from_model(:m, :embedding)))
-        }
+        end
       )
     end
   end
@@ -83,9 +83,9 @@ class ContrastiveTest < Minitest::Test
       model = embedder
       Torobi::GraphConfig.new(
         models: { m: model },
-        objective: Torobi.objective(m: model) { |g|
+        objective: Torobi.objective(m: model) do |g|
           g.output :loss, g.sum(g.from_model(:m, :embedding) * g.from_batch(:seed, [nil, nil]))
-        }
+        end
       )
     end
   end

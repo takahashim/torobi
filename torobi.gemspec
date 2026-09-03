@@ -16,6 +16,7 @@ Gem::Specification.new do |spec|
                      "known architectures locally, without owning the training loop."
   spec.homepage = "https://github.com/takahashim/torobi"
   spec.license  = "MIT"
+  spec.metadata = { "rubygems_mfa_required" => "true" }
   spec.required_ruby_version = ">= 3.2"
 
   # The extension is built from source at install time, so the crates and
@@ -23,12 +24,15 @@ Gem::Specification.new do |spec|
   # because it is the record of what the engine is built against.
   spec.files = Dir["lib/**/*.rb", "config/ops.yml", "ext/**/*.{rs,rb,toml,json}",
                    "engine/**/*.{rs,toml}", "Cargo.toml", "Cargo.lock",
-                   "README.md", "LICENSE", "docs/plan.md", "docs/vendoring.md"]
+                   "README.md", "CHANGELOG.md", "LICENSE", "docs/plan.md",
+                   "docs/vendoring.md"]
   spec.require_paths = ["lib"]
   spec.extensions = ["ext/torobi/extconf.rb"]
 
   spec.add_development_dependency "minitest", "~> 5.0"
+  spec.add_development_dependency "rake", "~> 13.0"
   spec.add_development_dependency "rake-compiler", "~> 1.2"
   spec.add_development_dependency "rb_sys", "~> 0.9"
-  spec.add_development_dependency "rake", "~> 13.0"
+  spec.add_development_dependency "rubocop", "~> 1.80"
+  spec.add_development_dependency "rubocop-minitest", "~> 0.38"
 end

@@ -54,6 +54,7 @@ class HooksTest < Minitest::Test
       s.on(:span_end) { |e| order << [:span, e.step] }
       s.run([batch] * 3)
     end
+
     assert_equal [[:first, 1], [:first, 2], [:second, 2], [:first, 3], [:span, 3]], order
   end
 
@@ -66,6 +67,7 @@ class HooksTest < Minitest::Test
         e.session.adjust(lr: 0.05)
       end
       s.run([batch] * 2)
+
       assert_in_delta 0.05, s.lr
     end
     assert_equal 2, seen.step
@@ -91,6 +93,7 @@ class HooksTest < Minitest::Test
       assert_raises(RuntimeError) { s.run([batch] * 10) }
       assert_equal 2, s.step
       s.step!(batch)
+
       assert_equal 3, s.step
     end
   end
@@ -109,6 +112,7 @@ class HooksTest < Minitest::Test
       s.use(Torobi::Policies::Progress.new { |step, loss| ticks << [step, loss] }, every: 2)
       s.run([batch] * 4)
     end
+
     assert_equal [2, 4], ticks.map(&:first)
     assert(ticks.all? { |_, loss| loss.finite? })
   end
@@ -120,9 +124,11 @@ class HooksTest < Minitest::Test
         s.use(best)
         s.run([batch] * 6)
       end
+
       assert_path_exists best.path
       assert_operator best.best, :<, 1.0
       manifest = JSON.parse(File.read(File.join(best.path, "manifest.json")))
+
       assert_operator manifest.fetch("step"), :<=, 6
     end
   end
@@ -134,6 +140,7 @@ class HooksTest < Minitest::Test
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.3 }) do |s|
       s.use(Torobi::Policies::LrOnPlateau.new(factor: 0.5, patience: 3, by: 1e-3))
       s.run([batch] * 30)
+
       assert_operator s.lr, :<, 0.3, "the rate should have come down on the plateau"
       assert_operator s.lr, :>=, 1e-6
     end
@@ -173,7 +180,7 @@ class HooksTest < Minitest::Test
   # machine reacts to.
   def test_a_memory_guard_under_the_limit_is_quiet_and_watches_the_peak
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
-      guard = Torobi::Policies::MemoryGuard.new(4 * 1024**3)
+      guard = Torobi::Policies::MemoryGuard.new(4 * (1024**3))
       s.use(guard)
       s.repeat(batch, steps: 3)
 
@@ -193,8 +200,10 @@ class HooksTest < Minitest::Test
     end
     entries = Torobi::Journal.read(io.string)
     adjusts = entries.select { |e| e["kind"] == "adjust" && e.key?("lr") }
+
     refute_empty adjusts, "the policy's adjustment should be recorded"
     observes = entries.select { |e| e["kind"] == "observe" && e.key?("plateau_at") }
+
     refute_empty observes, "and so should what it decided on"
   end
 
@@ -215,6 +224,7 @@ class HooksTest < Minitest::Test
       assert_equal 4, s.step, "the step still counts: its batch was consumed"
 
       s.run([batch] * 3)
+
       assert_predicate s.loss, :finite?, "the run carried straight on"
     end
   end

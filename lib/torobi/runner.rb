@@ -82,7 +82,7 @@ module Torobi
       @read = Reading.new(journal_path)
     end
 
-    attr_reader :dir, :pid
+    attr_reader :dir, :pid, :outcome
 
     def journal_path = File.join(@dir, JOURNAL)
     def checkpoint = File.join(@dir, CHECKPOINT)
@@ -165,8 +165,6 @@ module Torobi
     rescue Errno::ECHILD
       @outcome ||= Outcome.new(status: nil, note: nil)
     end
-
-    def outcome = @outcome
 
     private
 
@@ -342,7 +340,10 @@ module Torobi
       # The journal to hand `Session.open(io:)`. Appended to, so a resumed
       # run adds to the record rather than replacing it.
       def journal
-        @journal ||= File.open(File.join(@dir, JOURNAL), "a").tap { |io| io.sync = true }
+        # Held open for the length of the run rather than opened around
+        # each write, so the block form is not what this wants.
+        @journal ||= File.open(File.join(@dir, JOURNAL), "a") # rubocop:disable Style/FileOpen
+                         .tap { |io| io.sync = true }
       end
 
       # Whether the parent has asked this run to stop. The loop checks it

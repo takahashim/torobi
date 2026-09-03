@@ -97,9 +97,7 @@ if ENV[Torobi::Runner::DIRECTORY_VARIABLE]
 end
 
 dir, train, steps = ARGV
-unless dir && train
-  abort "usage: overfit.rb <ruri-v3-130m-dir> <train.jsonl> [steps]"
-end
+abort "usage: overfit.rb <ruri-v3-130m-dir> <train.jsonl> [steps]" unless dir && train
 
 run_dir = File.join(Dir.tmpdir, "torobi-overfit-#{Process.pid}")
 runner = Torobi::Runner.new([RbConfig.ruby, __FILE__, dir, train, steps.to_s],

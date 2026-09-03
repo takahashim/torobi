@@ -12,8 +12,9 @@ class DslTest < Minitest::Test
 
   def test_a_linear_model_lowers_to_named_parameters_and_primitives
     graph = linear_model
+
     assert_equal %w[linear.weight linear.bias], graph.parameters.map(&:path)
-    assert_equal [2, 4], graph.parameters[0].shape   # PyTorch layout [out, in]
+    assert_equal [2, 4], graph.parameters[0].shape # PyTorch layout [out, in]
     assert_equal %w[parameter transpose matmul parameter add], graph.nodes.map(&:op)
     assert_equal [nil, 2], graph.nodes.last.shape
     assert_equal :f32, graph.nodes.last.dtype
@@ -31,6 +32,7 @@ class DslTest < Minitest::Test
   def test_the_same_definition_yields_the_same_digest
     a = Torobi::GraphConfig.new(models: { "m" => scalar_model })
     b = Torobi::GraphConfig.new(models: { "m" => scalar_model })
+
     assert_equal a.digest, b.digest
   end
 
@@ -38,10 +40,11 @@ class DslTest < Minitest::Test
     graph = Torobi.graph do |g|
       h = g.input :h, [nil, nil, 8]
       2.times do |i|
-        g.scope("layers.#{i}") { h = h + g.linear(h, 8, name: "ff", bias: false) }
+        g.scope("layers.#{i}") { h += g.linear(h, 8, name: "ff", bias: false) }
       end
       g.output :out, h
     end
+
     assert_equal %w[layers.0.ff.weight layers.1.ff.weight], graph.parameters.map(&:path)
   end
 
@@ -76,7 +79,8 @@ class DslTest < Minitest::Test
       g.output :out, a + b + c
     end
     slices = graph.nodes.select { |n| n.op == "slice" }
-    assert_equal [0, 2, 4], slices.map { |n| n.attributes["start"] }
+
+    assert_equal([0, 2, 4], slices.map { |n| n.attributes["start"] })
     assert_equal [nil, 2], slices.first.shape
 
     e = assert_raises(Torobi::ConfigError) do
@@ -90,6 +94,7 @@ class DslTest < Minitest::Test
       ids = g.input :ids, [nil, nil], dtype: :i32
       g.output :out, g.embedding(ids, vocab: 100, dim: 16, name: "emb")
     end
+
     assert_equal [nil, nil, 16], graph.nodes.last.shape
 
     e = assert_raises(Torobi::ConfigError) do
@@ -106,24 +111,27 @@ class DslTest < Minitest::Test
       s = g.input :student_logits, [nil]
       t = g.input :teacher_logits, [nil]
       labels = g.input :label_loss, [nil]
-      g.output :out, g.mean(g.mse(s, t) * 0.7 + g.mean(labels) * 0.3)
+      g.output :out, g.mean((g.mse(s, t) * 0.7) + (g.mean(labels) * 0.3))
     end
+
     assert_equal [], graph.nodes.last.shape
   end
 
   def test_a_modernbert_shaped_block_builds_and_keeps_its_shape
-    dim, heads = 8, 2
+    dim = 8
+    heads = 2
     graph = Torobi.graph do |g|
       h = g.input :h, [nil, nil, dim]
       g.scope "layers.0" do
         qkv = g.linear(h, dim * 3, name: "wqkv", bias: false)
         q, k, v = qkv.split(3, axis: -1)
         a = g.sdpa(q.rope(theta: 10_000), k.rope(theta: 10_000), v, scale: 1.0 / heads)
-        h = h + g.linear(a, dim, name: "wo", bias: false)
-        h = h + g.geglu(g.layer_norm(h, name: "mlp_norm"), dim * 2, name: "mlp")
+        h += g.linear(a, dim, name: "wo", bias: false)
+        h += g.geglu(g.layer_norm(h, name: "mlp_norm"), dim * 2, name: "mlp")
       end
       g.output :out, h
     end
+
     assert_equal [nil, nil, dim], graph.nodes.last.shape
     assert_includes graph.parameters.map(&:path), "layers.0.mlp.wi.weight"
     assert_includes graph.parameters.map(&:path), "layers.0.mlp_norm.weight"

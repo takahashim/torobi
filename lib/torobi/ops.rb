@@ -41,6 +41,7 @@ module Torobi
         unless params == self.params
           raise ConfigError, "#{where}: #{name} takes #{self.params} parameter(s), got #{params}"
         end
+
         attrs.each_key do |key|
           unless attributes.key?(key)
             raise ConfigError, "#{where}: #{name} has no attribute #{key.inspect}"

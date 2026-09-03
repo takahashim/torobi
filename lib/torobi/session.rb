@@ -173,8 +173,8 @@ module Torobi
     # section 8.4).
     #
     #   s.on(:step, every: 200) { |e| bar.update(e.step, e.loss) }
-    def on(event, every: 1, &block)
-      @hooks.on(event, every:, &block)
+    def on(event, every: 1, &)
+      @hooks.on(event, every:, &)
       self
     end
 
@@ -262,6 +262,7 @@ module Torobi
     # is where a caller records or decides.
     def run(batches)
       raise ArgumentError, "this session is closed" if closed?
+
       empty = true
 
       if @hooks.firing?

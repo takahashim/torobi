@@ -83,7 +83,7 @@ class GradCacheTest < Minitest::Test
     rows.each_slice(per_part).map { |slice| { x: Torobi::TensorData.nested(slice) } }
   end
 
-  def open(graph, &)
+  def open_encoder(graph, &)
     Torobi::Session.open(Torobi::GraphConfig.new(models: { m: graph }),
                          weights:, optimizer: { kind: :sgd, lr: 0.5 }, &)
   end
@@ -96,7 +96,7 @@ class GradCacheTest < Minitest::Test
   end
 
   def cache_step(parts)
-    open(encoder) do |session|
+    open_encoder(encoder) do |session|
       loss_over(scores) do |loss|
         cache = Torobi::GradCache.new(session, loss:, tap: "m.e",
                                       into: :vectors, seed: :seed)
@@ -107,7 +107,7 @@ class GradCacheTest < Minitest::Test
 
   def test_a_cached_step_lands_where_the_whole_batch_would
     data = rows
-    direct, direct_weight = open(whole) do |s|
+    direct, direct_weight = open_encoder(whole) do |s|
       [s.step!({ x: Torobi::TensorData.nested(data) }), s.fetch("m.l.weight").to_a]
     end
 
@@ -136,7 +136,7 @@ class GradCacheTest < Minitest::Test
   end
 
   def test_a_step_with_no_parts_is_refused
-    open(encoder) do |session|
+    open_encoder(encoder) do |session|
       loss_over(scores) do |loss|
         cache = Torobi::GradCache.new(session, loss:, tap: "m.e", into: :vectors, seed: :seed)
 

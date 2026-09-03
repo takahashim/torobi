@@ -12,7 +12,8 @@ module Torobi
       def check!(dtype, where:)
         return dtype if ALL.include?(dtype)
 
-        raise ConfigError, "#{where}: unknown dtype #{dtype.inspect}; expected one of #{ALL.join(", ")}"
+        raise ConfigError,
+              "#{where}: unknown dtype #{dtype.inspect}; expected one of #{ALL.join(", ")}"
       end
     end
   end

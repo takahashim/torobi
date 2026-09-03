@@ -30,7 +30,9 @@ class RngTest < Minitest::Test
   def weights
     rng = Random.new(1)
     { params: {
-      "m.hidden.weight" => { shape: [DIM, DIM], data: Array.new(DIM * DIM) { rng.rand(-0.3..0.3) } },
+      "m.hidden.weight" => { shape: [DIM, DIM], data: Array.new(DIM * DIM) do
+        rng.rand(-0.3..0.3)
+      end },
       "m.hidden.bias" => { shape: [DIM], data: Array.new(DIM, 0.0) },
       "m.out.weight" => { shape: [1, DIM], data: Array.new(DIM) { rng.rand(-0.3..0.3) } },
       "m.out.bias" => { shape: [1], data: [0.0] }
@@ -56,11 +58,13 @@ class RngTest < Minitest::Test
 
   def test_the_same_seed_draws_the_same_masks
     all = batches(6)
+
     assert_equal losses(seed: 7, all:), losses(seed: 7, all:)
   end
 
   def test_a_different_seed_draws_different_ones
     all = batches(6)
+
     refute_equal losses(seed: 7, all:), losses(seed: 8, all:),
                  "dropout should depend on the seed"
   end
@@ -69,6 +73,7 @@ class RngTest < Minitest::Test
     Torobi::Session.open(config, weights: weights) do |s|
       assert_equal 0, s.seed, "a session starts from a stated seed, not from chance"
       s.adjust(seed: 42)
+
       assert_equal 42, s.seed
     end
   end
@@ -94,6 +99,7 @@ class RngTest < Minitest::Test
       end
       resumed = Torobi::Session.open(config, weights: weights, optimizer:) do |s|
         s.restore(path)
+
         assert_equal 5, s.seed, "the seed came back with the checkpoint"
         s.run(all.drop(4))
         s.parameter_paths.to_h { |p| [p, s.fetch(p).to_a] }
@@ -129,6 +135,7 @@ class RngTest < Minitest::Test
       s.adjust(seed: 3)
       s.step!(batch)
     end
+
     assert_operator loss, :>, 0.0, "the two dropouts drew the same mask"
   end
 
@@ -152,6 +159,7 @@ class RngTest < Minitest::Test
       s.adjust(seed: 99)
       all.map { |b| s.step!(b) }
     end
+
     assert_equal without, other_seed, "with p = 0 the seed cannot matter"
   end
 end

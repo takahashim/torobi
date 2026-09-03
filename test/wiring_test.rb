@@ -31,6 +31,7 @@ class WiringTest < Minitest::Test
   def test_an_objective_reads_named_model_outputs
     config = distillation
     inputs = config.objective.inputs
+
     assert_equal %w[student.logits teacher.logits], inputs.map(&:name)
     assert(inputs.all?(&:from_model?))
     assert_equal({ "model" => "student", "output" => "logits" }, inputs.first.source)
@@ -43,12 +44,14 @@ class WiringTest < Minitest::Test
 
   def test_parameters_are_namespaced_and_only_the_trained_are_differentiated
     config = distillation
+
     assert_equal ["student.head.weight", "student.head.bias",
                   "teacher.head.weight", "teacher.head.bias"],
                  config.parameters.map(&:qualified_path)
     assert_equal [0, 1], config.argnums, "only the student's parameters"
 
     both = distillation(train: %i[student teacher])
+
     assert_equal [0, 1, 2, 3], both.argnums
   end
 
@@ -70,6 +73,7 @@ class WiringTest < Minitest::Test
       assert_in_delta 12.5, s.evaluate(batch), 1e-6
       assert_empty s.trainable
       grads = s.field_gradients(batch, of: [:x])
+
       grads["x"].to_a.zip([3.0, 4.0]).each { |got, want| assert_in_delta want, got, 1e-6 }
 
       e = assert_raises(Torobi::StepError) { s.step!(batch) }
@@ -120,6 +124,7 @@ class WiringTest < Minitest::Test
 
       # The student learned the teacher's function...
       student_w = s.fetch("student.head.weight").to_a
+
       assert_in_delta 3.0, student_w[0], 5e-2
       assert_in_delta(-2.0, student_w[1], 5e-2)
       assert_in_delta 1.0, s.fetch("student.head.bias").to_a[0], 5e-2
@@ -168,9 +173,11 @@ class WiringTest < Minitest::Test
   def test_stop_gradient_is_in_the_graph_where_it_was_asked_for
     config = distillation
     ops = config.objective.nodes.map(&:op)
+
     assert_includes ops, "stop_gradient"
     # It sits between the teacher's output and the loss.
     node = config.objective.nodes.find { |n| n.op == "stop_gradient" }
+
     assert_equal ["input:1"], node.inputs
   end
 end

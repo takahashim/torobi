@@ -65,6 +65,7 @@ class CheckpointTest < Minitest::Test
       s.checkpoint!(File.join(@dir, "half"))
       state_of(s)
     end
+
     assert_equal 5, Torobi::Session.open(config, weights: weights, optimizer:) { |s|
       s.restore(File.join(@dir, "half"))
       s.step
@@ -83,6 +84,7 @@ class CheckpointTest < Minitest::Test
                         "#{path}[#{i}] after resuming"
       end
     end
+
     assert_equal STEPS, Torobi::Session.open(config, weights: weights, optimizer:) { |s|
       s.restore(File.join(@dir, "half"))
       s.run(all.drop(5))
@@ -109,11 +111,12 @@ class CheckpointTest < Minitest::Test
 
     # A run given the checkpoint's parameters but not its optimizer state.
     parameters = JSON.parse(File.read(File.join(path, "manifest.json")))
+
     assert_equal 3, parameters.fetch("step")
-    fresh_weights = { params: Torobi::Session.open(config, weights: weights, optimizer:) { |s|
+    fresh_weights = { params: Torobi::Session.open(config, weights: weights, optimizer:) do |s|
       s.restore(path)
       s.parameter_paths.to_h { |p| [p, s.fetch(p)] }
-    } }
+    end }
     without_state = Torobi::Session.open(config, weights: fresh_weights, optimizer:) do |s|
       s.run(all.drop(3))
       state_of(s)
@@ -149,9 +152,9 @@ class CheckpointTest < Minitest::Test
     end
     entries = Torobi::Checkpoint.manifest(written).fetch("parameters")
 
-    assert_equal %w[m.l.weight m.l.bias], entries.map { _1["path"] }
-    assert_equal [[1, 2], [1]], entries.map { _1["shape"] }
-    assert_equal %w[f32 f32], entries.map { _1["dtype"] }
+    assert_equal(%w[m.l.weight m.l.bias], entries.map { _1["path"] })
+    assert_equal([[1, 2], [1]], entries.map { _1["shape"] })
+    assert_equal(%w[f32 f32], entries.map { _1["dtype"] })
   end
 
   def test_a_checkpoint_records_where_in_the_data_the_run_was
@@ -251,8 +254,8 @@ class CheckpointTest < Minitest::Test
     assert_equal 2, manifest.fetch("step")
     assert_equal 2, manifest.fetch("optimizer_steps")
     assert_equal "adamw", manifest.dig("optimizer", "kind")
-    assert_equal %w[m.l.weight m.l.bias], manifest.fetch("parameters").map { _1["path"] }
-    assert_equal [[1, 2], [1]], manifest.fetch("parameters").map { _1["shape"] }
+    assert_equal(%w[m.l.weight m.l.bias], manifest.fetch("parameters").map { _1["path"] })
+    assert_equal([[1, 2], [1]], manifest.fetch("parameters").map { _1["shape"] })
     assert(manifest.fetch("parameters").all? { _1["trained"] })
     refute_empty manifest.dig("build", "torobi_engine")
 
@@ -266,10 +269,12 @@ class CheckpointTest < Minitest::Test
       s.run(batches(2))
       s.checkpoint!(File.join(@dir, "sgd"))
     end
+
     refute_path_exists File.join(@dir, "sgd", "optimizer.safetensors")
 
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
       s.restore(File.join(@dir, "sgd"))
+
       assert_equal 2, s.step
     end
   end
@@ -317,11 +322,13 @@ class CheckpointTest < Minitest::Test
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :adamw, lr: 0.05 }) do |s|
       s.run(batches(2))
       s.checkpoint!(path)
+
       refute_path_exists "#{path}.writing", "the staging directory should be gone"
 
       # Writing again over a complete checkpoint replaces it wholesale.
       s.run(batches(2))
       s.checkpoint!(path)
+
       assert_equal 4, JSON.parse(File.read(File.join(path, "manifest.json"))).fetch("step")
     end
   end

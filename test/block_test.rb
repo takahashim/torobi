@@ -46,9 +46,9 @@ class BlockTest < Minitest::Test
                         to_heads.call(k).rope(theta: 10_000.0),
                         to_heads.call(v))
       folded = attended.transpose(axes: [0, 2, 1, 3]).reshape(shape: [-1, SEQ, DIM])
-      x = x + g.linear(folded, DIM, name: "wo", bias: false)
+      x += g.linear(folded, DIM, name: "wo", bias: false)
 
-      x = x + g.geglu(g.layer_norm(x, name: "mlp_norm"), DIM * 2, name: "mlp")
+      x += g.geglu(g.layer_norm(x, name: "mlp_norm"), DIM * 2, name: "mlp")
       g.output :loss, g.mse(x, target)
     end
   end
@@ -66,9 +66,9 @@ class BlockTest < Minitest::Test
       k = g.linear(normed, DIM, name: "k", bias: false)
       v = g.linear(normed, DIM, name: "v", bias: false)
       attended = g.sdpa(q, k, v)
-      x = x + g.linear(attended, DIM, name: "o", bias: false)
+      x += g.linear(attended, DIM, name: "o", bias: false)
 
-      x = x + g.geglu(g.layer_norm(x, name: "mlp_norm"), DIM * 2, name: "mlp")
+      x += g.geglu(g.layer_norm(x, name: "mlp_norm"), DIM * 2, name: "mlp")
       g.output :loss, g.mse(x, target)
     end
   end
@@ -145,7 +145,7 @@ class BlockTest < Minitest::Test
       analytic = s.gradients(b)
       # Without this the comparison could pass on gradients that are all
       # zero, which would agree with anything.
-      biggest = analytic.values.flat_map { |g| g.to_a }.map(&:abs).max
+      biggest = analytic.values.flat_map(&:to_a).map(&:abs).max
 
       assert_operator biggest, :>, 1e-2, "the block should have gradients worth checking"
       assert(analytic.all? { |_, g| g.to_a.any? { |v| v.abs > 1e-6 } },
@@ -184,7 +184,7 @@ class BlockTest < Minitest::Test
   # (loss(w + h) - loss(w - h)) / 2h, with dropout off (evaluate draws no
   # randomness, which is what makes this comparable at all).
   def central_difference(session, path, held, index, step: 1e-2)
-    moved = ->(delta) do
+    moved = lambda do |delta|
       data = held.to_a
       data[index] += delta
       session.put(path, Torobi::TensorData.from_a(held.shape, data))

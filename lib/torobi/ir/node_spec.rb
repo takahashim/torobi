@@ -18,7 +18,7 @@ module Torobi
         raise ConfigError, "node #{id}: op must not be empty" if op.empty?
 
         name = name&.to_s
-        raise ConfigError, "node #{id}: name must not be empty" if name&.empty?
+        raise ConfigError, "node #{id}: name must not be empty" if name && name.empty?
 
         inputs = Freeze.deep(inputs.map { |ref| -ref.to_s })
         parameters = Freeze.deep(parameters.map { |pid| Integer(pid) })
