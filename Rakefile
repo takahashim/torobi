@@ -6,6 +6,18 @@ require "rb_sys/extensiontask"
 
 GEMSPEC = Gem::Specification.load("torobi.gemspec")
 
+# The MLX binary every cargo build here links, fetched once and checked
+# against a recorded digest (ext/torobi/mlx_prebuilt.rb). `rake compile`
+# reaches it through extconf.rb; the engine's own builds reach it here,
+# and both share one copy.
+require_relative "ext/torobi/mlx_prebuilt"
+
+def with_mlx
+  ENV["MLX_PREBUILT_PATH"] = MlxPrebuilt.ensure!
+rescue MlxPrebuilt::Refused => e
+  abort "torobi: #{e.message}"
+end
+
 RbSys::ExtensionTask.new("torobi", GEMSPEC) do |ext|
   ext.lib_dir = "lib/torobi"
   ext.ext_dir = "ext/torobi"
@@ -39,6 +51,7 @@ end
 # and `rust_test:facade` below is what shows the facade actually works.
 desc "run the engine's Rust tests"
 task :rust_test do
+  with_mlx
   sh "cargo test -p torobi-engine -- --test-threads=1"
 end
 
@@ -48,6 +61,7 @@ namespace :rust_test do
   # parallelism; before the runtime moved into the engine, this crashed.
   desc "run the engine's facade tests in parallel, which is the point of the runtime"
   task :facade do
+    with_mlx
     sh "cargo test -p torobi-engine --lib session::"
   end
 end
@@ -115,6 +129,7 @@ task oracle: ["oracle:ruri", "oracle:reranker", "oracle:forward"]
 namespace :engine do
   desc "run the engine's command line against a closed-form oracle"
   task :check do
+    with_mlx
     sh "cargo build -q -p torobi-engine --bin torobi-engine"
     sh RbConfig.ruby, "engine/check/generate.rb"
     sh RbConfig.ruby, "engine/check/verify.rb"
