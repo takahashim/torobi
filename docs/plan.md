@@ -738,3 +738,39 @@ session を開かずに読む口として `Torobi::Checkpoint` と `Native.check
 足した。どの checkpoint から再開するかを決めるのに、session を 1 つ開く必要はない。
 
 この時点で Ruby 143 件 / Rust 74 件。
+
+### 15.7 session の並行契約(2026-09-03)
+
+`notes/SESSION_CONCURRENCY_SPEC.md` を実装と突き合わせ、Draft を Accepted に直した。
+そのとき **既存の欠陥が 1 つ再現した**。
+
+`Timeout` や `Thread#raise` を普通の `run` に掛けると、session が二度と使えなくなる。
+CRuby は nogvl 領域を抜けるときに保留中の割り込みを送出し、その longjmp が Rust の
+フレームを飛ばす。`MutexGuard` を境界の向こうまで保持していたので drop されず、
+ミューテックスが誰にも保持されないまま閉じたままになる。`close` すら通らないので
+device memory も GC 待ちになっていた。既存テストが捕まえていなかったのは、span の
+中断テストが Ruby の block から例外を上げており、**非同期割り込みと同期例外は別経路**
+だからである。
+
+直し方は 3 つ組である。
+
+1. engine を slot から取り出し、使い、戻すまでを **GVL 解放区間の中で完結**させる。
+   境界の前には何も保持せず、後には plain value を読む以外に何も残さない。
+2. `rb_nogvl(..., RB_NOGVL_INTR_FAIL)` に切り替え、区間の出口で割り込みを見ないように
+   する。ただし入口の拒否は `RUBY_VM_INTERRUPTED_ANY` が scheduler の timer でも立つ
+   ため大半が空振りなので、`rb_thread_check_ints` を挟んだ上限付き再試行にし、
+   最後は GVL 保持のまま実行して必ず終わらせる。
+3. Ruby 側で **engine の変更とその journal 記録を `Thread.handle_interrupt` で括る**。
+   これが無いと engine は step を取ったのに記録が 1 手遅れ、replay が食い違う。
+
+あわせて `Busy` / `Interrupted` / `SessionPoisoned` / `SessionClosed` を型にし
+(`Busy` だけが `StepError` の下: 「engine は拒否したが session は自分のもの」が真な
+のはこれだけ)、`step` / `loss` / `lr` / `seed` を snapshot から読むようにした。
+進捗表示や metrics のスレッドが `Busy` を受け取る形をやめている。
+
+spec から**落としたもの**: `Arc<SessionCore>` (保持者が 1 つしかない)、`ArcSwap`
+(依存を増やす)、cancellation flag と unblock function (`run` は Ruby が step 単位で
+駆動しているので Ruby のループ自体が cancellation point)、実行中の非同期 `close`
+(single writer 契約の外)。
+
+この時点で Ruby 150 件 / Rust 74 件。
