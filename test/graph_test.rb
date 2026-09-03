@@ -7,8 +7,8 @@ class GraphTest < Minitest::Test
 
   def test_a_well_formed_graph_is_representable
     graph = Torobi::TestGraphs.linear_graph
-    assert_equal 2, graph.nodes.size
-    assert_equal({ "y" => "node:1" }, graph.outputs)
+    assert_equal 3, graph.nodes.size
+    assert_equal({ "loss" => "node:2" }, graph.outputs)
   end
 
   def test_ids_must_be_consecutive_from_zero

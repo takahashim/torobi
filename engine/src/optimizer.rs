@@ -7,7 +7,6 @@
 
 use anyhow::Result;
 use mlx_rs::ops::zeros_like;
-use mlx_rs::transforms::eval;
 use mlx_rs::Array;
 use serde::{Deserialize, Serialize};
 
@@ -69,6 +68,7 @@ impl Config {
 
 /// An optimizer and its slots. One slot set per differentiated parameter,
 /// in the order the config declared them.
+#[derive(Clone)]
 pub struct Optimizer {
     config: Config,
     /// AdamW's first and second moments. Empty for SGD.
@@ -119,8 +119,39 @@ impl Optimizer {
         self.t = t;
     }
 
+    /// Whether this rule keeps per-parameter state. A checkpoint that
+    /// disagrees with this is refused rather than restored into a shape
+    /// the next step would index past.
+    pub fn wants_slots(&self) -> bool {
+        matches!(self.config, Config::AdamW { .. })
+    }
+
+    /// The optimizer after one update, and `params` written in place.
+    /// Returns a new value rather than mutating, so the caller can evaluate
+    /// everything before committing to it (see `Session::update`).
+    pub fn next(&self, params: &mut [Array], argnums: &[i32], grads: &[Array]) -> Result<Self> {
+        let mut next = self.clone();
+        next.apply(params, argnums, grads)?;
+        Ok(next)
+    }
+
     /// Applies one update in place. `grads` is parallel to `argnums`.
-    pub fn apply(&mut self, params: &mut [Array], argnums: &[i32], grads: &[Array]) -> Result<()> {
+    fn apply(&mut self, params: &mut [Array], argnums: &[i32], grads: &[Array]) -> Result<()> {
+        anyhow::ensure!(
+            argnums.len() == grads.len(),
+            "{} gradients for {} differentiated parameters",
+            grads.len(),
+            argnums.len()
+        );
+        if self.wants_slots() {
+            anyhow::ensure!(
+                self.m.len() == argnums.len() && self.v.len() == argnums.len(),
+                "the optimizer has {} slots for {} differentiated parameters; \
+                 this state did not come from this session",
+                self.m.len(),
+                argnums.len()
+            );
+        }
         self.t += 1;
         match self.config {
             Config::Sgd { lr } => {
@@ -175,7 +206,6 @@ impl Optimizer {
                 }
             }
         }
-        eval(params.iter().chain(self.m.iter()).chain(self.v.iter()))?;
         Ok(())
     }
 }

@@ -196,6 +196,108 @@ impl Session {
         })
     }
 
+    pub fn step(&self) -> usize {
+        self.step
+    }
+
+    pub fn loss(&self) -> f32 {
+        self.last_loss
+    }
+
+    pub fn lr(&self) -> f32 {
+        self.optimizer.config().lr()
+    }
+
+    /// A knob: effect begins with the next step.
+    pub fn set_lr(&mut self, lr: f32) {
+        self.optimizer.config_mut().set_lr(lr);
+    }
+
+    /// What update rule this session runs, as data.
+    pub fn optimizer_config(&self) -> &OptimizerConfig {
+        self.optimizer.config()
+    }
+
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Restarts the RNG. A knob like any other: after this the draws are a
+    /// function of the new seed alone.
+    pub fn set_seed(&mut self, seed: u64) -> Result<()> {
+        self.seed = seed;
+        self.rng = mlx_rs::random::key(seed)?;
+        Ok(())
+    }
+
+    /// One step on `batch`: forward, backward, optimizer update. Long-
+    /// running and free of any Ruby, so the extension calls it with the GVL
+    /// released.
+    pub fn run_step(&mut self, batch: &Batch) -> Result<f32> {
+        let fields = self.bind(batch)?;
+        self.update(&fields)
+    }
+
+    /// One step per batch. The batches are given up front, so the engine
+    /// never asks anyone for data mid-span.
+    pub fn run_steps(&mut self, batches: &[Batch]) -> Result<f32> {
+        anyhow::ensure!(!batches.is_empty(), "a span needs at least one batch");
+        for batch in batches {
+            let fields = self.bind(batch)?;
+            self.update(&fields)?;
+        }
+        Ok(self.last_loss)
+    }
+
+    /// The loss and one gradient per differentiated parameter for `batch`,
+    /// without updating anything.
+    pub fn loss_and_grads(&self, batch: &Batch) -> Result<(Array, Vec<Array>)> {
+        let fields = self.bind(batch)?;
+        self.differentiate(&fields)
+    }
+
+    /// Gradients as copies, by qualified parameter path. Only differentiated
+    /// parameters appear: a frozen model's have none.
+    pub fn gradients(&self, batch: &Batch) -> Result<Vec<(String, Tensor)>> {
+        let (_, grads) = self.loss_and_grads(batch)?;
+        self.argnums
+            .iter()
+            .zip(grads)
+            .map(|(&i, grad)| Ok((self.paths[i as usize].clone(), to_tensor(&grad)?)))
+            .collect()
+    }
+
+    /// A copy of one parameter, by qualified path. Copies, not handles:
+    /// nothing that lives on the device escapes this crate.
+    pub fn fetch(&self, path: &str) -> Result<Tensor> {
+        let index = self
+            .paths
+            .iter()
+            .position(|p| p == path)
+            .with_context(|| format!("no parameter named {path:?}"))?;
+        to_tensor(&self.params[index])
+    }
+
+    /// Qualified parameter paths, in the order the engine keeps them.
+    pub fn parameter_paths(&self) -> Vec<String> {
+        self.paths.clone()
+    }
+
+    /// Every batch field the run reads, across the models and the objective.
+    pub fn input_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .models
+            .iter()
+            .map(|m| &m.graph)
+            .chain(self.objective.iter())
+            .flat_map(|g| g.inputs.iter().filter_map(|i| i.batch_field()))
+            .map(str::to_string)
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// Writes the run's state: parameters, optimizer slots, counters, and
     /// what they belong to. Atomic (docs/plan.md section 11.2).
     pub fn save(&self, dir: &str) -> Result<String> {
@@ -221,7 +323,12 @@ impl Session {
 
     /// Restores state written by [`Session::save`], refusing anything that
     /// does not belong to this session: another description, another
-    /// optimizer, a parameter of another shape.
+    /// optimizer, a parameter of another shape, a missing slot.
+    ///
+    /// Nothing is committed until everything has been read, checked and
+    /// evaluated. A checkpoint that turns out to be wrong halfway leaves
+    /// this session exactly as it was, which is what StepError promises
+    /// (docs/plan.md section 5A.4).
     pub fn restore(&mut self, dir: &str) -> Result<()> {
         let loaded = checkpoint::read(dir)?;
         let manifest = &loaded.manifest;
@@ -262,133 +369,59 @@ impl Session {
                 array.shape(),
                 self.params[i].shape()
             );
+            anyhow::ensure!(
+                array.dtype() == self.params[i].dtype(),
+                "parameter {path:?}: checkpoint dtype {:?} is not {:?}",
+                array.dtype(),
+                self.params[i].dtype()
+            );
             params.push(array.clone());
         }
 
+        // The optimizer's slots, all of them or none. An AdamW session
+        // restored without moments used to index past the end of an empty
+        // vector on its next step.
         let (mut m, mut v) = (Vec::new(), Vec::new());
-        if !loaded.slots.is_empty() {
+        if self.optimizer.wants_slots() {
+            anyhow::ensure!(
+                !loaded.slots.is_empty(),
+                "this checkpoint has no optimizer state, and {} needs it",
+                self.optimizer.config().name()
+            );
             for &i in &self.argnums {
                 let path = &self.paths[i as usize];
-                let (slot_m, slot_v) = loaded
-                    .slots
-                    .get(path)
-                    .with_context(|| format!("the checkpoint has no optimizer state for {path:?}"))?;
+                let (slot_m, slot_v) = loaded.slots.get(path).with_context(|| {
+                    format!("the checkpoint has no optimizer state for {path:?}")
+                })?;
+                anyhow::ensure!(
+                    slot_m.shape() == self.params[i as usize].shape()
+                        && slot_v.shape() == self.params[i as usize].shape(),
+                    "optimizer state for {path:?} has the wrong shape"
+                );
                 m.push(slot_m.clone());
                 v.push(slot_v.clone());
             }
+        } else {
+            anyhow::ensure!(
+                loaded.slots.is_empty(),
+                "this checkpoint carries optimizer state, and {} has none",
+                self.optimizer.config().name()
+            );
         }
+
+        let rng = loaded.rng.context("the checkpoint has no RNG state")?;
+
+        // Everything is here and consistent; make it real before touching
+        // this session, so a failure below cannot leave it half restored.
+        eval(params.iter().chain(m.iter()).chain(v.iter()).chain(std::iter::once(&rng)))?;
 
         self.params = params;
         self.optimizer.restore(m, v, manifest.optimizer_steps);
-        self.step = manifest.step;
+        self.rng = rng;
         self.seed = manifest.seed;
-        self.rng = loaded
-            .rng
-            .context("the checkpoint has no RNG state")?;
+        self.step = manifest.step;
         self.last_loss = f32::NAN;
-        eval(self.params.iter().chain(std::iter::once(&self.rng)))?;
         Ok(())
-    }
-
-    pub fn step(&self) -> usize {
-        self.step
-    }
-
-    pub fn loss(&self) -> f32 {
-        self.last_loss
-    }
-
-    pub fn lr(&self) -> f32 {
-        self.optimizer.config().lr()
-    }
-
-    /// A knob: effect begins with the next step.
-    pub fn set_lr(&mut self, lr: f32) {
-        self.optimizer.config_mut().set_lr(lr);
-    }
-
-    pub fn seed(&self) -> u64 {
-        self.seed
-    }
-
-    /// Restarts the RNG. A knob like any other, and recorded like one:
-    /// after this the draws are a function of the new seed alone.
-    pub fn set_seed(&mut self, seed: u64) -> Result<()> {
-        self.seed = seed;
-        self.rng = mlx_rs::random::key(seed)?;
-        Ok(())
-    }
-
-    /// What update rule this session runs, as data.
-    pub fn optimizer_config(&self) -> &OptimizerConfig {
-        self.optimizer.config()
-    }
-
-    /// Qualified parameter paths, in the order the engine keeps them.
-    pub fn parameter_paths(&self) -> Vec<String> {
-        self.paths.clone()
-    }
-
-    /// Every batch field the run reads, across the models and the objective.
-    pub fn input_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .models
-            .iter()
-            .map(|m| &m.graph)
-            .chain(self.objective.iter())
-            .flat_map(|g| g.inputs.iter().filter_map(|i| i.batch_field()))
-            .map(str::to_string)
-            .collect();
-        names.sort();
-        names.dedup();
-        names
-    }
-
-    /// One step on `batch`: forward, backward, SGD update. Long-running and
-    /// free of any Ruby, so the extension calls it with the GVL released.
-    pub fn run_step(&mut self, batch: &Batch) -> Result<f32> {
-        let fields = self.bind(batch)?;
-        self.update(&fields)
-    }
-
-    /// `n` steps, each on its own batch. The batches are given up front, so
-    /// the engine never asks anyone for data mid-span.
-    pub fn run_steps(&mut self, batches: &[Batch]) -> Result<f32> {
-        anyhow::ensure!(!batches.is_empty(), "a span needs at least one batch");
-        for batch in batches {
-            let fields = self.bind(batch)?;
-            self.update(&fields)?;
-        }
-        Ok(self.last_loss)
-    }
-
-    /// The loss and one gradient per differentiated parameter for `batch`,
-    /// without updating anything.
-    pub fn loss_and_grads(&self, batch: &Batch) -> Result<(Array, Vec<Array>)> {
-        let fields = self.bind(batch)?;
-        self.differentiate(&fields)
-    }
-
-    /// Gradients as copies, by qualified parameter path. Only differentiated
-    /// parameters appear: a frozen model's have none.
-    pub fn gradients(&self, batch: &Batch) -> Result<Vec<(String, Tensor)>> {
-        let (_, grads) = self.loss_and_grads(batch)?;
-        self.argnums
-            .iter()
-            .zip(grads)
-            .map(|(&i, grad)| Ok((self.paths[i as usize].clone(), to_tensor(&grad)?)))
-            .collect()
-    }
-
-    /// A copy of one parameter, by qualified path. Copies, not handles:
-    /// nothing that lives on the device escapes this crate.
-    pub fn fetch(&self, path: &str) -> Result<Tensor> {
-        let index = self
-            .paths
-            .iter()
-            .position(|p| p == path)
-            .with_context(|| format!("no parameter named {path:?}"))?;
-        to_tensor(&self.params[index])
     }
 
     /// Turns a batch into the fields the run reads, refusing anything no
@@ -543,13 +576,29 @@ impl Session {
 
     /// One optimizer step on the differentiated parameters. A frozen
     /// model's are left exactly as they were.
+    /// One step, as a transaction: the next parameters, slots and key are
+    /// built and evaluated first, and only then does this session become
+    /// them. A step that fails leaves everything as it was, which is what
+    /// StepError promises.
     fn update(&mut self, fields: &BTreeMap<String, Array>) -> Result<f32> {
         let (loss, grads) = self.differentiate(fields)?;
-        self.optimizer.apply(&mut self.params, &self.argnums, &grads)?;
-        // The step's key is spent; advance so the next step draws anew.
-        let (next, _) = mlx_rs::random::split(&self.rng, 2)?;
-        self.rng = next;
-        eval(std::iter::once(&self.rng))?;
+        let mut params = self.params.clone();
+        let next_optimizer = self.optimizer.next(&mut params, &self.argnums, &grads)?;
+        let (rng, _) = mlx_rs::random::split(&self.rng, 2)?;
+
+        let (m, v) = next_optimizer.slots();
+        eval(
+            params
+                .iter()
+                .chain(m.iter())
+                .chain(v.iter())
+                .chain(std::iter::once(&rng))
+                .chain(std::iter::once(&loss)),
+        )?;
+
+        self.params = params;
+        self.optimizer = next_optimizer;
+        self.rng = rng;
         self.last_loss = loss.item::<f32>();
         self.step += 1;
         Ok(self.last_loss)

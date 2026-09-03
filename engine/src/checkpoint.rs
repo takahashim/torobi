@@ -137,14 +137,44 @@ pub fn write(dir: impl AsRef<Path>, state: State<'_>) -> Result<PathBuf> {
     )
     .context("writing the manifest")?;
 
-    // Everything is on disk and readable before anything claims the name.
-    read_manifest(&staging).context("the checkpoint just written does not read back")?;
-    if dir.exists() {
-        std::fs::remove_dir_all(dir).with_context(|| format!("replacing {}", dir.display()))?;
-    }
+    // Everything is on disk and reads back before anything claims the
+    // name: the manifest parses, and every tensor loads.
+    read(&staging).context("the checkpoint just written does not read back")?;
+    sync_dir(&staging)?;
+
+    // A rename over an existing directory is not atomic on this platform:
+    // the old one has to go first, and a stop in between would leave
+    // neither. So the previous checkpoint is moved aside, the new one
+    // takes the name in one rename, and only then is the old one dropped.
+    let displaced = if dir.exists() {
+        let aside = dir.with_extension("replaced");
+        if aside.exists() {
+            std::fs::remove_dir_all(&aside).ok();
+        }
+        std::fs::rename(dir, &aside)
+            .with_context(|| format!("moving {} aside", dir.display()))?;
+        Some(aside)
+    } else {
+        None
+    };
     std::fs::rename(&staging, dir)
         .with_context(|| format!("renaming {} into place", staging.display()))?;
+    if let Some(aside) = displaced {
+        std::fs::remove_dir_all(aside).ok();
+    }
+    if let Some(parent) = dir.parent() {
+        sync_dir(parent).ok();
+    }
     Ok(dir.to_path_buf())
+}
+
+/// Asks the filesystem to make a directory's entries durable, so that a
+/// checkpoint that exists after a crash is one that reads back.
+fn sync_dir(dir: &Path) -> Result<()> {
+    let handle = std::fs::File::open(dir).with_context(|| format!("opening {}", dir.display()))?;
+    handle
+        .sync_all()
+        .with_context(|| format!("syncing {}", dir.display()))
 }
 
 pub fn read_manifest(dir: impl AsRef<Path>) -> Result<Manifest> {

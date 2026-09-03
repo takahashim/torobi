@@ -12,10 +12,20 @@ class GraphConfigTest < Minitest::Test
     assert_match(/\A[0-9a-f]{64}\z/, a.digest)
   end
 
-  def test_model_order_does_not_reach_the_digest
+  # Two models need an objective to say which loss is trained, so this one
+  # reads the first and ignores the second.
+  def two_models
     g = Torobi::TestGraphs.linear_graph
-    ab = Torobi::GraphConfig.new(models: { "a" => g, "b" => g })
-    ba = Torobi::GraphConfig.new(models: { "b" => g, "a" => g })
+    objective = Torobi.objective("a" => g, "b" => g) do |o|
+      o.output :loss, o.from_model("a", :loss)
+    end
+    [g, objective]
+  end
+
+  def test_model_order_does_not_reach_the_digest
+    g, objective = two_models
+    ab = Torobi::GraphConfig.new(models: { "a" => g, "b" => g }, objective:, train: ["a"])
+    ba = Torobi::GraphConfig.new(models: { "b" => g, "a" => g }, objective:, train: ["a"])
     assert_equal ab.digest, ba.digest
   end
 
@@ -39,7 +49,10 @@ class GraphConfigTest < Minitest::Test
 
   def test_an_objective_graph_is_carried_beside_the_models
     g = Torobi::TestGraphs.linear_graph
-    with = Torobi::GraphConfig.new(models: { "student" => g }, objective: g)
+    objective = Torobi.objective("student" => g) do |o|
+      o.output :loss, o.from_model("student", :loss) * 2.0
+    end
+    with = Torobi::GraphConfig.new(models: { "student" => g }, objective:)
     without = Torobi::GraphConfig.new(models: { "student" => g })
     refute_equal with.digest, without.digest
     assert_nil without.to_h.fetch("objective")
@@ -51,6 +64,11 @@ class GraphConfigTest < Minitest::Test
     assert_raises(Torobi::ConfigError) { Torobi::GraphConfig.new(models: { "m" => :not_a_graph }) }
     assert_raises(Torobi::ConfigError) do
       Torobi::GraphConfig.new(models: { "m" => g }, objective: :nope)
+    end
+    # An objective must be a scalar named "loss", with no parameters of its
+    # own: the engine differentiates one value and passes it none.
+    assert_raises(Torobi::ConfigError) do
+      Torobi::GraphConfig.new(models: { "m" => g }, objective: g)
     end
     assert_raises(Torobi::ConfigError) do
       Torobi::GraphConfig.new(models: { "m" => g }, metadata: { "k" => Object.new })

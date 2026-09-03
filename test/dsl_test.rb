@@ -19,9 +19,18 @@ class DslTest < Minitest::Test
     assert_equal :f32, graph.nodes.last.dtype
   end
 
+  # A config without an objective takes the model's one output as the loss,
+  # so the model here reduces to a scalar.
+  def scalar_model
+    Torobi.graph do |g|
+      x = g.input :x, [nil, 4]
+      g.output :loss, g.mean(g.linear(x, 2, name: "linear"))
+    end
+  end
+
   def test_the_same_definition_yields_the_same_digest
-    a = Torobi::GraphConfig.new(models: { "m" => linear_model })
-    b = Torobi::GraphConfig.new(models: { "m" => linear_model })
+    a = Torobi::GraphConfig.new(models: { "m" => scalar_model })
+    b = Torobi::GraphConfig.new(models: { "m" => scalar_model })
     assert_equal a.digest, b.digest
   end
 

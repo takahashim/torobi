@@ -22,9 +22,14 @@ module Torobi
       ]
       nodes = [
         IR::NodeSpec.new(id: 0, op: "matmul", inputs: [IR::Ref.input(0)], parameters: [0]),
-        IR::NodeSpec.new(id: 1, op: "add", inputs: [IR::Ref.node(0)], parameters: [1])
+        IR::NodeSpec.new(id: 1, op: "add", inputs: [IR::Ref.node(0)], parameters: [1]),
+        # A config without an objective takes the model's single output as
+        # the loss, so it has to be a scalar (GraphConfig::LOSS).
+        IR::NodeSpec.new(id: 2, op: "mean", inputs: [IR::Ref.node(1)],
+                         attributes: { "axes" => nil, "keepdims" => false },
+                         shape: [], dtype: :f32)
       ]
-      IR::Graph.new(inputs:, parameters:, nodes:, outputs: { "y" => IR::Ref.node(1) })
+      IR::Graph.new(inputs:, parameters:, nodes:, outputs: { "loss" => IR::Ref.node(2) })
     end
 
     # The same initializer built in two different key orders.

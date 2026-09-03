@@ -15,6 +15,10 @@ module Torobi
     SCHEMA_VERSION = 1
     SEMANTICS_VERSION = 1
 
+    # The one output an objective declares. The engine differentiates it,
+    # so there is no room for a second, and no room for a guess.
+    LOSS = "loss"
+
     # A parameter as the engine sees it: namespaced by its model, and
     # carrying whether gradients are wanted for it.
     Parameter = Data.define(:model, :path, :spec, :trained) do
@@ -41,7 +45,12 @@ module Torobi
         raise ConfigError, "objective is a #{objective.class}, expected Torobi::IR::Graph"
       end
       train = check_train(train, models)
-      check_wiring(objective, models) if objective
+      if objective
+        check_objective(objective)
+        check_wiring(objective, models)
+      else
+        check_single_loss(models)
+      end
       metadata = IR::Json.primitive!(metadata.transform_keys(&:to_s), where: "metadata")
 
       super(schema_version: Integer(schema_version),
@@ -120,6 +129,62 @@ module Torobi
         end
         -name
       end.sort.uniq
+    end
+
+    # What an objective must be, because the engine has no way to guess
+    # otherwise: exactly one output, named "loss", a scalar, and no
+    # parameters of its own. Every one of these was representable before,
+    # and each ended in the engine picking something arbitrary or indexing
+    # past the end of an empty slice.
+    def check_objective(objective)
+      unless objective.parameters.empty?
+        raise ConfigError,
+              "an objective has no parameters of its own; move " \
+              "#{objective.parameters.map(&:path).map(&:inspect).join(", ")} into a model"
+      end
+
+      names = objective.outputs.keys
+      unless names == [LOSS]
+        raise ConfigError,
+              "an objective declares exactly one output, named #{LOSS.inspect}; " \
+              "this one declares #{names.map(&:inspect).join(", ")}"
+      end
+
+      shape, dtype = objective.output_signature(LOSS)
+      unless shape&.empty?
+        raise ConfigError,
+              "the loss must be a scalar, and this one has shape #{shape.inspect}; " \
+              "reduce it (mean or sum) before declaring it"
+      end
+      return if dtype == :f32
+
+      raise ConfigError, "the loss must be f32, not #{dtype}"
+    end
+
+    # Without an objective, the single model's own single output is the
+    # loss, and the same demands apply to it.
+    def check_single_loss(models)
+      unless models.size == 1
+        raise ConfigError,
+              "with more than one model an objective says which loss to train; " \
+              "this config has #{models.keys.map(&:inspect).join(", ")} and none"
+      end
+
+      name, graph = models.first
+      names = graph.outputs.keys
+      unless names.size == 1
+        raise ConfigError,
+              "without an objective, model #{name.inspect} must declare exactly one " \
+              "output to be the loss; it declares #{names.map(&:inspect).join(", ")}"
+      end
+
+      shape, dtype = graph.output_signature(names.first)
+      unless shape&.empty? && dtype == :f32
+        raise ConfigError,
+              "without an objective, model #{name.inspect}'s output " \
+              "#{names.first.inspect} is the loss, so it must be an f32 scalar, " \
+              "and it is #{dtype}#{shape.inspect}"
+      end
     end
 
     # An objective may read a model output only if that model declares it,
