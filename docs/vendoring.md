@@ -324,6 +324,12 @@ today, is running MLX five minor versions back. What the archive must
 carry also changes: an install tree (lib, include, `share/cmake/MLX`)
 rather than four loose files.
 
+`mlx-prebuilt` now installs a prefix rather than gathering four files, so
+one archive serves both ways in: `lib/` is a `MLX_PREBUILT_PATH`, and the
+tree is a `CMAKE_PREFIX_PATH` for `find_package(MLX)`. Torobi looks for
+the four in the root and then in `lib/`, so the archive it is pointed at
+can change shape without this having to be told.
+
 The exit is therefore real, and its cost is a number rather than a
 question. It falls to nothing when upstream releases against a newer
 mlx-c; their `main` already pins MLX v0.32.2. The other way out is

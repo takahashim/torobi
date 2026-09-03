@@ -2,20 +2,17 @@
 
 A Ruby training framework for Apple Silicon, built on MLX.
 
-Torobi is for slow cooking: fine-tuning and distilling known model
-architectures on a local Mac, declaratively and safely. If you are in a
-hurry, rent a CUDA GPU instead; this tool does not compete on speed.
+Torobi is for slow cooking: fine-tuning and distilling known model architectures on a local Mac, declaratively and safely.
 
-Ruby owns the language. Models and objectives are described once in a
-Graph DSL and become an immutable, serializable `GraphConfig`. A Rust
-engine (via MLX) owns the execution, and the boundary between them is
-about a dozen calls wide.
+Models and objectives are described once in a Graph DSL and become an immutable, serializable `GraphConfig`.
+A Rust engine (via MLX) owns the execution, and the boundary between them is about a dozen calls wide.
 
 ## Requirements
 
-An Apple Silicon Mac, Ruby 3.2 or newer, and a Rust toolchain. The
-extension is built from source at install time and brings MLX with it,
-which takes a while the first time.
+- An Apple Silicon Mac
+- Ruby 3.2 or newer
+- Rust toolchain
+- MLX and mlx-c
 
 ## Install
 
@@ -87,13 +84,6 @@ runner.progress          # => {step: 1400, loss: 0.21, at: "..."}
 runner.stop              # asks it to stop at the next step boundary
 runner.wait.finished?    # => true
 ```
-
-## What it is not
-
-Not an eager tensor library: there is no `Torobi::Array` to multiply, and
-no Ruby runs inside a step. Not a tokenizer, not a data loader, and not a
-trainer that owns your loop. Not for CUDA or Linux, by choice rather than
-by limitation.
 
 ## Status
 

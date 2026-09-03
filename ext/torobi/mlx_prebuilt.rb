@@ -63,7 +63,7 @@ module MlxPrebuilt
     given = ENV["MLX_PREBUILT_PATH"]
     return given if given && !given.empty?
 
-    return into if ready?(into)
+    return libraries(into) if ready?(into)
 
     io.puts "torobi: fetching MLX #{MLX_VERSION} (mlx-c #{MLX_C_VERSION}) from #{URL}"
     archive = download(io:)
@@ -71,16 +71,31 @@ module MlxPrebuilt
     unpack(archive, into)
     File.write(File.join(into, STAMP), DIGEST)
     io.puts "torobi: MLX ready in #{into}"
-    into
+    libraries(into)
   ensure
     FileUtils.rm_f(archive.to_s) if archive
   end
 
+  # Which directory of the unpacked archive holds the four, since an
+  # archive may be a bag of files or an install prefix. Looked for rather
+  # than assumed, so one of these can be replaced by the other without
+  # this having to be told.
+  def libraries(dir)
+    found = [dir, File.join(dir, "lib")].find do |candidate|
+      FILES.all? { |name| File.size?(File.join(candidate, name)) }
+    end
+    raise Refused, "#{dir} holds no #{FILES.join(", ")}" unless found
+
+    found
+  end
+
   # Whether a previous run left a complete, checked copy here.
   def ready?(dir)
-    File.read(File.join(dir, STAMP)).strip == DIGEST &&
-      FILES.all? { |name| File.size?(File.join(dir, name)) }
-  rescue SystemCallError
+    return false unless File.read(File.join(dir, STAMP)).strip == DIGEST
+
+    libraries(dir)
+    true
+  rescue SystemCallError, Refused
     false
   end
 
@@ -183,12 +198,17 @@ module MlxPrebuilt
       raise Refused, "could not unpack #{archive}"
     end
 
-    found = Dir.glob(File.join(staging, "**", FILES.first)).first
-    raise Refused, "#{ASSET} holds no #{FILES.first}" unless found
+    # The archive's own top directory, whatever it is called: what is
+    # inside it may be the four files or a whole install prefix, and this
+    # is not the place to have an opinion about which.
+    top = Dir.children(staging).map { |name| File.join(staging, name) }
+             .select { |path| File.directory?(path) }
+    raise Refused, "#{ASSET} does not hold one directory" unless top.size == 1
 
     FileUtils.rm_rf(into)
     FileUtils.mkdir_p(File.dirname(into))
-    FileUtils.mv(File.dirname(found), into)
+    FileUtils.mv(top.first, into)
     FileUtils.rm_rf(staging)
+    libraries(into)
   end
 end
