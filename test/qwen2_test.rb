@@ -85,8 +85,9 @@ class Qwen2Test < Minitest::Test
     assert_equal want.size, got.size, "#{where}: positions"
     apart = got.flatten.zip(want.flatten).map { |a, b| (a - b).abs }.max
     scale = want.flatten.map(&:abs).max
+    margin("#{where} hidden", apart, scale)
 
-    assert_operator apart / scale, :<, 2e-3,
+    assert_operator apart / scale, :<, PARITY,
                     "#{where}: hidden states differ by #{apart} against #{scale}"
   end
 
@@ -104,9 +105,25 @@ class Qwen2Test < Minitest::Test
     by_id = mine.to_h { |value, id| [id, value] }
     apart = want.map { |t| (by_id.fetch(t.fetch("id")) - t.fetch("value")).abs }.max
     scale = want.map { |t| t.fetch("value").abs }.max
+    margin("#{where} logits", apart, scale)
 
-    assert_operator apart / scale, :<, 2e-3, "#{where}: scores differ by #{apart}"
+    assert_operator apart / scale, :<, PARITY, "#{where}: scores differ by #{apart}"
   end
+
+  # How much of the tolerance was actually used. A number somebody chose
+  # is worth being able to look at: run with MARGIN=1 to see what it is
+  # holding, and put what it says next to TOLERANCE.
+  def margin(what, apart, scale)
+    return unless ENV["MARGIN"]
+
+    warn format("%-16s max|d| %.4g of %.4g, relative %.2e (tolerance %.0e)",
+                what, apart, scale, apart / scale, PARITY)
+  end
+
+  # How far two implementations of the same arithmetic may be, in a
+  # different order, over 24 layers. Relative, because a hidden state
+  # deep in a decoder is tens (docs/plan.md section 15.52).
+  PARITY = 2e-3
 
   def test_the_recorded_config_is_the_one_this_builder_understands
     c = published

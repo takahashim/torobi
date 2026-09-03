@@ -50,7 +50,8 @@ between two versions people have.
   the parameters.
 - **`Torobi::Models::Qwen2`**, the first decoder: a causal language
   model as a graph, declaring exactly the 290 parameters Qwen2.5-0.5B
-  holds, with the tied output projection that checkpoint expects. No KV
+  holds, with the tied output projection that checkpoint expects, and
+  whose hidden states and next tokens agree with transformers. No KV
   cache and no sampling loop, which stay out of scope; what it is for is
   fine-tuning, and one forward is `Session#forward`.
 - **The vocabulary a decoder is written in**: `max`, a `cross_entropy`
@@ -73,11 +74,8 @@ between two versions people have.
 
 ### Known limitations
 
-- Qwen2 is described and differentiates, but has not been held to a
-  reference implementation's numbers; that needs the weights and a
-  second implementation to run them. Other decoder architectures,
-  quantized ops and variable length attention are not implemented
-  (docs/plan.md section 9.1, M6).
+- Other decoder architectures, quantized ops and variable length
+  attention are not implemented (docs/plan.md section 9.1, M6).
 - `Torobi::Memory.limit=` does not refuse an allocation that exceeds it;
   a run that must stay under a number wants `Policies::MemoryGuard`.
 - The API still moves. Nothing here is a compatibility promise yet.

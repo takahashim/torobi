@@ -183,12 +183,12 @@ The milestones in [docs/plan.md](docs/plan.md) section 9.1 are met
 through M4: a distillation of a published ModernBERT runs to the end and
 leaves a record.
 
-Decoders are started rather than done: `Models::Qwen2` declares exactly
-what Qwen2.5-0.5B holds and its gradients agree with its forward, but it
-has not been held to a reference implementation's numbers. Generation is
-deliberately absent (no KV cache, no sampling loop); what Torobi does
-with a decoder is fine-tune it. Quantized ops and variable length
-attention are not implemented.
+`Models::Qwen2` declares exactly what Qwen2.5-0.5B holds, its gradients
+agree with its forward, and its numbers agree with transformers. What is
+deliberately absent is generation: no KV cache, no sampling loop. What
+Torobi does with a decoder is fine-tune it, in bf16 or behind a LoRA
+adapter, and something else serves the result. Quantized ops and
+variable length attention are not implemented.
 
 The version is 0.0.1 and the API still moves.
 
