@@ -63,6 +63,8 @@ pub struct ParameterSpec {
 pub struct NodeSpec {
     pub id: usize,
     pub op: String,
+    /// A stable path a tap can ask for ("layers.3.attn"), or none.
+    pub name: Option<String>,
     pub inputs: Vec<String>,
     pub parameters: Vec<usize>,
     pub attributes: serde_json::Map<String, serde_json::Value>,

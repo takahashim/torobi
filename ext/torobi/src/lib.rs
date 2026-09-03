@@ -254,6 +254,36 @@ impl Session {
         rb_self.with_engine(ruby, true, |engine| engine.put(&path, &tensor))
     }
 
+    /// Watches a named value. Read-only, and in force from the next step.
+    fn tap(ruby: &Ruby, rb_self: &Self, name: String, stat: String) -> Result<(), Error> {
+        rb_self.with_engine(ruby, false, |engine| engine.tap(&name, &stat))
+    }
+
+    fn untap(ruby: &Ruby, rb_self: &Self, name: String) -> Result<bool, Error> {
+        rb_self.with_engine(ruby, false, |engine| Ok(engine.untap(&name)))
+    }
+
+    fn taps(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
+        let names = rb_self.read(ruby, |engine| engine.taps())?;
+        Ok(ruby.ary_from_vec(names))
+    }
+
+    fn node_names(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
+        let names = rb_self.read(ruby, |engine| engine.node_names())?;
+        Ok(ruby.ary_from_vec(names))
+    }
+
+    /// What the last step's taps saw: [name, shape, data] each.
+    fn tapped(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
+        let seen = rb_self.with_engine(ruby, false, |engine| engine.tapped())?;
+        let out = ruby.ary_new_capa(seen.len());
+        for (name, tensor) in seen {
+            let (shape, data) = tensor_to_ruby(ruby, tensor);
+            out.push((name, shape, data))?;
+        }
+        Ok(out)
+    }
+
     fn parameter_paths(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
         let paths = rb_self.read(ruby, |engine| engine.parameter_paths())?;
         Ok(ruby.ary_from_vec(paths))
@@ -379,6 +409,11 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("set_frozen", method!(Session::set_frozen, 2))?;
     class.define_method("trainable", method!(Session::trainable, 0))?;
     class.define_method("put", method!(Session::put, 2))?;
+    class.define_method("tap_node", method!(Session::tap, 2))?;
+    class.define_method("untap", method!(Session::untap, 1))?;
+    class.define_method("taps", method!(Session::taps, 0))?;
+    class.define_method("node_names", method!(Session::node_names, 0))?;
+    class.define_method("tapped", method!(Session::tapped, 0))?;
     class.define_method("parameter_paths", method!(Session::parameter_paths, 0))?;
     class.define_method("input_names", method!(Session::input_names, 0))?;
     class.define_method("fetch", method!(Session::fetch, 1))?;

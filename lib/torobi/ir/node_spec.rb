@@ -5,10 +5,20 @@ module Torobi
     # One operation: which op, what it reads (references to inputs and
     # earlier nodes), which parameters it uses, and its attributes. Shape
     # and dtype are filled by shape inference; nil means not yet inferred.
-    class NodeSpec < Data.define(:id, :op, :inputs, :parameters, :attributes, :shape, :dtype)
-      def initialize(id:, op:, inputs:, parameters: [], attributes: {}, shape: nil, dtype: nil)
+    #
+    # `name` is a stable path under the scopes the node was built in
+    # ("layers.3.attn.sdpa"), which is how a tap asks for it (docs/plan.md
+    # section 6.4). Names are unique within a graph, and nil for nodes the
+    # DSL did not name.
+    class NodeSpec < Data.define(:id, :op, :name, :inputs, :parameters, :attributes,
+                                 :shape, :dtype)
+      def initialize(id:, op:, inputs:, name: nil, parameters: [], attributes: {},
+                     shape: nil, dtype: nil)
         op = op.to_s
         raise ConfigError, "node #{id}: op must not be empty" if op.empty?
+
+        name = name&.to_s
+        raise ConfigError, "node #{id}: name must not be empty" if name&.empty?
 
         inputs = Freeze.deep(inputs.map { |ref| -ref.to_s })
         parameters = Freeze.deep(parameters.map { |pid| Integer(pid) })
@@ -16,19 +26,20 @@ module Torobi
                                                  where: "node #{id} (#{op}) attributes"))
         shape = check_shape(id, op, shape)
         Dtype.check!(dtype, where: "node #{id} (#{op})") unless dtype.nil?
-        super(id: Integer(id), op: -op, inputs:, parameters:, attributes:, shape:, dtype:)
+        super(id: Integer(id), op: -op, name: name && -name, inputs:, parameters:,
+              attributes:, shape:, dtype:)
       end
 
       def to_h
         {
-          "id" => id, "op" => op, "inputs" => inputs, "parameters" => parameters,
-          "attributes" => Json.canonical(attributes), "shape" => shape,
-          "dtype" => dtype&.to_s
+          "id" => id, "op" => op, "name" => name, "inputs" => inputs,
+          "parameters" => parameters, "attributes" => Json.canonical(attributes),
+          "shape" => shape, "dtype" => dtype&.to_s
         }
       end
 
       def self.from_h(h)
-        new(id: h.fetch("id"), op: h.fetch("op"), inputs: h.fetch("inputs"),
+        new(id: h.fetch("id"), op: h.fetch("op"), name: h["name"], inputs: h.fetch("inputs"),
             parameters: h.fetch("parameters"), attributes: h.fetch("attributes"),
             shape: h.fetch("shape"), dtype: h.fetch("dtype")&.to_sym)
       end

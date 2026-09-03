@@ -262,6 +262,40 @@ module Torobi
       self
     end
 
+    # Watches a named value inside the graph, read-only (docs/plan.md
+    # section 8.3, capability B+). `stat` reduces it on the device:
+    #
+    #   :norm    the L2 norm, which is how an activation is usually watched
+    #   :mean    its mean
+    #   :extent  its smallest and largest
+    #   :full    the tensor itself, which is for debugging and costs it
+    #
+    # A tap adds an output; it never changes one. What it costs is a
+    # forward pass per step (a traced pass produces values that belong to
+    # the trace, not to the caller), so taps are opt-in and a standing one
+    # should reduce.
+    def tap(name, stat: :norm)
+      @native.tap_node(name.to_s, stat.to_s)
+      self
+    end
+
+    def untap(name) = @native.untap(name.to_s)
+
+    # What is being watched.
+    def taps = @native.taps
+
+    # Every name a tap could ask for.
+    def node_names = @native.node_names
+
+    # What the last step's taps saw, by name. Read-only, so it needs no
+    # journal entry of its own; `observe` is how a decision made on one
+    # gets recorded.
+    def tapped
+      @native.tapped.to_h do |name, shape, data|
+        [name, shape.empty? ? data.first : { shape:, data: }]
+      end
+    end
+
     def parameter_paths = @native.parameter_paths
     def input_names = @native.input_names
 

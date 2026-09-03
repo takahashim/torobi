@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use crate::checkpoint;
 use crate::graph::{Graph, GraphConfig};
-use crate::interp;
+use crate::interp::{self, Stat};
 use crate::optimizer::{Config as OptimizerConfig, Optimizer};
 
 /// A tensor as it crosses the boundary: a dtype, a shape, and the values.
@@ -164,6 +164,12 @@ pub struct Session {
     /// (docs/plan.md section 11.1).
     rng: Array,
     seed: u64,
+    /// What the window is watching: node name to how much of it to bring
+    /// back. Read-only; changing the set changes what a step evaluates,
+    /// so it takes effect from the next one.
+    taps: BTreeMap<String, Stat>,
+    /// The last step's tapped values, as copies.
+    tapped: BTreeMap<String, Tensor>,
     step: usize,
     last_loss: f32,
 }
@@ -233,6 +239,8 @@ impl Session {
         let candidates = argnums.clone();
         Ok(Self {
             candidates,
+            taps: BTreeMap::new(),
+            tapped: BTreeMap::new(),
             rng: mlx_rs::random::key(seed)?,
             seed,
             models,
@@ -279,6 +287,61 @@ impl Session {
         self.seed = seed;
         self.rng = mlx_rs::random::key(seed)?;
         Ok(())
+    }
+
+    /// Watches a named node. `stat` is "full", "mean", "norm" or "extent";
+    /// a reduction costs a scalar per step where "full" costs the tensor,
+    /// which is why a standing tap should reduce.
+    pub fn tap(&mut self, name: &str, stat: &str) -> Result<()> {
+        let stat = Stat::parse(stat)
+            .with_context(|| format!("{stat:?} is not a statistic (full, mean, norm, extent)"))?;
+        anyhow::ensure!(
+            self.node_names().iter().any(|n| n == name),
+            "no value is named {name:?} here (this run has {:?})",
+            self.node_names()
+        );
+        self.taps.insert(name.to_string(), stat);
+        Ok(())
+    }
+
+    /// Stops watching. Returns whether it was being watched.
+    pub fn untap(&mut self, name: &str) -> bool {
+        self.taps.remove(name).is_some()
+    }
+
+    /// What is being watched.
+    pub fn taps(&self) -> Vec<String> {
+        self.taps.keys().cloned().collect()
+    }
+
+    /// Every name a tap could ask for.
+    pub fn node_names(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .map(|m| &m.graph)
+            .chain(self.objective.iter())
+            .flat_map(|g| g.nodes.iter().filter_map(|n| n.name.clone()))
+            .collect()
+    }
+
+    /// What the last step's taps saw, by name.
+    pub fn tapped(&self) -> Result<Vec<(String, Tensor)>> {
+        self.tapped
+            .iter()
+            .map(|(name, tensor)| {
+                Ok((
+                    name.clone(),
+                    Tensor {
+                        dtype: tensor.dtype,
+                        shape: tensor.shape.clone(),
+                        values: match &tensor.values {
+                            Values::F32(v) => Values::F32(v.clone()),
+                            Values::I32(v) => Values::I32(v.clone()),
+                        },
+                    },
+                ))
+            })
+            .collect()
     }
 
     /// Which parameters are currently differentiated, by qualified path.
@@ -389,7 +452,8 @@ impl Session {
     /// without updating anything.
     pub fn loss_and_grads(&self, batch: &Batch) -> Result<(Array, Vec<Array>)> {
         let fields = self.bind(batch)?;
-        self.differentiate(&fields)
+        let (loss, grads, _) = self.differentiate(&fields)?;
+        Ok((loss, grads))
     }
 
     /// Gradients as copies, by qualified parameter path. Only differentiated
@@ -629,6 +693,8 @@ impl Session {
         params: &[Array],
         fields: &BTreeMap<String, Array>,
         rng: &Array,
+        taps: &BTreeMap<String, Stat>,
+        collected: &mut BTreeMap<String, Array>,
     ) -> std::result::Result<Array, mlx_rs::error::Exception> {
         let fail = |what: String| mlx_rs::error::Exception::custom(what);
         let mut outputs: BTreeMap<(String, String), Array> = BTreeMap::new();
@@ -640,8 +706,14 @@ impl Session {
             let inputs = Self::resolve(&model.graph, fields, &outputs, &model.name)?;
             let (next, mine) = mlx_rs::random::split(&key, 2)?;
             key = next;
-            let produced =
-                interp::evaluate(&model.graph, &params[model.slice.clone()], &inputs, Some(&mine))?;
+            let produced = interp::evaluate_tapped(
+                &model.graph,
+                &params[model.slice.clone()],
+                &inputs,
+                Some(&mine),
+                taps,
+                collected,
+            )?;
             for (name, value) in produced {
                 outputs.insert((model.name.clone(), name), value);
             }
@@ -657,7 +729,8 @@ impl Session {
         };
 
         let inputs = Self::resolve(objective, fields, &outputs, "objective")?;
-        let produced = interp::evaluate(objective, &[], &inputs, Some(&key))?;
+        let produced =
+            interp::evaluate_tapped(objective, &[], &inputs, Some(&key), taps, collected)?;
         let mut values = produced.into_values();
         let loss = values
             .next()
@@ -704,18 +777,37 @@ impl Session {
             .collect()
     }
 
-    fn differentiate(&self, fields: &BTreeMap<String, Array>) -> Result<(Array, Vec<Array>)> {
+    /// The loss and its gradients, and what the taps saw on the way.
+    ///
+    /// The taps are collected from a forward pass of their own rather than
+    /// from inside `value_and_grad`: a traced pass produces values that
+    /// belong to the trace, and reading them out is not what a tap means.
+    /// The cost is one forward per step while a tap is on, which is why
+    /// taps are opt-in.
+    fn differentiate(
+        &self,
+        fields: &BTreeMap<String, Array>,
+    ) -> Result<(Array, Vec<Array>, BTreeMap<String, Array>)> {
         let models = &self.models;
         let objective = self.objective.as_ref();
         let rng = &self.rng;
+        let taps = &self.taps;
         let fun = |ps: &[Array]| -> std::result::Result<Vec<Array>, mlx_rs::error::Exception> {
-            Self::forward(models, objective, ps, fields, rng).map(|loss| vec![loss])
+            let mut inner = BTreeMap::new();
+            Self::forward(models, objective, ps, fields, rng, &BTreeMap::new(), &mut inner)
+                .map(|loss| vec![loss])
         };
         let mut vg = value_and_grad_with_argnums(fun, &self.argnums[..]);
         let (mut values, grads) = vg(&self.params)?;
         let loss = values.remove(0);
         eval(std::iter::once(&loss).chain(grads.iter()))?;
-        Ok((loss, grads))
+
+        let mut collected = BTreeMap::new();
+        if !taps.is_empty() {
+            Self::forward(models, objective, &self.params, fields, rng, taps, &mut collected)?;
+            eval(collected.values())?;
+        }
+        Ok((loss, grads, collected))
     }
 
     /// One optimizer step on the differentiated parameters. A frozen
@@ -725,7 +817,7 @@ impl Session {
     /// them. A step that fails leaves everything as it was, which is what
     /// StepError promises.
     fn update(&mut self, fields: &BTreeMap<String, Array>) -> Result<f32> {
-        let (loss, grads) = self.differentiate(fields)?;
+        let (loss, grads, tapped) = self.differentiate(fields)?;
         let mut params = self.params.clone();
         let next_optimizer = self.optimizer.next(&mut params, &self.argnums, &grads)?;
         let (rng, _) = mlx_rs::random::split(&self.rng, 2)?;
@@ -743,6 +835,10 @@ impl Session {
         self.params = params;
         self.optimizer = next_optimizer;
         self.rng = rng;
+        self.tapped = tapped
+            .iter()
+            .map(|(name, value)| Ok((name.clone(), to_tensor(value)?)))
+            .collect::<Result<_>>()?;
         self.last_loss = loss.item::<f32>();
         self.step += 1;
         Ok(self.last_loss)

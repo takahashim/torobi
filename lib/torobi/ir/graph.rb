@@ -20,6 +20,7 @@ module Torobi
         nodes = sequential!(nodes, NodeSpec, "node")
         unique!(inputs.map(&:name), "input name")
         unique!(parameters.map(&:path), "parameter path")
+        unique!(nodes.filter_map(&:name), "node name")
 
         nodes.each { |node| check_references(node, inputs, parameters) }
         outputs = check_outputs(outputs, inputs, nodes)
@@ -53,6 +54,14 @@ module Torobi
       def input_named(name)
         inputs.find { |i| i.name == name.to_s }
       end
+
+      # The node a tap asks for, by its stable name (docs/plan.md 6.4).
+      def node_named(name)
+        nodes.find { |n| n.name == name.to_s }
+      end
+
+      # Every name a tap could ask for.
+      def node_names = nodes.filter_map(&:name)
 
       def self.from_h(h)
         new(inputs: h.fetch("inputs").map { |x| InputSpec.from_h(x) },

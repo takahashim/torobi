@@ -105,15 +105,17 @@ module Torobi
       # --- layers: parameters plus their application, in one call ---
 
       def linear(x, d_out, name:, bias: true)
+        label = name
         d_in = concrete_last_dim!(x, "linear #{scoped(name).inspect}")
         # PyTorch layout [d_out, d_in], so pretrained checkpoints map 1:1.
         w = param("#{name}.weight", [d_out, d_in], dtype: x.dtype,
                   init: { "type" => "kaiming_uniform" })
         wt = emit("transpose", inputs: [w], attrs: { axes: [1, 0] })
         y = matmul(x, wt)
-        return y unless bias
+        return self.name(label, y) unless bias
 
-        y + param("#{name}.bias", [d_out], dtype: x.dtype, init: { "type" => "zeros" })
+        self.name(label, y + param("#{name}.bias", [d_out], dtype: x.dtype,
+                                                   init: { "type" => "zeros" }))
       end
 
       def embedding(ids, vocab:, dim:, name:)
@@ -162,7 +164,7 @@ module Torobi
 
       # Adds one node: checks ownership, arity and attributes against the
       # manifest, infers shape and dtype, and returns the handle.
-      def emit(op, inputs: [], params: [], attrs: {})
+      def emit(op, inputs: [], params: [], attrs: {}, name: nil)
         where = "node #{@nodes.size} (#{op})"
         spec = Ops.fetch(op, where:)
         inputs.each { |handle| own!(handle, where:) }
@@ -172,13 +174,48 @@ module Torobi
         shape, dtype = Shape.infer(spec.shape_rule, inputs:,
                                    params: params.map { |id| @parameters.fetch(id) },
                                    attrs:, where:)
-        node = IR::NodeSpec.new(id: @nodes.size, op:, inputs: inputs.map(&:ref),
-                                parameters: params, attributes: attrs, shape:, dtype:)
+        node = IR::NodeSpec.new(id: @nodes.size, op:, name: name && unique_name(name),
+                                inputs: inputs.map(&:ref), parameters: params,
+                                attributes: attrs, shape:, dtype:)
         @nodes << node
         Handle.new(builder: self, ref: IR::Ref.node(node.id), shape:, dtype:)
       end
 
+      # Names a value, so a tap can ask for it later (docs/plan.md 6.4 and
+      # 8.3). The name is taken under the scopes in force, so the same
+      # component in a loop yields "layers.0.attn", "layers.1.attn".
+      #
+      #   h = g.name("attn", g.sdpa(q, k, v))
+      def name(label, handle)
+        own!(handle, where: "name #{label.to_s.inspect}")
+        kind, id = IR::Ref.parse(handle.ref)
+        if kind != :node
+          raise ConfigError, "only a computed value can be named, and #{handle.ref} is an input"
+        end
+
+        node = @nodes[id]
+        if node.name
+          raise ConfigError, "#{handle.ref} is already named #{node.name.inspect}"
+        end
+
+        @nodes[id] = IR::NodeSpec.new(
+          id: node.id, op: node.op, name: unique_name(label), inputs: node.inputs,
+          parameters: node.parameters, attributes: node.attributes,
+          shape: node.shape, dtype: node.dtype
+        )
+        handle
+      end
+
       private
+
+      def unique_name(label)
+        candidate = scoped(label)
+        if @nodes.any? { |n| n.name == candidate }
+          raise ConfigError, "two values are named #{candidate.inspect} in one graph"
+        end
+
+        candidate
+      end
 
       def declare_input(name, shape, dtype, source)
         spec = IR::InputSpec.new(id: @inputs.size, name: name.to_s, shape:, dtype:, source:)

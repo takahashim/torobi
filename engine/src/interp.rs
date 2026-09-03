@@ -15,11 +15,67 @@ type Result<T> = std::result::Result<T, Exception>;
 /// Evaluates one graph and returns its outputs by name. `params` is this
 /// graph's slice of the run's parameters, in declaration order; `inputs` is
 /// keyed by input name (the caller resolved each input's source).
+/// What a tap asks for: a node's name, and how much of it to bring back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stat {
+    /// The whole tensor. Honest and expensive; for debugging.
+    Full,
+    Mean,
+    /// The L2 norm, which is what a gradient or an activation is usually
+    /// watched by.
+    Norm,
+    /// Smallest and largest, as a two-element tensor.
+    Extent,
+}
+
+impl Stat {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "full" => Some(Stat::Full),
+            "mean" => Some(Stat::Mean),
+            "norm" => Some(Stat::Norm),
+            "extent" => Some(Stat::Extent),
+            _ => None,
+        }
+    }
+
+    /// Reduces on the device, so a tap that is left on costs a scalar per
+    /// step rather than a tensor (docs/plan.md section 8.3).
+    fn apply(self, value: &Array) -> Result<Array> {
+        match self {
+            Stat::Full => Ok(value.clone()),
+            Stat::Mean => value.mean(false),
+            Stat::Norm => value.square()?.sum(false)?.sqrt(),
+            Stat::Extent => {
+                let min = value.min(false)?;
+                let max = value.max(false)?;
+                mlx_rs::ops::stack(&[min, max])
+            }
+        }
+    }
+}
+
 pub fn evaluate(
     graph: &Graph,
     params: &[Array],
     inputs: &BTreeMap<String, Array>,
     rng: Option<&Array>,
+) -> Result<BTreeMap<String, Array>> {
+    evaluate_tapped(graph, params, inputs, rng, &BTreeMap::new(), &mut BTreeMap::new())
+}
+
+/// The same, collecting the values `taps` asks for as it goes.
+///
+/// A tap is read-only: it adds an output, it does not change one. What it
+/// costs is that the value must be kept rather than fused away, which is
+/// why a standing tap should reduce (docs/plan.md section 8.3).
+pub fn evaluate_tapped(
+    graph: &Graph,
+    params: &[Array],
+    inputs: &BTreeMap<String, Array>,
+    rng: Option<&Array>,
+    taps: &BTreeMap<String, Stat>,
+    collected: &mut BTreeMap<String, Array>,
 ) -> Result<BTreeMap<String, Array>> {
     // One key per graph, split per dropout node, so two dropouts in one
     // step draw different masks and the same step always draws the same
@@ -97,6 +153,11 @@ pub fn evaluate(
             }
             other => return Err(fail(&format!("op {other:?} is not implemented in M1"))),
         };
+        if let Some(name) = &node.name {
+            if let Some(stat) = taps.get(name) {
+                collected.insert(name.clone(), stat.apply(&out).map_err(|e| fail(&e.to_string()))?);
+            }
+        }
         values.push(out);
     }
 
