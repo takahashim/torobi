@@ -184,6 +184,26 @@ impl Session {
         Ok(self.loss())
     }
 
+    /// The loss for `batch`, without taking a step.
+    ///
+    /// What a validation set is read with. No gradients, so it costs a
+    /// forward rather than a forward and a backward, and no randomness, so
+    /// dropout stands aside and the number is the model's rather than a
+    /// sample of it. Nothing about the run moves: not the parameters, not
+    /// the counters, not the RNG, and not the loss a watcher reads.
+    ///
+    /// The taps report this pass, as they report any pass.
+    pub fn evaluate(&mut self, batch: &Batch) -> Result<f32> {
+        let fields = self.plan.bind(batch)?;
+        let (loss, tapped) =
+            executor::evaluate(&self.plan, &self.state.params, &fields, &self.taps)?;
+        self.tapped = tapped
+            .iter()
+            .map(|(name, value)| Ok((name.clone(), to_tensor(value)?)))
+            .collect::<Result<_>>()?;
+        Ok(loss.item::<f32>())
+    }
+
     /// The loss and one gradient per differentiated parameter for `batch`,
     /// without updating anything.
     pub fn loss_and_grads(&self, batch: &Batch) -> Result<(mlx_rs::Array, Vec<mlx_rs::Array>)> {
@@ -273,23 +293,23 @@ mod tests {
     use crate::fixtures;
     use crate::tensor::Values;
 
-    fn session(which: (String, String)) -> Session {
+    pub fn session(which: (String, String)) -> Session {
         let (config, weights) = which;
         Session::open(&config, &weights).unwrap()
     }
 
-    fn values(t: &Tensor) -> Vec<f32> {
+    pub fn values(t: &Tensor) -> Vec<f32> {
         match &t.values {
             Values::F32(v) => v.clone(),
             Values::I32(v) => v.iter().map(|&i| i as f32).collect(),
         }
     }
 
-    fn close(got: &[f32], want: &[f32]) {
+    pub fn close(got: &[f32], want: &[f32]) {
         within(got, want, 1e-6);
     }
 
-    fn within(got: &[f32], want: &[f32], tolerance: f32) {
+    pub fn within(got: &[f32], want: &[f32], tolerance: f32) {
         assert_eq!(got.len(), want.len(), "{got:?} against {want:?}");
         for (g, w) in got.iter().zip(want) {
             assert!((g - w).abs() < tolerance, "{got:?} against {want:?}");
@@ -481,6 +501,134 @@ mod tests {
         fresh.restore(&path).unwrap();
         assert_eq!(fresh.step(), 1);
         close(&values(&fresh.fetch("m.w").unwrap()), &want);
+    }
+}
+
+#[cfg(test)]
+mod evaluation_tests {
+    use super::tests::*;
+    use super::*;
+    use crate::fixtures;
+
+    #[test]
+    fn a_step_whose_loss_is_not_finite_is_not_taken() {
+        let (config, weights) = fixtures::divides_by_zero();
+        let mut session = Session::open(&config, &weights).unwrap();
+        let batch = fixtures::batch_x(&[1.0, 2.0]);
+
+        let loss = session.run_step(&batch).unwrap();
+        assert!(!loss.is_finite(), "the fixture should divide by zero");
+
+        // Reported, so a policy sees it. Not applied, so nothing is lost.
+        assert!(session.loss().is_nan() || session.loss().is_infinite());
+        close(&values(&session.fetch("m.w").unwrap()), &[0.0, 0.0]);
+        // The counter still moves: a step was attempted and its batch
+        // consumed, and a hook that fires every N steps must keep firing.
+        assert_eq!(session.step(), 1);
+    }
+
+    #[test]
+    fn a_run_recovers_once_the_parameters_are_usable_again() {
+        // What a NaN policy does now: nothing was corrupted, so putting the
+        // parameter somewhere sane is enough. No checkpoint is needed.
+        let (config, weights) = fixtures::divides_by_zero();
+        let mut session = Session::open(&config, &weights).unwrap();
+        let batch = fixtures::batch_x(&[1.0, 2.0]);
+        session.run_step(&batch).unwrap();
+
+        session
+            .put(
+                "m.w",
+                &Tensor {
+                    dtype: mlx_rs::Dtype::Float32,
+                    shape: vec![2],
+                    values: Values::F32(vec![1.0, 1.0]),
+                },
+            )
+            .unwrap();
+        let loss = session.run_step(&batch).unwrap();
+        assert!(loss.is_finite(), "{loss}");
+        assert_eq!(session.step(), 2);
+    }
+
+    #[test]
+    fn the_rng_moves_even_on_a_step_that_was_not_taken() {
+        // The forward drew from it, so the sequence belongs to the step
+        // count exactly as it would have. A resumed run has to agree.
+        let (config, weights) = fixtures::divides_by_zero();
+        let mut session = Session::open(&config, &weights).unwrap();
+        let before = crate::tensor::to_tensor(&session.state.rng).unwrap();
+        session.run_step(&fixtures::batch_x(&[1.0, 2.0])).unwrap();
+        let after = crate::tensor::to_tensor(&session.state.rng).unwrap();
+
+        assert_ne!(values(&before), values(&after));
+    }
+
+    #[test]
+    fn evaluating_moves_nothing() {
+        let (config, weights) = fixtures::scaled_mean();
+        let mut session = Session::open(&config, &weights).unwrap();
+        let batch = fixtures::batch_x(&[1.0, 2.0, 3.0, 4.0]);
+        session.run_step(&batch).unwrap();
+        let (step, loss) = (session.step(), session.loss());
+        let w = values(&session.fetch("m.w").unwrap());
+        let rng = values(&crate::tensor::to_tensor(&session.state.rng).unwrap());
+
+        let seen = session.evaluate(&batch).unwrap();
+        assert!(seen.is_finite());
+        assert_eq!(session.step(), step);
+        assert_eq!(session.loss(), loss, "the training loss is not an evaluation");
+        close(&values(&session.fetch("m.w").unwrap()), &w);
+        assert_eq!(
+            values(&crate::tensor::to_tensor(&session.state.rng).unwrap()),
+            rng
+        );
+    }
+
+    #[test]
+    fn evaluating_reports_the_loss_the_parameters_give() {
+        // mean(x * w) with w = [1, 2] over [[1, 2], [3, 4]] is
+        // (1 + 4 + 3 + 8) / 4 = 4.
+        let (config, weights) = fixtures::scaled_mean();
+        let mut session = Session::open(&config, &weights).unwrap();
+        let seen = session.evaluate(&fixtures::batch_x(&[1.0, 2.0, 3.0, 4.0])).unwrap();
+        assert!((seen - 4.0).abs() < 1e-6, "{seen}");
+    }
+
+    #[test]
+    fn evaluating_does_not_sample_dropout() {
+        let (config, weights) = fixtures::with_dropout(0.5);
+        let mut session = Session::open(&config, &weights).unwrap();
+        let batch = fixtures::batch_x(&[1.0, 1.0, 1.0, 1.0]);
+
+        // Twice the same, because no key means no draw.
+        let first = session.evaluate(&batch).unwrap();
+        let second = session.evaluate(&batch).unwrap();
+        assert_eq!(first, second);
+        // And it is the loss with everything kept: mean(x * w) = 1.
+        assert!((first - 1.0).abs() < 1e-6, "{first}");
+
+        // Training does draw, so it does not agree with it every time.
+        let mut drawn = Vec::new();
+        for _ in 0..12 {
+            drawn.push(session.run_step(&batch).unwrap());
+        }
+        assert!(
+            drawn.iter().any(|l| (l - 1.0).abs() > 1e-6),
+            "a training pass should sample dropout: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn a_tap_reports_the_evaluation_it_watched() {
+        let (config, weights) = fixtures::with_dropout(0.0);
+        let mut session = Session::open(&config, &weights).unwrap();
+        session.tap("scaled", "mean").unwrap();
+        session.evaluate(&fixtures::batch_x(&[1.0, 3.0])).unwrap();
+
+        let seen = session.tapped().unwrap();
+        assert_eq!(seen.len(), 1);
+        close(&values(&seen[0].1), &[2.0]);
     }
 }
 

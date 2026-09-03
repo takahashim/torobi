@@ -12,9 +12,6 @@ use crate::graph::{parse_ref, Graph, Ref};
 
 type Result<T> = std::result::Result<T, Exception>;
 
-/// Evaluates one graph and returns its outputs by name. `params` is this
-/// graph's slice of the run's parameters, in declaration order; `inputs` is
-/// keyed by input name (the caller resolved each input's source).
 /// What a tap asks for: a node's name, and how much of it to bring back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stat {
@@ -55,16 +52,14 @@ impl Stat {
     }
 }
 
-pub fn evaluate(
-    graph: &Graph,
-    params: &[Array],
-    inputs: &BTreeMap<String, Array>,
-    rng: Option<&Array>,
-) -> Result<BTreeMap<String, Array>> {
-    evaluate_tapped(graph, params, inputs, rng, &BTreeMap::new(), &mut BTreeMap::new())
-}
-
-/// The same, collecting the values `taps` asks for as it goes.
+/// Evaluates one graph and returns its outputs by name.
+///
+/// `rng` is both the randomness and the mode. A key means this is a
+/// training pass and the random ops draw; no key means it is not, and they
+/// stand aside (dropout becomes the identity). Inference has no other
+/// meaning here, and a flag beside the key could disagree with it.
+///
+/// Collects the values `taps` asks for as it goes.
 ///
 /// A tap is read-only: it adds an output, it does not change one. What it
 /// costs is that the value must be kept rather than fused away, which is
@@ -128,12 +123,13 @@ pub fn evaluate_tapped(
                 if !(0.0..1.0).contains(&p) {
                     return Err(fail(&format!("p must be in 0..1, got {p}")));
                 }
-                if p == 0.0 {
+                // No key means this is not a training pass. Inverted
+                // dropout already scales what survives, so standing aside
+                // is the whole of what inference has to do.
+                if p == 0.0 || key.is_none() {
                     ins[0].clone()
                 } else {
-                    let current = key
-                        .as_ref()
-                        .ok_or_else(|| fail("dropout needs the session's RNG state"))?;
+                    let current = key.as_ref().expect("just checked");
                     let (next, draw) = mlx_rs::random::split(current, 2)?;
                     key = Some(next);
                     let keep = Array::from_f32(1.0 - p);

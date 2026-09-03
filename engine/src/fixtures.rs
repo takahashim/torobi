@@ -129,6 +129,46 @@ pub fn teacher_and_student() -> (String, String) {
     (config, weights)
 }
 
+/// `loss = mean(x / w)` with `w` starting at zero: the first step divides
+/// by zero, so the loss and its gradients are not finite. What the guard in
+/// `TrainState::advance` is for.
+pub fn divides_by_zero() -> (String, String) {
+    let graph = json!({
+        "inputs": [input(0, "x", json!([null, 2]), "f32")],
+        "parameters": [parameter(0, "w", json!([2]), true)],
+        "nodes": [
+            node(0, "parameter", json!([]), json!([0])),
+            node(1, "div", json!(["input:0", "node:0"]), json!([])),
+            node(2, "mean", json!(["node:1"]), json!([])),
+        ],
+        "outputs": {"loss": "node:2"},
+    });
+    let config = config(json!({"m": graph}), Value::Null, json!(["m"]));
+    let weights = json!({"params": {"m.w": {"shape": [2], "data": [0.0, 0.0]}}}).to_string();
+    (config, weights)
+}
+
+/// One model with dropout in the middle, so a training pass and an
+/// evaluation differ.
+pub fn with_dropout(p: f64) -> (String, String) {
+    let mut dropout = node(1, "dropout", json!(["input:0"]), json!([]));
+    dropout["attributes"] = json!({"p": p});
+    let graph = json!({
+        "inputs": [input(0, "x", json!([null, 2]), "f32")],
+        "parameters": [parameter(0, "w", json!([2]), true)],
+        "nodes": [
+            node(0, "parameter", json!([]), json!([0])),
+            dropout,
+            named(2, "mul", json!(["node:1", "node:0"]), json!([]), "scaled"),
+            node(3, "mean", json!(["node:2"]), json!([])),
+        ],
+        "outputs": {"loss": "node:3"},
+    });
+    let config = config(json!({"m": graph}), Value::Null, json!(["m"]));
+    let weights = json!({"params": {"m.w": {"shape": [2], "data": [1.0, 1.0]}}}).to_string();
+    (config, weights)
+}
+
 /// A batch of two rows for the graphs above.
 pub fn batch_x(rows: &[f32]) -> crate::tensor::Batch {
     let n = rows.len() as i32 / 2;

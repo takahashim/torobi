@@ -23,14 +23,16 @@ pub type Taps = BTreeMap<String, Stat>;
 /// What the taps saw, by node name.
 pub type Tapped = BTreeMap<String, Array>;
 
-/// Runs every model, then the objective over their outputs, and returns
-/// the loss. A model output feeding several places is computed once
-/// (docs/plan.md 5A.3).
+/// Runs every model, then the objective over their outputs.
+///
+/// `rng` is both the randomness and the mode: a key means a training pass,
+/// and no key means an evaluation, where the random ops stand aside (see
+/// [`crate::interp::evaluate_tapped`]).
 pub fn forward(
     plan: &Plan,
     params: &[Array],
     fields: &BTreeMap<String, Array>,
-    rng: &Array,
+    rng: Option<&Array>,
     taps: &Taps,
     collected: &mut Tapped,
 ) -> std::result::Result<Array, Exception> {
@@ -39,16 +41,22 @@ pub fn forward(
 
     // One key per graph, split from the step's, so a model and the
     // objective never draw the same numbers.
-    let mut key = rng.clone();
+    let mut key = rng.cloned();
     for Model { name, graph, slice } in &plan.models {
         let inputs = resolve(graph, fields, &outputs, name)?;
-        let (next, mine) = mlx_rs::random::split(&key, 2)?;
-        key = next;
+        let mine = match &key {
+            Some(current) => {
+                let (next, mine) = mlx_rs::random::split(current, 2)?;
+                key = Some(next);
+                Some(mine)
+            }
+            None => None,
+        };
         let produced = interp::evaluate_tapped(
             graph,
             &params[slice.clone()],
             &inputs,
-            Some(&mine),
+            mine.as_ref(),
             taps,
             collected,
         )?;
@@ -66,7 +74,8 @@ pub fn forward(
     };
 
     let inputs = resolve(objective, fields, &outputs, "objective")?;
-    let produced = interp::evaluate_tapped(objective, &[], &inputs, Some(&key), taps, collected)?;
+    let produced =
+        interp::evaluate_tapped(objective, &[], &inputs, key.as_ref(), taps, collected)?;
     produced
         .into_values()
         .next()
@@ -125,7 +134,7 @@ pub fn differentiate(
 ) -> Result<(Array, Vec<Array>, Tapped)> {
     let fun = |ps: &[Array]| -> std::result::Result<Vec<Array>, Exception> {
         let mut inner = Tapped::new();
-        forward(plan, ps, fields, rng, &Taps::new(), &mut inner).map(|loss| vec![loss])
+        forward(plan, ps, fields, Some(rng), &Taps::new(), &mut inner).map(|loss| vec![loss])
     };
     let mut vg = value_and_grad_with_argnums(fun, argnums);
     let (mut values, grads) = vg(params)?;
@@ -134,8 +143,25 @@ pub fn differentiate(
 
     let mut collected = Tapped::new();
     if !taps.is_empty() {
-        forward(plan, params, fields, rng, taps, &mut collected)?;
+        forward(plan, params, fields, Some(rng), taps, &mut collected)?;
         eval(collected.values())?;
     }
     Ok((loss, grads, collected))
+}
+
+/// The loss for one batch, without gradients and without randomness.
+///
+/// What a validation set is read with. Running `differentiate` and throwing
+/// the gradients away would pay for a backward pass nobody asked for, and
+/// would sample dropout, which would make the number noise.
+pub fn evaluate(
+    plan: &Plan,
+    params: &[Array],
+    fields: &BTreeMap<String, Array>,
+    taps: &Taps,
+) -> Result<(Array, Tapped)> {
+    let mut collected = Tapped::new();
+    let loss = forward(plan, params, fields, None, taps, &mut collected)?;
+    eval(std::iter::once(&loss).chain(collected.values()))?;
+    Ok((loss, collected))
 }

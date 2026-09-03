@@ -691,16 +691,14 @@ digest・path・shape・optimizer 種別を読み戻しで検証し、不一致�
 
 | 出口条件 | 状態 |
 | --- | --- |
-| ノブ | **概ね済**。lr / seed / freeze / unfreeze / put / checkpoint。**残: rollback、損失重み**(後者は objective graph に入力として持たせる形が決まってから) |
+| ノブ | **済**。lr / seed / freeze / unfreeze / put / checkpoint / evaluate。rollback は `restore` がそれであり、専用ノブは足さない。損失重みは M4 まで持ち越す(§15.9) |
 | フック | **済**。`s.on(event, every:)` と `s.use(policy)`、発火点は step / span_end / checkpoint_written。柵 4 本(登録順、再入禁止、例外で span 停止、調整は journal 経由)。標準ポリシー 5 つ |
 | journal の実運用 | **済**。全ての窓操作が自動記録。header に provenance、entry ごとに flush |
 | 観測タップ(B+) | **済**。ノードの安定命名 → `tap(name, stat:)`、norm / mean / extent / full。デバイス側縮約。**タップ有無で学習結果が一致する**ことを検証 |
 | 2 種の replay | **済**。`Replay.action`(policy を再実行せず操作を適用、bitwise 一致)と `Replay.rerun`(policy を再実行し、観測値と判断まで照合)。データは journal が digest でしか名指ししないので呼び出し側が供給する |
 | freeze を構造変更として | **済**。argnums の変更に optimizer slot が追随(保持 / 破棄 / ゼロ初期化)、step 数は据え置き |
 
-**残る作業**(M3a の前に片付けるか、並行するか):
-
-- rollback ノブ、損失重みノブ
+**残る作業**(M3a の前に片付けるか、並行するか): なし。§15.9 を参照。
 
 ### 15.5 engine の内部整理(2026-09-03)
 
@@ -823,3 +821,47 @@ fork guard も native へ移した。Ruby の `Preflight` は新しい `open` �
 嘘の分岐を作らせるだけなので、型ごと落とした。
 
 この時点で Ruby 162 件 / Rust 74 件。
+
+### 15.9 残りのノブを検討して、2 つとも入れなかった(2026-09-03)
+
+M2.5 に「rollback ノブ、損失重みノブ」が残っていた。改めて必要性を検討し、**どちらも
+足さず、代わりに実際に空いていた穴を 2 つ塞いだ**。
+
+**損失重みノブ → M4 まで持ち越す。** 固定の重みなら `mul_scalar` で既に書ける。ノブが
+要るのはスケジュールしたいときだけで、最初の的(310M → 130M reranker)でそれが要るかは
+未証明である。正しい形は `{"knob" => "alpha"}` という入力 source で、温度やしきい値付き
+op にも効く一般化だが、これは GraphConfig の schema に語彙を足す変更(digest が変わり、
+checkpoint に載り、replay が扱う)であり、**使う人がいて初めて形が決まる**。
+
+**rollback ノブ → 足さない。** rollback は `restore` がそれであり、行き先の checkpoint を
+指す以上、専用ノブは名前が増えるだけである。ただし調べる過程で `advance` が **loss を見ずに
+無条件で commit していた**ことが分かった。非有限な loss の step は勾配も非有限なので、
+取ると全 parameter が NaN になり、checkpoint 無しでは戻れない。これが rollback ノブが
+plan に載っていた理由そのものである。
+
+そこで **非有限な loss の step は取らない**ことにした。counter と RNG は進める(step は
+試みられ、batch は消費され、forward は RNG から引いたので、resume が同じ列を見るには
+進める必要がある)。parameter と optimizer slot は動かさない。loss は報告するので hook は
+今までどおり発火する。loss は commit の直前に既に eval 済みなので、判定はタダである。
+
+**ただしこれは rollback を不要にはしない。** 実装してテストを書いて分かったこと:
+
+| 症状 | 何が起きるか | 答え |
+| --- | --- | --- |
+| 悪い batch 1 つ | その step だけ非有限。parameter は健全 | guard だけで足りる。checkpoint 不要 |
+| 発散 | parameter 自体が forward を overflow させる位置にある | step が取られないので lr を下げても**何も動かない**。stuck であって corrupt ではない。**戻る先が要る** |
+
+`NaNGuard` は両方を見るようにした: lr を下げ、行き先があれば戻り、非有限が
+`patience` 回続いたら諦める。当初 "guard があれば rollback は要らない" と考えたが、
+2 つ目の症状で誤りだと分かった。
+
+**もう 1 つの穴: eval。** §8.3 の A のノブ表に `eval` があるのに、forward だけを走らせる
+口が無かった。validation を取るには `loss_and_grads` を呼んで gradient を捨てるしかなく、
+要らない backward を毎回払っていた。`Session#evaluate(batch)` を足した。gradient を
+計算せず、**乱数も引かない**。interpreter は「key が無い = 学習パスではない」と読むように
+なり、dropout は恒等になる。key と別に mode フラグを持たせると、その 2 つが食い違いうる。
+
+M3b の「tiny dataset の過学習」も M4 の「実験が完走し記録が残る」も validation を要るので、
+これは近いうちに必ず当たっていた。
+
+この時点で Ruby 164 件 / Rust 81 件。

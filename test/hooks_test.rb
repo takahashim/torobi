@@ -36,6 +36,16 @@ class HooksTest < Minitest::Test
       y: { shape: [4, 1], data: xs.map { |a, b| a + b } } }
   end
 
+  # One batch whose numbers overflow f32 when squared: the loss for this
+  # step alone is not finite, while the parameters are perfectly usable.
+  # The common shape of a NaN in practice, and the one the engine's guard
+  # answers on its own.
+  def poisoned_batch
+    xs = [[1e30, 1e30], [1e30, 1e30], [1e30, 1e30], [1e30, 1e30]]
+    { x: { shape: [4, DIM], data: xs.flatten },
+      y: { shape: [4, 1], data: [0.0] * 4 } }
+  end
+
   def test_hooks_fire_in_registration_order_and_at_their_interval
     order = []
     Torobi::Session.open(config, weights) do |s|
@@ -153,27 +163,76 @@ class HooksTest < Minitest::Test
     refute_empty observes, "and so should what it decided on"
   end
 
-  def test_nan_guard_goes_back_to_the_last_checkpoint
+  # The engine does not take a non-finite step, so one bad batch costs that
+  # step and nothing else: the parameters are the ones the last good step
+  # left, and the run carries on.
+  def test_a_single_bad_batch_costs_one_step_and_nothing_else
+    Torobi::Session.open(config, weights(w: [0.5, 0.5]),
+                         optimizer: { kind: :sgd, lr: 0.1 }) do |s|
+      s.run([batch] * 3)
+      before = s.fetch("m.l.weight")[:data]
+
+      s.use(Torobi::Policies::NaNGuard.new(lr_factor: 1.0))
+      s.run([poisoned_batch])
+
+      refute_predicate s.loss, :finite?, "the bad batch is reported"
+      assert_equal before, s.fetch("m.l.weight")[:data], "and not applied"
+      assert_equal 4, s.step, "the step still counts: its batch was consumed"
+
+      s.run([batch] * 3)
+      assert_predicate s.loss, :finite?, "the run carried straight on"
+    end
+  end
+
+  # A divergence is the other case, and the guard alone does not answer it.
+  # Once the parameters themselves overflow, no step is taken at all, so
+  # lowering the rate moves nothing: the run is stuck rather than corrupt.
+  # Giving up is the honest response, and the reason a rollback still has a
+  # job (see the test below).
+  def test_nan_guard_gives_up_when_lowering_the_rate_cannot_help
+    Torobi::Session.open(config, weights(w: [0.5, 0.5]),
+                         optimizer: { kind: :sgd, lr: 50.0 }) do |s|
+      s.use(Torobi::Policies::NaNGuard.new(lr_factor: 0.001, patience: 3))
+      e = assert_raises(Torobi::StepError) { s.run([batch] * 40) }
+
+      assert_match(/has not been finite for 3 steps/, e.message)
+      assert_operator s.step, :>, 3, "it diverged first, then gave up"
+    end
+  end
+
+  # A checkpoint is still allowed, for a caller who would rather resume
+  # from a known place than from wherever the divergence started.
+  def test_nan_guard_still_takes_a_checkpoint_when_it_is_given_one
     Dir.mktmpdir("torobi-hooks") do |dir|
       path = File.join(dir, "safe")
-      # A rate this large diverges to NaN within a few steps.
       Torobi::Session.open(config, weights(w: [0.5, 0.5]),
                            optimizer: { kind: :sgd, lr: 50.0 }) do |s|
         s.checkpoint!(path)
+        at_checkpoint = s.fetch("m.l.weight")[:data]
         s.use(Torobi::Policies::NaNGuard.new(rollback: path, lr_factor: 0.001))
         s.run([batch] * 20)
-        assert_predicate s.loss, :finite?, "the guard should have pulled it back"
-        assert_operator s.lr, :<, 50.0
+
+        assert_predicate s.loss, :finite?
+        refute_equal at_checkpoint, s.fetch("m.l.weight")[:data],
+                     "it went back and then kept training"
       end
     end
   end
 
-  def test_a_nan_without_a_checkpoint_says_so
-    Torobi::Session.open(config, weights(w: [0.5, 0.5]),
-                         optimizer: { kind: :sgd, lr: 50.0 }) do |s|
-      s.use(Torobi::Policies::NaNGuard.new)
-      e = assert_raises(Torobi::StepError) { s.run([batch] * 20) }
-      assert_match(/no checkpoint to go back to/, e.message)
+  # An evaluation reads the model without touching the run.
+  def test_evaluate_reads_without_taking_a_step
+    Torobi::Session.open(config, weights) do |s|
+      s.run([batch] * 3)
+      step = s.step
+      training_loss = s.loss
+      before = s.fetch("m.l.weight")[:data]
+
+      seen = s.evaluate(batch)
+
+      assert_predicate seen, :finite?
+      assert_equal step, s.step
+      assert_in_delta training_loss, s.loss, 0.0, "the training loss is untouched"
+      assert_equal before, s.fetch("m.l.weight")[:data]
     end
   end
 end

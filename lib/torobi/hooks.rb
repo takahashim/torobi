@@ -101,28 +101,53 @@ module Torobi
   # Each is a plain object answering `call(event)`, so a caller's own is
   # exactly as good.
   module Policies
-    # Stops a run whose loss has stopped being a number, and puts the
-    # parameters back where they were if there is a checkpoint to put them
-    # back from.
+    # Answers a loss that has stopped being a number.
+    #
+    # There are two of these and they want different answers.
+    #
+    # A bad batch: one step's numbers overflow, the parameters are fine.
+    # The engine does not take a step whose loss is not finite, so this
+    # costs that step and nothing else. Carrying on is the whole answer,
+    # and it works with no checkpoint at all.
+    #
+    # A divergence: the parameters themselves are somewhere the forward
+    # overflows. Then no step is taken either, which means lowering the
+    # rate moves nothing and the run is stuck rather than corrupt. Only
+    # going back somewhere else answers this, which is why `rollback` is
+    # still worth giving.
+    #
+    # So: lower the rate, go back if there is somewhere to go back to, and
+    # give up after `patience` consecutive non-finite steps, because by
+    # then whatever is being tried is not working.
     class NaNGuard
-      def initialize(rollback: nil, lr_factor: 0.5)
+      def initialize(rollback: nil, lr_factor: 0.5, patience: 5)
         @rollback = rollback
         @lr_factor = lr_factor
+        @patience = patience
+        @consecutive = 0
       end
 
-      def call(event)
-        return if event.finite?
+      # How many non-finite steps have arrived in a row.
+      attr_reader :consecutive
 
-        session = event.session
-        session.observe(nan_at: event.step)
-        if @rollback && File.exist?(@rollback.to_s)
-          session.restore(@rollback)
-          session.adjust(lr: session.lr * @lr_factor)
-        else
-          raise Torobi::StepError,
-                "the loss stopped being finite at step #{event.step}, and there is " \
-                "no checkpoint to go back to"
+      def call(event)
+        if event.finite?
+          @consecutive = 0
+          return
         end
+
+        @consecutive += 1
+        session = event.session
+        session.observe(nan_at: event.step, consecutive: @consecutive)
+        if @consecutive >= @patience
+          raise Torobi::StepError,
+                "the loss has not been finite for #{@consecutive} steps " \
+                "(since step #{event.step - @consecutive + 1}); lowering the rate " \
+                "is not answering it"
+        end
+
+        session.restore(@rollback) if @rollback && File.exist?(@rollback.to_s)
+        session.adjust(lr: session.lr * @lr_factor)
       end
     end
 

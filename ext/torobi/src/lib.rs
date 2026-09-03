@@ -446,6 +446,13 @@ impl Session {
         rb_self.with_engine(ruby, true, |engine| engine.run_steps(&batches))
     }
 
+    /// The loss for one batch without taking a step: no gradients, no
+    /// randomness, nothing moved. What a validation set is read with.
+    fn evaluate(ruby: &Ruby, rb_self: &Self, batch: RHash) -> Result<f32, Error> {
+        let batch = read_batch(ruby, batch)?;
+        rb_self.with_engine(ruby, true, |engine| engine.evaluate(&batch))
+    }
+
     /// Writes the run's state and returns where it landed. `run` is the
     /// caller's own record (epoch, batch position, sampler state) as JSON;
     /// the engine writes it verbatim and never reads it.
@@ -741,6 +748,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_singleton_method("open", function!(Session::open, 3))?;
     class.define_method("run_step", method!(Session::run_step, 1))?;
     class.define_method("run_steps", method!(Session::run_steps, 1))?;
+    class.define_method("evaluate", method!(Session::evaluate, 1))?;
     class.define_method("save", method!(Session::save, 2))?;
     class.define_method("restore", method!(Session::restore, 1))?;
     class.define_method("close", method!(Session::close, 0))?;

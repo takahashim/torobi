@@ -167,10 +167,34 @@ impl TrainState {
     /// the next parameters, slots and key are built and evaluated first,
     /// and only then does this state become them. A step that fails leaves
     /// everything as it was, which is what StepError promises.
+    ///
+    /// **A step whose loss is not finite is not taken.** Its gradients are
+    /// not finite either, so taking it would put NaN into every parameter
+    /// and nothing after it could recover; the only way back would be a
+    /// checkpoint, which is why the plan listed a rollback knob. Not going
+    /// there is cheaper than coming back, and free: the loss is already
+    /// evaluated by the time this is called.
+    ///
+    /// The counters still move. A step was attempted, its batch was
+    /// consumed, and the RNG was drawn from during the forward, so the draw
+    /// belongs to the step count exactly as it would have; a resumed run
+    /// has to see the same sequence. What does not move is the parameters
+    /// and the optimizer's slots, so a policy that lowers the rate and
+    /// carries on has something clean to carry on from.
     pub fn advance(&mut self, loss: &Array, grads: &[Array]) -> Result<f32> {
+        let value = loss.item::<f32>();
+        let (rng, _) = mlx_rs::random::split(&self.rng, 2)?;
+
+        if !value.is_finite() {
+            eval(std::iter::once(&rng))?;
+            self.rng = rng;
+            self.last_loss = value;
+            self.step += 1;
+            return Ok(value);
+        }
+
         let mut params = self.params.clone();
         let next_optimizer = self.optimizer.next(&mut params, &self.argnums, grads)?;
-        let (rng, _) = mlx_rs::random::split(&self.rng, 2)?;
 
         let (m, v) = next_optimizer.slots();
         eval(
@@ -178,16 +202,15 @@ impl TrainState {
                 .iter()
                 .chain(m.iter())
                 .chain(v.iter())
-                .chain(std::iter::once(&rng))
-                .chain(std::iter::once(loss)),
+                .chain(std::iter::once(&rng)),
         )?;
 
         self.params = params;
         self.optimizer = next_optimizer;
         self.rng = rng;
-        self.last_loss = loss.item::<f32>();
+        self.last_loss = value;
         self.step += 1;
-        Ok(self.last_loss)
+        Ok(value)
     }
 
     /// Writes the run's state: parameters, optimizer slots, counters, the

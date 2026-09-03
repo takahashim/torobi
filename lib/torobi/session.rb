@@ -158,6 +158,22 @@ module Torobi
       @native.loss
     end
 
+    # The loss for `batch` without taking a step.
+    #
+    # What a validation set is read with. It costs a forward rather than a
+    # forward and a backward, and it runs with the random ops standing
+    # aside, so the number is the model's rather than a sample of it.
+    # Nothing about the run moves: not the parameters, not the counters, not
+    # what `loss` reports.
+    #
+    #   validation.sum { |b| s.evaluate(b) } / validation.size
+    #
+    # Not journalled. An evaluation changes nothing, so a replay has nothing
+    # to apply; `observe` is how a decision made on one gets recorded.
+    def evaluate(batch)
+      @native.evaluate(Batch.pack(batch))
+    end
+
     # The same batch for `steps` steps. For fixed-data spikes and tests;
     # real training passes different batches.
     def repeat(batch, steps:)
