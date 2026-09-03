@@ -80,11 +80,17 @@ module Torobi
     # Writes the descriptions that are not carried, and overrides the
     # pooling when the caller asks for one.
     #
-    # Everything is built before anything is written: a `pooling` this does
-    # not understand should leave no directory half made.
-    def write_metadata(dir, pooling: nil, pooling_dim: nil)
+    # Everything is built and checked before anything is written. What is
+    # already there was carried from the source and is the source's to be
+    # right about; what this writes is this code's, and it should not write
+    # something it can see is wrong.
+    def write_metadata(dir, pooling: nil, pooling_dim: nil, widths: nil)
       dir = dir.to_s
       carried = pooling_config(dir)
+      # Before pooling_json, which refuses a missing dimension: a source
+      # that belongs to another model is worth saying so about, rather
+      # than reporting whatever else is wrong downstream of it.
+      check_widths(dir, pooling_dim, carried, widths) if widths
       modules = File.exist?(File.join(dir, "modules.json")) ? nil : modules_json
       pooling_file =
         if pooling || pooling_dim || carried.nil?
@@ -105,6 +111,50 @@ module Torobi
       dir
     end
 
+    # That the descriptions in `dir` are about the weights in `dir`.
+    #
+    # Two ways to be wrong, and neither is an error anywhere else: a
+    # `pooling_dim` the model does not have makes a pooling layer of the
+    # wrong shape, and a source model that is not the one these weights
+    # came from carries a tokenizer for another vocabulary. Both are
+    # visible in one number, because the hidden state's width is a width
+    # the tensors have.
+    #
+    # Before anything is written, so that a refusal leaves the weights and
+    # whatever was carried, and nothing this code made up.
+    def check_widths(dir, pooling_dim, carried, widths)
+      return if widths.empty?
+
+      # The carried config only when nothing was given, because a given
+      # dimension is what overrides it: two complaints about a number the
+      # caller has already replaced is one complaint too many.
+      claims = { "the given pooling_dim" => pooling_dim,
+                 "the source's config.json" => hidden_size(dir) }
+      unless pooling_dim
+        claims["the carried pooling config"] = carried&.dig("word_embedding_dimension")
+      end
+
+      wrong = claims.reject { |_, dim| dim.nil? || widths.include?(dim) }
+      return if wrong.empty?
+
+      said = wrong.map { |what, dim| "#{what} says #{dim}" }.join(", ")
+      raise ArgumentError,
+            "#{said}, which is not a width these weights have " \
+            "(#{widths.to_a.sort.inspect}). The pooled vector is as wide as the " \
+            "model's hidden state, so this is either the wrong pooling_dim or the " \
+            "wrong `from:`. model.safetensors and anything carried are in #{dir}; " \
+            "no pooling config was written."
+    end
+
+    # What the transformer's own config calls its hidden state, under
+    # whichever of the three names its family uses.
+    def hidden_size(dir)
+      config = JSON.parse(File.read(File.join(dir, "config.json")))
+      config.values_at("hidden_size", "d_model", "n_embd").compact.first
+    rescue SystemCallError, JSON::ParserError
+      nil
+    end
+
     # Every width the tensors in a safetensors file have, as a Set of
     # trailing dimensions.
     #
@@ -112,6 +162,12 @@ module Torobi
     # this model actually has? Reading the header is all it takes, and the
     # header is the first thing in the file: eight bytes of length, then
     # that many bytes of JSON.
+    #
+    # A file that cannot be read raises rather than answering "no widths".
+    # The engine reads an export back before returning (docs/plan.md
+    # section 15.27), so a file that gets here is one that loaded; an empty
+    # answer means every tensor is a scalar, which is a fact about the
+    # model rather than a failure to look.
     def widths(file)
       header = File.open(file, "rb") do |io|
         JSON.parse(io.read(io.read(8).unpack1("Q<")))
@@ -119,8 +175,6 @@ module Torobi
       header.reject { |name, _| name == "__metadata__" }
             .values.filter_map { |entry| Array(entry["shape"]).last }
             .to_set
-    rescue SystemCallError, TypeError, JSON::ParserError
-      Set.new
     end
 
     # The two modules a plain encoder is: the transformer, and the pooling

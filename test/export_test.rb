@@ -135,8 +135,29 @@ class ExportTest < Minitest::Test
     out = File.join(@dir, "out")
     e = assert_raises(ArgumentError) { trained(out, from: source, pooling_dim: DIM + 1) }
 
-    assert_match(/word_embedding_dimension #{DIM + 1}/, e.message)
-    assert_match(/not a width this export holds/, e.message)
+    assert_match(/pooling_dim says #{DIM + 1}/, e.message)
+    assert_match(/not a width these weights have/, e.message)
+    # Refused before anything of this code's was written: the weights and
+    # what was carried are there, and the pooling is still the source's.
+    assert_path_exists File.join(out, "model.safetensors")
+    pooling = JSON.parse(File.read(File.join(out, "1_Pooling", "config.json")))
+    assert_equal DIM, pooling["word_embedding_dimension"], "the carried config was rewritten"
+  end
+
+  # The same number catches the other way of being wrong: a source that is
+  # not where these weights came from carries a tokenizer for another
+  # vocabulary, and a directory that loads and is wrong is worse than one
+  # that does not load.
+  def test_a_source_that_belongs_to_another_model_is_refused
+    elsewhere = File.join(@dir, "elsewhere")
+    FileUtils.mkdir_p(elsewhere)
+    File.write(File.join(elsewhere, "config.json"), '{"hidden_size":768}')
+    File.write(File.join(elsewhere, "tokenizer.json"), '{"version":"1.0"}')
+
+    e = assert_raises(ArgumentError) { trained(File.join(@dir, "out"), from: elsewhere) }
+
+    assert_match(/config\.json says 768/, e.message)
+    assert_match(/wrong `from:`/, e.message)
   end
 
   # Nothing to start from: the metadata this code can write, and no

@@ -379,9 +379,11 @@ module Torobi
       model ||= sole_model
       atomically do
         written = @native.export_model(model.to_s, dir.to_s)
+        # The widths the weights actually have, which is what says whether
+        # the descriptions about to be written are about these weights.
+        widths = Export.widths(File.join(dir.to_s, "model.safetensors"))
         carried = Export.carry(from, dir.to_s)
-        Export.write_metadata(dir.to_s, pooling:, pooling_dim:)
-        check_pooling_dim(dir.to_s, written)
+        Export.write_metadata(dir.to_s, pooling:, pooling_dim:, widths:)
         # Last, so that a record of an export is a record of one that is
         # on disk whole.
         @journal&.note(step: @native.step, event: "exported", model: model.to_s,
@@ -599,25 +601,6 @@ module Torobi
       return names.first if names.size == 1
 
       raise ArgumentError, "model: is required (this run has #{names.inspect})"
-    end
-
-    # That the pooling dimension names a width the export actually has.
-    #
-    # A wrong one is not an error anywhere: it produces a pooling layer of
-    # the wrong shape, in a file that loads. The exported tensors know the
-    # answer, so this asks them.
-    def check_pooling_dim(dir, written)
-      config = Export.pooling_config(dir)
-      dim = config && config["word_embedding_dimension"]
-      return unless dim
-
-      widths = Export.widths(File.join(dir, "model.safetensors"))
-      return if widths.empty? || widths.include?(dim)
-
-      raise ArgumentError,
-            "word_embedding_dimension #{dim} is not a width this export holds " \
-            "(#{widths.to_a.sort.inspect}). The pooled vector is as wide as the " \
-            "model's hidden state; #{written.size} tensors were written"
     end
 
     # Runs an engine change and the journal's record of it as one, so an
