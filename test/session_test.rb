@@ -114,6 +114,46 @@ class SessionTest < Minitest::Test
     end
   end
 
+  # Watching a run is not serving it. The numbers a watcher reads come
+  # from the last committed step, and what the run is made of was settled
+  # when it opened, so neither waits for the engine.
+  def test_a_watcher_reads_the_run_while_a_span_is_in_flight
+    Torobi::Session.open(@config, weights: @weights) do |s|
+      watched = %i[step loss parameter_paths input_names node_names]
+      refused = Hash.new(0)
+      answered = Hash.new(0)
+
+      span = Thread.new { s.run(batches(400, rows: 4)) }
+      while span.alive?
+        watched.each do |name|
+          s.public_send(name)
+          answered[name] += 1
+        rescue Torobi::Busy
+          refused[name] += 1
+        end
+      end
+      span.join
+
+      watched.each do |name|
+        assert_equal 0, refused[name], "#{name} should not wait for a step"
+        assert_operator answered[name], :>, 0
+      end
+    end
+  end
+
+  # The other half of that line. What is trained is state, because
+  # freezing moves it, so asking for it goes to the engine and is refused
+  # when there is no engine to ask. The names are facts about the run and
+  # outlive it.
+  def test_what_a_run_is_made_of_outlives_it_and_what_it_is_doing_does_not
+    s = Torobi::Session.open(@config, weights: @weights)
+    paths = s.parameter_paths
+    s.close
+
+    assert_equal paths, s.parameter_paths
+    assert_raises(Torobi::SessionClosed) { s.trainable }
+  end
+
   # Where the parameters come from is a keyword, not a position: model
   # import adds loading from a file, and the GraphConfig's declared
   # initializers are a natural third. Saying which one is meant should not

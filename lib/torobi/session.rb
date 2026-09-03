@@ -416,7 +416,8 @@ module Torobi
     # What is being watched.
     def taps = @native.taps
 
-    # Every name a tap could ask for.
+    # Every name a tap could ask for, qualified by the model it is in
+    # ("student.hidden"). Settled at open, like `parameter_paths`.
     def node_names = @native.node_names
 
     # What the last step's taps saw, by name. Read-only, so it needs no
@@ -432,6 +433,13 @@ module Torobi
       end
     end
 
+    # What the run is made of: every parameter by qualified path, every
+    # batch field it reads, and every name a tap may ask for.
+    #
+    # Settled when the session opened and answered from there, so a
+    # watching thread gets them while a span is in flight, and they still
+    # answer after `close`. What is being trained right now is not one of
+    # these: freezing moves it, so `trainable` asks the engine.
     def parameter_paths = @native.parameter_paths
     def input_names = @native.input_names
 

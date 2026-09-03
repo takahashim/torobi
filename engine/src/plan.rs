@@ -19,8 +19,7 @@ use mlx_rs::Array;
 use serde::Deserialize;
 
 use crate::graph::{GraphConfig, ParameterSpec};
-use crate::op::{qualified, OBJECTIVE};
-use crate::op::Program;
+use crate::op::{qualified, Program, OBJECTIVE};
 use crate::tensor::{dtype_named, Tensor};
 
 /// Where a run's initial parameters come from.
@@ -176,7 +175,9 @@ impl Plan {
             .objective
             .map(|graph| Program::resolve(graph, 0, OBJECTIVE))
             .transpose()?;
-        let mut plan = Self {
+        let plan = Self {
+            input_names: input_names(&models, objective.as_ref()),
+            node_names: node_names(&models, objective.as_ref()),
             models,
             objective,
             paths,
@@ -184,11 +185,7 @@ impl Plan {
             config_digest,
             graph_json: graph_json.to_string(),
             semantics_version: config.semantics_version,
-            input_names: Vec::new(),
-            node_names: Vec::new(),
         };
-        plan.input_names = plan.derive_input_names();
-        plan.node_names = plan.derive_node_names();
         Ok((plan, params))
     }
 
@@ -208,34 +205,6 @@ impl Plan {
     /// Every name a tap could ask for.
     pub fn node_names(&self) -> &[String] {
         &self.node_names
-    }
-
-    fn derive_input_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .programs()
-            .flat_map(|p| p.inputs.iter().filter_map(|i| i.batch_field()))
-            .map(str::to_string)
-            .collect();
-        names.sort();
-        names.dedup();
-        names
-    }
-
-    /// Every name a tap may ask for, qualified by the graph it is in.
-    ///
-    /// Qualified for the same reason a parameter path is: a distillation
-    /// runs two models of one architecture, so "hidden" names a node in
-    /// both of them and "student.hidden" names one.
-    fn derive_node_names(&self) -> Vec<String> {
-        self.models
-            .iter()
-            .flat_map(|m| m.program.node_names().map(|n| qualified(&m.name, n)))
-            .chain(
-                self.objective
-                    .iter()
-                    .flat_map(|o| o.node_names().map(|n| qualified(OBJECTIVE, n))),
-            )
-            .collect()
     }
 
     pub fn index_of(&self, path: &str) -> Option<usize> {
@@ -445,6 +414,42 @@ impl Source {
             array.as_dtype(declared)?
         })
     }
+}
+
+/// Every batch field the run reads, once each and in order.
+///
+/// Free functions rather than methods, because they are how a `Plan` is
+/// built rather than something one answers: what this type promises is
+/// that everything in it was settled before the first step, and a plan
+/// that had to be filled in after construction would not have been.
+fn input_names(models: &[Model], objective: Option<&Program>) -> Vec<String> {
+    let mut names: Vec<String> = models
+        .iter()
+        .map(|m| &m.program)
+        .chain(objective)
+        .flat_map(|p| p.inputs.iter().filter_map(|i| i.batch_field()))
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Every name a tap may ask for, qualified by the graph it is in.
+///
+/// Qualified for the same reason a parameter path is: a distillation runs
+/// two models of one architecture, so "hidden" names a node in both of
+/// them and "student.hidden" names one.
+fn node_names(models: &[Model], objective: Option<&Program>) -> Vec<String> {
+    models
+        .iter()
+        .flat_map(|m| m.program.node_names().map(|n| qualified(&m.name, n)))
+        .chain(
+            objective
+                .into_iter()
+                .flat_map(|o| o.node_names().map(|n| qualified(OBJECTIVE, n))),
+        )
+        .collect()
 }
 
 fn read_safetensors(path: &Path) -> Result<std::collections::HashMap<String, Array>> {

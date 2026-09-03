@@ -1714,6 +1714,38 @@ M4 のスクリプトは順序のシャッフルにだけ seed を使ってい�
 外した。**journal の行の書式を知っている場所が 2 つに増える**割に、買えるのは
 1 回きりの数十 ms でしかない。
 
+### 15.32 変わらないものは engine に聞かない(2026-09-03)
+
+再レビューの 🟡 2 と 🟡 3。
+
+**1. step 中に読めないものがあった。** 実測 (別スレッドが span 中):
+
+    {step: "ok", loss: "ok", parameter_paths: "Busy",
+     input_names: "Busy", node_names: "Busy", trainable: "Busy"}
+
+`Snapshot` は「見ることは仕えることではない」ために step / loss / lr / seed を
+持っているのに、**open 以降変わらない 3 つが step 中は読めない**。監視スレッドは
+名前を事前に確保しておく必要があり、それはこの設計が避けたかったものである。
+
+拡張に `Names` (parameters / inputs / nodes) を足し、open で 1 度取って以後そこから
+答えるようにした。lock も claim も要らない。
+
+    {step: "ok", loss: "ok", parameter_paths: "ok",
+     input_names: "ok", node_names: "ok", trainable: "Busy"}
+
+**`trainable` は残す。** freeze が動かすので**状態**であり、状態は engine のもの
+である。この線が引けているかは close で見える: 名前は close 後も答え、
+`trainable` は `SessionClosed` になる。テストにした。
+
+途中で `trainable` をタイトループで poll するテストを書いたら、**span 側が Busy で
+落ちた**。claim は 1 つなので、監視が奪えば学習が止まる。「1 session は 1 つの
+会話」の実演であり、テストの形が間違っていた (レースで証明するものではない)。
+
+**2. `Plan` を組んでから埋めるのをやめた。** `input_names` / `node_names` を空で
+構築してから代入していた。`Plan` は「最初の step までに全部確定しているもの」を
+名乗る型なので、その不変条件を作る関数の中に成り立たない瞬間があるのは筋が悪い。
+自由関数にして、`Self { .. }` を 1 回で組む形にした。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

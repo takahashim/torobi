@@ -76,6 +76,36 @@ struct Session {
     /// reading them never waits on a step. Its lock is held for a copy and
     /// never across the GVL boundary.
     snapshot: Mutex<Snapshot>,
+    /// What the run is made of, which is settled when it opens.
+    names: Names,
+}
+
+/// The names a run answers to: its parameters, the batch fields it reads,
+/// and the nodes a tap may ask for.
+///
+/// Taken once, because the plan settles all three at open and nothing
+/// moves them (docs/plan.md section 5A.1). Held here rather than asked of
+/// the engine so that reading them is not a claim: a watcher wanting to
+/// know what a run is made of would otherwise be told the session is
+/// busy, which is true of the engine and not of the answer.
+///
+/// What is trained is not here. Freezing moves it, so it is state, and
+/// state is the engine's to report.
+struct Names {
+    parameters: Vec<String>,
+    inputs: Vec<String>,
+    nodes: Vec<String>,
+}
+
+impl Names {
+    /// Taken from an open session; the caller has one in hand.
+    fn of(engine: &EngineSession) -> Self {
+        Self {
+            parameters: engine.parameter_paths().unwrap_or_default(),
+            inputs: engine.input_names().unwrap_or_default(),
+            nodes: engine.node_names().unwrap_or_default(),
+        }
+    }
 }
 
 /// What the last completed step left behind.
@@ -336,6 +366,7 @@ impl Session {
             .map(|session| Self {
                 in_flight: AtomicBool::new(false),
                 snapshot: Mutex::new(Snapshot::of(&session)),
+                names: Names::of(&session),
                 slot: Mutex::new(Slot::Ready(Box::new(session))),
             })
             .map_err(|e| from_engine(ruby, e))
@@ -609,9 +640,10 @@ impl Session {
         Ok(ruby.ary_from_vec(names))
     }
 
-    fn node_names(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
-        let names = rb_self.read(ruby, |engine| engine.node_names())?;
-        Ok(ruby.ary_from_vec(names))
+    /// Every name a tap may ask for. Answered from what was taken at
+    /// open, so a watcher can ask while a step is in flight.
+    fn node_names(ruby: &Ruby, rb_self: &Self) -> RArray {
+        ruby.ary_from_vec(rb_self.names.nodes.clone())
     }
 
     /// What the last step's taps saw: [name, dtype, shape, bytes] each.
@@ -625,14 +657,12 @@ impl Session {
         Ok(out)
     }
 
-    fn parameter_paths(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
-        let paths = rb_self.read(ruby, |engine| engine.parameter_paths())?;
-        Ok(ruby.ary_from_vec(paths))
+    fn parameter_paths(ruby: &Ruby, rb_self: &Self) -> RArray {
+        ruby.ary_from_vec(rb_self.names.parameters.clone())
     }
 
-    fn input_names(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
-        let names = rb_self.read(ruby, |engine| engine.input_names())?;
-        Ok(ruby.ary_from_vec(names))
+    fn input_names(ruby: &Ruby, rb_self: &Self) -> RArray {
+        ruby.ary_from_vec(rb_self.names.inputs.clone())
     }
 
     fn fetch(ruby: &Ruby, rb_self: &Self, path: String) -> Result<(String, RArray, RString), Error> {
