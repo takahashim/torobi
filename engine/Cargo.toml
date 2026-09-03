@@ -15,7 +15,10 @@ license = "MIT"
 # crates.io's mlx-rs 0.25 because it tracks MLX 0.32 and falls back to a
 # pre-built MLX when no Metal compiler is present, which is what lets the
 # gem build on a machine without Xcode.
-mlx-rs = { git = "https://github.com/OminiX-ai/OminiX-MLX.git", rev = "4988a3fcfa48b8cb5d0780a501b92c6a41401523" }
+mlx-rs = { git = "https://github.com/OminiX-ai/OminiX-MLX.git", rev = "4988a3fcfa48b8cb5d0780a501b92c6a41401523", features = ["safetensors"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+# The config digest a checkpoint records, computed over the same bytes
+# the Ruby side hashed.
+sha2 = "0.10"

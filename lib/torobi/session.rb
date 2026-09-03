@@ -79,6 +79,21 @@ module Torobi
       self
     end
 
+    # Writes the run's state to `dir`, atomically: parameters, optimizer
+    # slots, the step counts, and the digest of the description they belong
+    # to. Returns the path. Interrupting it leaves no half-checkpoint.
+    def checkpoint!(dir)
+      @native.save(dir.to_s)
+    end
+
+    # Restores what `checkpoint!` wrote. Refuses a checkpoint from another
+    # description, another optimizer, or another shape, rather than
+    # absorbing the difference.
+    def restore(dir)
+      @native.restore(dir.to_s)
+      self
+    end
+
     def parameter_paths = @native.parameter_paths
     def input_names = @native.input_names
 

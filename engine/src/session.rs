@@ -13,6 +13,7 @@ use mlx_rs::transforms::{eval, value_and_grad_with_argnums};
 use mlx_rs::Array;
 use serde::Deserialize;
 
+use crate::checkpoint;
 use crate::graph::{Graph, GraphConfig};
 use crate::interp;
 use crate::optimizer::{Config as OptimizerConfig, Optimizer};
@@ -105,6 +106,9 @@ pub struct Session {
     argnums: Vec<i32>,
     /// The update rule and its slots. Half of what a checkpoint restores.
     optimizer: Optimizer,
+    /// The digest of the GraphConfig this session runs, so a checkpoint can
+    /// say which description its state belongs to.
+    config_digest: String,
     step: usize,
     last_loss: f32,
 }
@@ -123,6 +127,12 @@ impl Session {
         weights_json: &str,
         optimizer: OptimizerConfig,
     ) -> Result<Self> {
+        // The digest of exactly the bytes the caller handed over, which is
+        // what the Ruby side computed and what a checkpoint records.
+        let config_digest = {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(graph_json.as_bytes()))
+        };
         let config: GraphConfig = serde_json::from_str(graph_json).context("parsing the graph")?;
         anyhow::ensure!(!config.models.is_empty(), "the graph has no models");
         let weights: Weights =
@@ -171,9 +181,98 @@ impl Session {
             paths,
             argnums,
             optimizer,
+            config_digest,
             step: 0,
             last_loss: f32::NAN,
         })
+    }
+
+    /// Writes the run's state: parameters, optimizer slots, counters, and
+    /// what they belong to. Atomic (docs/plan.md section 11.2).
+    pub fn save(&self, dir: &str) -> Result<String> {
+        let (m, v) = self.optimizer.slots();
+        let state = checkpoint::State {
+            config_digest: &self.config_digest,
+            step: self.step,
+            optimizer: self.optimizer.config(),
+            optimizer_steps: self.optimizer.steps_taken(),
+            parameters: self
+                .paths
+                .iter()
+                .cloned()
+                .zip(self.params.iter())
+                .collect(),
+            argnums: &self.argnums,
+            slots: (m, v),
+        };
+        Ok(checkpoint::write(dir, state)?.display().to_string())
+    }
+
+    /// Restores state written by [`Session::save`], refusing anything that
+    /// does not belong to this session: another description, another
+    /// optimizer, a parameter of another shape.
+    pub fn restore(&mut self, dir: &str) -> Result<()> {
+        let loaded = checkpoint::read(dir)?;
+        let manifest = &loaded.manifest;
+        anyhow::ensure!(
+            manifest.config_digest == self.config_digest,
+            "this checkpoint belongs to another graph (digest {}, not {})",
+            &manifest.config_digest[..12.min(manifest.config_digest.len())],
+            &self.config_digest[..12]
+        );
+        anyhow::ensure!(
+            &manifest.optimizer == self.optimizer.config(),
+            "this checkpoint was written by a different optimizer ({:?})",
+            manifest.optimizer
+        );
+        anyhow::ensure!(
+            manifest.parameters.len() == self.paths.len(),
+            "this checkpoint has {} parameters, this session has {}",
+            manifest.parameters.len(),
+            self.paths.len()
+        );
+
+        let mut params = Vec::with_capacity(self.params.len());
+        for (i, path) in self.paths.iter().enumerate() {
+            let entry = &manifest.parameters[i];
+            anyhow::ensure!(
+                &entry.path == path,
+                "parameter {i} is {:?} here and {:?} in the checkpoint",
+                path,
+                entry.path
+            );
+            let array = loaded
+                .parameters
+                .get(path)
+                .with_context(|| format!("the checkpoint has no parameter {path:?}"))?;
+            anyhow::ensure!(
+                array.shape() == self.params[i].shape(),
+                "parameter {path:?}: checkpoint shape {:?} is not {:?}",
+                array.shape(),
+                self.params[i].shape()
+            );
+            params.push(array.clone());
+        }
+
+        let (mut m, mut v) = (Vec::new(), Vec::new());
+        if !loaded.slots.is_empty() {
+            for &i in &self.argnums {
+                let path = &self.paths[i as usize];
+                let (slot_m, slot_v) = loaded
+                    .slots
+                    .get(path)
+                    .with_context(|| format!("the checkpoint has no optimizer state for {path:?}"))?;
+                m.push(slot_m.clone());
+                v.push(slot_v.clone());
+            }
+        }
+
+        self.params = params;
+        self.optimizer.restore(m, v, manifest.optimizer_steps);
+        self.step = manifest.step;
+        self.last_loss = f32::NAN;
+        eval(self.params.iter())?;
+        Ok(())
     }
 
     pub fn step(&self) -> usize {

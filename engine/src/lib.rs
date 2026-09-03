@@ -5,6 +5,7 @@
 //! can reach: no tensors cross the boundary (only copies, by name), no
 //! callbacks come back in, and the model never leaves this crate.
 
+pub mod checkpoint;
 pub mod graph;
 pub mod interp;
 pub mod optimizer;

@@ -105,6 +105,18 @@ impl Session {
         Ok(lr)
     }
 
+    /// Writes the run's state and returns where it landed.
+    fn save(ruby: &Ruby, rb_self: &Self, dir: String) -> Result<String, Error> {
+        let session = rb_self.0.borrow();
+        gvl::without_gvl(|| session.save(&dir)).map_err(|e| to_error(ruby, e))
+    }
+
+    /// Restores state written by `save`, refusing what does not belong.
+    fn restore(ruby: &Ruby, rb_self: &Self, dir: String) -> Result<(), Error> {
+        let mut session = rb_self.borrow_mut(ruby)?;
+        gvl::without_gvl(|| session.restore(&dir)).map_err(|e| to_error(ruby, e))
+    }
+
     fn parameter_paths(ruby: &Ruby, rb_self: &Self) -> RArray {
         ruby.ary_from_vec(rb_self.0.borrow().parameter_paths())
     }
@@ -189,6 +201,8 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("loss", method!(Session::loss, 0))?;
     class.define_method("lr", method!(Session::lr, 0))?;
     class.define_method("lr=", method!(Session::set_lr, 1))?;
+    class.define_method("save", method!(Session::save, 1))?;
+    class.define_method("restore", method!(Session::restore, 1))?;
     class.define_method("parameter_paths", method!(Session::parameter_paths, 0))?;
     class.define_method("input_names", method!(Session::input_names, 0))?;
     class.define_method("fetch", method!(Session::fetch, 1))?;
