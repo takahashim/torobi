@@ -2370,6 +2370,54 @@ Ruby から 1 回 forward して名前付き出力を得る」だけである。
 
 Rust 3 件 / Ruby 10 件を足して、この時点で Ruby 256 件 / Rust 125 + 40 件。
 
+### 15.48 decoder のための 4 つの穴を埋めた(2026-09-04)
+
+M6 の decoder に向けた段取りの 1 段目。モデルはまだ書かず、**語彙の穴だけ**を埋める。
+調べると足りないのは 4 つだけだった。
+
+**1. `max` が無かった。** `mean` と `sum` しかない。安定な log-softmax は最大値を
+引いてから exp するので、これが無いと語彙サイズの logits で溢れる。shape rule は
+`reduce` を使い回せるので追加は小さい。
+
+**2. 語彙方向の gather が無かった。** `take` は「表の行を引く」(embedding) 用で、
+`logits[b, t, target[b,t]]` は書けない。**`cross_entropy` を融合 op にした**。§6.1 が
+言う「semantic op は丸ごと持つ」の条件に合致する: 危ないのは数値 (`log(sum(exp))` は
+語彙サイズで溢れる) と backward (もう 1 つ `[rows, vocab]` を作らせない) の両方である。
+**reduce はしない**。どの位置を数えるか (padding、最後の位置は次が無い)、どう重み付ける
+かは objective の仕事なので、位置ごとの数を返して止まる。
+
+**3. GQA が通らなかった。そして理由は shape rule ではなかった。**
+`interp::sdpa` は **fused kernel を使わず手で分解していた** (matmul → softmax → matmul)。
+q/k/v の形が一致していなければならないのはそのためで、shape rule はその写しに過ぎない。
+
+§6.1 は「backend が fused kernel を持つならそれを使う」と書いてある。**使う前に
+微分可能かを測った**: `value_and_grad` が勾配を返すこと、query 4 head / key 2 head で
+**k が tile されずに**戻ることを確認し、そのままテストとして残した
+(`the_fused_attention_differentiates_and_groups_queries`)。**融合カーネルを trainer に
+入れる前に確かめるべきはこれ**である。
+
+切り替えの副作用が 1 つ。kernel は rank 4 を要求するが、head 軸を書かない attention
+(単一 head) は IR として正当である。**backend の都合で IR の意味を狭めない**ので、
+interp が head 軸 1 を挿して呼び、出力で落とす。既存の 4 テストがこれで通る。
+
+`causal` は attribute にした。`[1, 1, seq, seq]` の三角形を毎 step 渡すのは同じ数の
+メガバイトであり、backend にモードがある。
+
+**4. 重みの共有ができなかった。** `g.param` は呼ぶたびに新しく作る。tying は
+「**同じものを 2 回読む**」であって「等しい 2 つ」ではない (後者なら checkpoint が
+同じ数を 2 部持つ)。`g.parameter(path)` で既存を読み直せるようにした。
+
+テストはこの区別をそのまま主張している: **tie した表が受け取る勾配は、tie しない
+モデルで embedding が受け取る勾配と head が受け取る勾配の和に一致する**。最初に
+「使われない行には勾配が無い」と書いて外した。softmax は全クラスに確率を与えるので、
+head 側から全行に勾配が来る。主張の方が間違っていた。
+
+ModernBERT の kohagi 突き合わせ (§15.20) が fused kernel でもそのまま通ったのは、
+切り替えの安全性についての独立した証拠である。
+
+この時点で Ruby 266 件 / Rust 126 件。次は `Models::Qwen2` と、その parity 相手と
+なる Python MLX の oracle。kohagi は encoder 専用なので、ここは新しい足場になる。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

@@ -35,6 +35,13 @@ between two versions people have.
   config that trains nothing (`train: []`) needs no loss at all, which
   is what a run opened for inference looks like. Serving is still out of
   scope: no HTTP, no tokenizer, no KV cache.
+- **The vocabulary a decoder is written in**: `max`, a `cross_entropy`
+  that takes the largest logit out before it exponentiates, attention
+  with fewer key heads than query heads (grouped-query attention) and a
+  `causal:` mode instead of a handed-over triangle, and `g.parameter` for
+  a weight read twice (a tied embedding). Attention now runs through
+  MLX's fused kernel, which is what makes the first two of those
+  possible; it differentiates, and there is a test that it does.
 - **`Torobi::GradCache`**, which trains a contrastive batch larger than
   the machine can hold, landing where the whole batch would have.
 - **`Torobi::Export`**: a run's weights written as a HuggingFace /

@@ -62,6 +62,7 @@ pub enum Op {
     Slice { axis: i32, start: i32, length: i32 },
     Mean { axes: Option<Vec<i32>>, keepdims: bool },
     Sum { axes: Option<Vec<i32>>, keepdims: bool },
+    Max { axes: Option<Vec<i32>>, keepdims: bool },
 
     Matmul,
     Take,
@@ -70,7 +71,8 @@ pub enum Op {
     /// and the IR says what they mean.
     LayerNorm { eps: f32 },
     RmsNorm { eps: f32 },
-    Sdpa { scale: Option<f32> },
+    Sdpa { scale: Option<f32>, causal: bool },
+    CrossEntropy,
 }
 
 impl Op {
@@ -79,7 +81,13 @@ impl Op {
     fn arity(&self) -> (usize, usize) {
         match self {
             Op::Parameter(_) => (0, 0),
-            Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Matmul | Op::Take => (2, 2),
+            Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Matmul
+            | Op::Take
+            | Op::CrossEntropy => (2, 2),
             Op::LayerNorm { .. } => (2, 3),
             Op::RmsNorm { .. } => (2, 2),
             Op::Sdpa { .. } => (3, 4),
@@ -149,6 +157,10 @@ impl Op {
                 axes: optional_integers(attributes, "axes")?,
                 keepdims: boolean(attributes, "keepdims"),
             },
+            "max" => Op::Max {
+                axes: optional_integers(attributes, "axes")?,
+                keepdims: boolean(attributes, "keepdims"),
+            },
             "matmul" => Op::Matmul,
             "take" => Op::Take,
             "layer_norm" => Op::LayerNorm {
@@ -159,7 +171,9 @@ impl Op {
             },
             "sdpa" => Op::Sdpa {
                 scale: optional_number(attributes, "scale")?,
+                causal: boolean(attributes, "causal"),
             },
+            "cross_entropy" => Op::CrossEntropy,
             other => anyhow::bail!(
                 "op {other:?} is not in this engine's vocabulary (config/ops.yml \
                  declares it, or it is a typo)"

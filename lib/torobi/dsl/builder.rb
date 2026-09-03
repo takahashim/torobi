@@ -77,6 +77,32 @@ module Torobi
 
       # --- parameters ---
 
+      # A parameter this graph already declares, read again.
+      #
+      # Weight tying: a decoder whose output projection is its embedding
+      # table transposed is **one** parameter read twice, not two that are
+      # kept equal. Declaring it twice would be two, and a checkpoint
+      # would hold two copies of the same numbers.
+      #
+      #   table = g.embedding(ids, vocab:, dim:, name: "embed")
+      #   ...
+      #   logits = g.matmul(h, g.parameter("embed.weight").transpose(axes: [1, 0]))
+      #
+      # The name is scoped like any other, so this reads the parameter of
+      # the scope it is called in.
+      def parameter(name)
+        path = scoped(name)
+        spec = @parameters.find { |p| p.path == path }
+        unless spec
+          raise ConfigError,
+                "no parameter #{path.inspect} is declared yet (this graph has " \
+                "#{@parameters.map(&:path).inspect}); a shared parameter is read " \
+                "after whatever declares it"
+        end
+
+        emit("parameter", params: [spec.id])
+      end
+
       def param(name, shape, init:, dtype: :f32, trainable: true)
         spec = IR::ParameterSpec.new(id: @parameters.size, path: scoped(name), shape:,
                                      dtype:, initializer: init, trainable:)
@@ -88,8 +114,18 @@ module Torobi
 
       def matmul(a, b) = emit("matmul", inputs: [a, b])
 
-      def sdpa(q, k, v, mask: nil, scale: nil)
-        emit("sdpa", inputs: [q, k, v, mask].compact, attrs: { scale: })
+      # Attention. `mask` is an additive mask the caller builds (padding,
+      # a sliding window); `causal:` is the triangle every decoder wants,
+      # which the backend has a mode for, so it is asked for by name
+      # rather than handed over as megabytes of the same number.
+      def sdpa(q, k, v, mask: nil, scale: nil, causal: false)
+        if causal && mask
+          raise ConfigError,
+                "sdpa: causal: is a mask, so it does not go with another one. " \
+                "Add what the mask says to the causal triangle, or drop it."
+        end
+
+        emit("sdpa", inputs: [q, k, v, mask].compact, attrs: { scale:, causal: })
       end
 
       def mean(x, axes: nil, keepdims: false)
@@ -98,6 +134,23 @@ module Torobi
 
       def sum(x, axes: nil, keepdims: false)
         emit("sum", inputs: [x], attrs: { axes:, keepdims: })
+      end
+
+      def max(x, axes: nil, keepdims: false)
+        emit("max", inputs: [x], attrs: { axes:, keepdims: })
+      end
+
+      # The loss at each position of a classification: what was scored,
+      # and the class each position should have had.
+      #
+      #   loss = g.mean(g.cross_entropy(logits, g.input(:targets, [nil, seq], dtype: :i32)))
+      #
+      # It reduces nothing. Which positions count (a padded one does not,
+      # nor does the last, which has nothing after it to predict) and how
+      # they are weighed is the objective's to say, and saying it is a
+      # multiply and a sum.
+      def cross_entropy(logits, targets)
+        emit("cross_entropy", inputs: [logits, targets])
       end
 
       # --- layers: parameters plus their application, in one call ---

@@ -9,6 +9,8 @@
 use std::collections::BTreeMap;
 
 use mlx_rs::error::Exception;
+use mlx_rs::fast::ScaledDotProductAttentionMask as Mask;
+use mlx_rs::ops::indexing::take_along_axis;
 use mlx_rs::Array;
 
 use crate::graph::Ref;
@@ -206,6 +208,10 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
             None => ins[0].sum(*keepdims)?,
             Some(axes) => ins[0].sum_axes(axes, *keepdims)?,
         },
+        Op::Max { axes, keepdims } => match axes {
+            None => ins[0].max(*keepdims)?,
+            Some(axes) => ins[0].max_axes(axes, *keepdims)?,
+        },
 
         Op::Matmul => ins[0].matmul(&ins[1])?,
         // An embedding: rows of the table, selected by i32 ids. The
@@ -214,7 +220,8 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
 
         Op::LayerNorm { eps } => layer_norm(ins, *eps)?,
         Op::RmsNorm { eps } => rms_norm(&ins[0], &ins[1], *eps)?,
-        Op::Sdpa { scale } => sdpa(ins, *scale)?,
+        Op::Sdpa { scale, causal } => sdpa(ins, *scale, *causal)?,
+        Op::CrossEntropy => cross_entropy(&ins[0], &ins[1])?,
     })
 }
 
@@ -293,22 +300,53 @@ fn rope(x: &Array, theta: f32) -> Result<Array> {
 /// a backend may run a fused kernel instead; what the IR says is the
 /// meaning, and the numbers are held to a tolerance rather than to an
 /// order of operations (docs/plan.md 9.2).
-fn sdpa(ins: &[Array], scale: Option<f32>) -> Result<Array> {
-    let (q, k, v) = (&ins[0], &ins[1], &ins[2]);
-    let width = *q.shape().last().expect("a query has a last axis");
+/// Attention, through the backend's own kernel.
+///
+/// The fused one rather than the decomposition it replaced (docs/plan.md
+/// 6.1: a semantic op uses the backend's kernel when there is one). What
+/// that buys is not only speed: it takes k and v untiled, which is what
+/// makes grouped-query attention expressible at all, and it has a causal
+/// mode, so a decoder does not hand over a triangle of the same number
+/// every step. It differentiates, which is the thing to check before
+/// trusting a fused kernel in a trainer, and there is a test that it does.
+fn sdpa(ins: &[Array], scale: Option<f32>, causal: bool) -> Result<Array> {
+    let width = *ins[0].shape().last().expect("a query has a last axis");
     let scale = scale.unwrap_or_else(|| 1.0 / (width as f32).sqrt());
 
-    let rank = k.ndim() as i32;
-    let mut axes: Vec<i32> = (0..rank).collect();
-    axes.swap(rank as usize - 2, rank as usize - 1);
-    let scores = q
-        .matmul(k.transpose_axes(&axes)?)?
-        .multiply(Array::from_f32(scale))?;
-    let scores = match ins.get(3) {
-        Some(mask) => scores.add(mask)?,
-        None => scores,
+    // The kernel takes [batch, heads, positions, head_dim]. A graph that
+    // writes attention without a head axis means one head, and saying so
+    // is an axis of 1 rather than a different op.
+    let flat = ins[0].ndim() == 3;
+    let lift = |a: &Array| if flat { a.expand_dims_axes(&[1]) } else { Ok(a.clone()) };
+    let (q, k, v) = (lift(&ins[0])?, lift(&ins[1])?, lift(&ins[2])?);
+    let held;
+    let mask = if causal {
+        Some(Mask::Causal)
+    } else {
+        match ins.get(3) {
+            // A mask is broadcast against the scores, so one written for
+            // three axes needs the head axis these just grew.
+            Some(mask) if flat && mask.ndim() == 3 => {
+                held = mask.expand_dims_axes(&[1])?;
+                Some(Mask::Array(&held))
+            }
+            other => other.map(Mask::Array),
+        }
     };
-    mlx_rs::ops::softmax_axis(&scores, -1, None)?.matmul(v)
+    let out = mlx_rs::fast::scaled_dot_product_attention(&q, &k, &v, scale, mask)?;
+    Ok(if flat { out.squeeze_axes(&[1])? } else { out })
+}
+
+/// The loss at each position: `logsumexp(logits) - logits[target]`.
+///
+/// The largest logit comes out before anything is exponentiated, which is
+/// what `logsumexp` is; a vocabulary's logits overflow f32 without it.
+/// The same two lines as mlx-rs's own `CrossEntropy` with no reduction,
+/// written here because the reduction is the objective's to choose.
+fn cross_entropy(logits: &Array, targets: &Array) -> Result<Array> {
+    let wanted = take_along_axis(logits, &targets.expand_dims_axes(&[-1])?, -1)?
+        .squeeze_axes(&[-1])?;
+    Ok(mlx_rs::ops::logsumexp_axes(logits, &[-1], None)?.subtract(wanted)?)
 }
 
 #[cfg(test)]
@@ -499,14 +537,47 @@ mod tests {
     #[test]
     fn sdpa_with_one_key_returns_the_value_it_attends_to() {
         // One query, one key: softmax over a single score is 1, so the
-        // answer is v exactly, whatever q and k are.
+        // answer is v exactly, whatever q and k are. Rank 4, which is
+        // what attention is: [batch, heads, positions, head_dim].
         let got = output(
             "sdpa",
-            &[1, 2],
-            serde_json::json!({"scale": null}),
+            &[1, 1, 1, 2],
+            serde_json::json!({"scale": null, "causal": false}),
             &[&[0.3, -0.7], &[1.1, 2.2], &[5.0, 6.0]],
         );
         close(&got, &[5.0, 6.0]);
+    }
+
+    /// Why the fused kernel is trusted in a trainer.
+    ///
+    /// A fused op is only usable here if it differentiates, and this is
+    /// the check that it does. It is also where grouped-query attention
+    /// is answered: four query heads over two key heads, with k and v
+    /// untiled, which is the arrangement every decoder since Llama 2 has.
+    #[test]
+    fn the_fused_attention_differentiates_and_groups_queries() {
+        use mlx_rs::transforms::value_and_grad_with_argnums;
+        use mlx_rs::Array;
+
+        let q = Array::from_slice(&[0.1f32; 24], &[1, 4, 2, 3]);
+        let k = Array::from_slice(&[0.2f32; 12], &[1, 2, 2, 3]);
+        let v = Array::from_slice(&[0.3f32; 12], &[1, 2, 2, 3]);
+
+        let forward = |args: &[Array]| -> Vec<Array> {
+            let out = mlx_rs::fast::scaled_dot_product_attention(
+                &args[0], &args[1], &args[2], 0.5, None,
+            )
+            .expect("fused attention");
+            vec![out.sum(false).expect("sum")]
+        };
+        let mut vg = value_and_grad_with_argnums(forward, &[0, 1, 2][..]);
+        let (value, grads) = vg(&[q, k, v][..]).expect("a gradient");
+
+        // Every value is 0.3, so any weighted average of them is 0.3, and
+        // there are 4 heads * 2 positions * 3 wide of them.
+        assert!((value[0].item::<f32>() - 0.3 * 24.0).abs() < 1e-5);
+        assert_eq!(grads[0].shape(), &[1, 4, 2, 3]);
+        assert_eq!(grads[1].shape(), &[1, 2, 2, 3], "k stays untiled");
     }
 
     #[test]

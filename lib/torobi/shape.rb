@@ -11,7 +11,7 @@ module Torobi
     # dispatch below, so the two can be compared instead of remembered.
     RULES = %i[
       parameter same_as_input broadcast transpose reshape slice reduce
-      matmul take sdpa
+      matmul take sdpa cross_entropy
     ].freeze
 
     module_function
@@ -29,6 +29,7 @@ module Torobi
       when :matmul then matmul(inputs, where:)
       when :take then take(inputs, where:)
       when :sdpa then sdpa(inputs, where:)
+      when :cross_entropy then cross_entropy(inputs, where:)
       else
         raise ConfigError, "#{where}: no shape rule #{rule.inspect} (ops.yml and Shape disagree)"
       end
@@ -211,11 +212,63 @@ module Torobi
       [indices.shape + table.shape[1..], table.dtype]
     end
 
+    # Attention over [batch, heads, positions, head_dim].
+    #
+    # The head counts need not agree. Grouped-query attention gives
+    # several query heads one key head, and the backend takes k and v
+    # untiled, so what is required of them is that they divide rather than
+    # match. Everything else does have to: one batch, keys and values in
+    # step with each other, and a query as wide as a key.
     def sdpa(inputs, where:)
-      q, k, v = inputs.first(3)
-      unify(q.shape, k.shape, where: "#{where} (q vs k)")
-      unify(q.shape, v.shape, where: "#{where} (q vs v)")
-      [q.shape, same_dtype(inputs.first(3), where:)]
+      given = inputs.first(3).map(&:shape)
+      rank = given.first.size
+      unless [3, 4].include?(rank) && given.all? { |shape| shape.size == rank }
+        raise ConfigError,
+              "#{where}: attention takes [batch, heads, positions, head_dim], or " \
+              "the same without the heads; q is #{given[0].inspect}, k is " \
+              "#{given[1].inspect}, v is #{given[2].inspect}"
+      end
+
+      # One head, written without saying so, is still one head.
+      q, k, v = given.map { |shape| rank == 3 ? [shape[0], 1, shape[1], shape[2]] : shape }
+      batch = unify_dim(q[0], unify_dim(k[0], v[0], where:, axis: 0), where:, axis: 0)
+      unify_dim(k[1], v[1], where: "#{where} (k vs v heads)", axis: 1)
+      unify_dim(k[2], v[2], where: "#{where} (k vs v positions)", axis: 2)
+      unify_dim(q[3], k[3], where: "#{where} (q vs k head_dim)", axis: 3)
+      grouped!(q[1], k[1], where:)
+      out = rank == 3 ? [batch, q[2], v[3]] : [batch, q[1], q[2], v[3]]
+      [out, same_dtype(inputs.first(3), where:)]
+    end
+
+    # Each key head serves the same number of query heads, so the one
+    # count divides the other. Unknown either way is left alone, as
+    # everywhere else a dimension is symbolic.
+    def grouped!(heads, kv_heads, where:)
+      return if heads.nil? || kv_heads.nil?
+      return if kv_heads.positive? && (heads % kv_heads).zero?
+
+      raise ConfigError,
+            "#{where}: #{heads} query heads do not divide into #{kv_heads} key heads"
+    end
+
+    # Logits and the class each position wants, to the loss at each
+    # position: [..., classes] and [...] to [...].
+    #
+    # The class axis is the last one and disappears; what is left is the
+    # positions, which is what the two sides have to agree about.
+    def cross_entropy(inputs, where:)
+      logits, targets = inputs
+      unless targets.dtype == :i32
+        raise ConfigError,
+              "#{where}: targets are class indices, so i32, got #{targets.dtype}"
+      end
+      if logits.shape.size < 2
+        raise ConfigError,
+              "#{where}: logits need a class axis after the positions, " \
+              "got #{logits.shape.inspect}"
+      end
+
+      [unify(logits.shape[0..-2], targets.shape, where:), logits.dtype]
     end
   end
 end

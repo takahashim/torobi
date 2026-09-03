@@ -143,6 +143,12 @@
   inputs: 1
   attributes: { axes: int_list_or_null, keepdims: bool }
   shape_rule: reduce
+# The largest, which a stable log-softmax subtracts before it exponentiates:
+# at the sizes a vocabulary has, exp of a raw logit overflows.
+- name: max
+  inputs: 1
+  attributes: { axes: int_list_or_null, keepdims: bool }
+  shape_rule: reduce
 
 - name: matmul
   inputs: 2
@@ -159,7 +165,21 @@
   inputs: 2
   attributes: { eps: number }
   shape_rule: same_as_input
+# `causal` is the mask a decoder needs, and is an attribute rather than a
+# batch field because it is a fact about the op and not about the data: a
+# [1, 1, seq, seq] triangle handed over every step is megabytes of the same
+# number, and the backend has the mode built in.
 - name: sdpa
   inputs: [3, 4]
-  attributes: { scale: number_or_null }
+  attributes: { scale: number_or_null, causal: bool }
   shape_rule: sdpa
+
+# Semantic op, kept whole for the reason 6.1 gives: what is dangerous about
+# a cross entropy is its numerics (`log(sum(exp))` over a vocabulary
+# overflows unless the largest is taken out first) and its backward, which
+# should not build a second [rows, vocabulary] to get there. It answers one
+# number per position and reduces nothing: which positions count, and how
+# they are weighed, is the objective's to say.
+- name: cross_entropy
+  inputs: 2
+  shape_rule: cross_entropy
