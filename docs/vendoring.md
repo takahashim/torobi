@@ -198,7 +198,7 @@ lets the gem build on a machine without Xcode.
 
 | condition | what it does |
 |---|---|
-| `MLX_PREBUILT_PATH` is set | links `libmlx.a` / `libmlxc.a` / `mlx.metallib` from that directory |
+| `MLX_PREBUILT_PATH` is set | links `libmlx.a` / `libmlxc.a` / `mlx.metallib` from that directory. **This is the branch Torobi takes**, below |
 | `xcrun -sdk macosx metal --version` works | builds MLX from source through cmake, patching `device.cpp` / `device.h` to disable NAX for older Metal |
 | no Metal compiler (this machine) | downloads `mlx-prebuilt-v0.1.0-macos-arm64.tar.gz` from OminiX's releases |
 
@@ -224,6 +224,21 @@ when it is missing, which is the end of the chain and the reason a
 missing file is an error rather than an abort.
 
 bindgen runs in every mode, from the mlx-c headers in the submodule.
+
+**Torobi takes the first branch on purpose.** `ext/torobi/mlx_prebuilt.rb`
+fetches the archive itself, refuses anything whose SHA-256 is not the
+recorded one, unpacks it into `~/.cache/torobi/`, and hands that directory
+to cargo through the environment (`extconf.rb` exports it into the
+generated Makefile; the Rakefile sets it for the engine's own builds). So
+the third branch never runs, one checked copy serves every build on the
+machine, and a replaced release asset breaks against the digest instead of
+being linked. That digest was computed from the bytes here and agrees with
+the one GitHub publishes for the asset.
+
+What that does not fix is where the archive comes from: it is still
+OminiX's release of an MLX (0.30.1) two minor versions behind the headers
+it is linked against. Moving to a build whose inputs are stated means
+changing three constants in that file and nothing else.
 
 Two things follow.
 
