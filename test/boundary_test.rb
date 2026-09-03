@@ -68,7 +68,7 @@ class BoundaryTest < Minitest::Test
     RUBY
     output, status = run_isolated(body)
     assert_predicate status, :success?, output
-    assert_match(/RESCUED RuntimeError/, output)
+    assert_match(/RESCUED Torobi::StepError/, output)
     assert_match(/shapes|broadcast|\(4,1\)/i, output, "the message should say what MLX objected to")
   end
 

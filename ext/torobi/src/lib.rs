@@ -9,6 +9,7 @@ mod gvl;
 
 use std::cell::RefCell;
 
+use magnus::exception::ExceptionClass;
 use magnus::value::ReprValue;
 use magnus::{function, method, prelude::*, Error, RArray, RHash, RString, Ruby, Value};
 use torobi_engine::session::{unpack, Batch, PackedBatch, PackedTensor, Tensor};
@@ -22,8 +23,18 @@ use torobi_engine::Session as EngineSession;
 #[magnus::wrap(class = "Torobi::Native::Session", free_immediately, size)]
 struct Session(RefCell<EngineSession>);
 
+/// The class a failed step raises. Defined on the Ruby side (errors.rb), so
+/// that the pure-Ruby half has the same hierarchy without this extension;
+/// looked up here rather than duplicated.
+fn step_error_class(ruby: &Ruby) -> ExceptionClass {
+    ruby.class_object()
+        .const_get::<_, magnus::RModule>("Torobi")
+        .and_then(|m| m.const_get::<_, ExceptionClass>("StepError"))
+        .unwrap_or_else(|_| ruby.exception_runtime_error())
+}
+
 fn to_error(ruby: &Ruby, error: anyhow::Error) -> Error {
-    Error::new(ruby.exception_runtime_error(), format!("{error:#}"))
+    Error::new(step_error_class(ruby), format!("{error:#}"))
 }
 
 impl Session {
@@ -36,7 +47,7 @@ impl Session {
     fn borrow_mut(&self, ruby: &Ruby) -> Result<std::cell::RefMut<'_, EngineSession>, Error> {
         self.0.try_borrow_mut().map_err(|_| {
             Error::new(
-                ruby.exception_runtime_error(),
+                step_error_class(ruby),
                 "this session is already running a step; one session serves one thread",
             )
         })

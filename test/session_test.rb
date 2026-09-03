@@ -115,31 +115,31 @@ class SessionTest < Minitest::Test
   end
 
   def test_mistakes_are_named
-    e = assert_raises(RuntimeError) do
+    e = assert_raises(Torobi::StepError) do
       Torobi::Session.open(@config, { params: {} })
     end
     assert_match(/missing parameter "spike.linear.weight"/, e.message)
 
     Torobi::Session.open(@config, @weights) do |s|
-      assert_raises(RuntimeError) { s.fetch("nope") }
+      assert_raises(Torobi::StepError) { s.fetch("nope") }
       assert_raises(ArgumentError) { s.run([]) }
 
       # A batch that omits an input, names one the graph does not have, or
       # contradicts the declared shape.
-      e = assert_raises(RuntimeError) { s.step!({ x: batch(2)[:x] }) }
+      e = assert_raises(Torobi::StepError) { s.step!({ x: batch(2)[:x] }) }
       assert_match(/missing input "y"/, e.message)
 
-      e = assert_raises(RuntimeError) { s.step!(batch(2).merge(z: batch(2)[:x])) }
+      e = assert_raises(Torobi::StepError) { s.step!(batch(2).merge(z: batch(2)[:x])) }
       assert_match(/no input named "z"/, e.message)
 
       wrong = batch(2)
       wrong[:x] = { shape: [2, 3], data: [0.0] * 6 }
-      e = assert_raises(RuntimeError) { s.step!(wrong) }
+      e = assert_raises(Torobi::StepError) { s.step!(wrong) }
       assert_match(/dimension 1 is 3, declared 2/, e.message)
 
       short = batch(2)
       short[:x] = { shape: [2, 2], data: [0.0] }
-      e = assert_raises(RuntimeError) { s.step!(short) }
+      e = assert_raises(Torobi::StepError) { s.step!(short) }
       assert_match(/1 values for shape/, e.message)
     end
   end

@@ -15,6 +15,11 @@ module Torobi
   #
   # A session is a single conversation, so it is not thread-safe: one
   # session per thread, or a pool.
+  #
+  # What it raises: ArgumentError for a call that is malformed here,
+  # Torobi::StepError for what the engine refused (the session survives),
+  # and Torobi::EngineUnavailable before opening if the engine cannot run
+  # at all (docs/plan.md section 5A.4).
   class Session
     # Opens a session over `config` (a GraphConfig) with initial `weights`,
     # shaped {params: {path => {shape:, data:}}}.
