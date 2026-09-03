@@ -95,8 +95,7 @@ class ModernBertTest < Minitest::Test
   def batch(seq)
     vocab = config.vocab_size
     ids = Array.new(seq) { |i| ((i * 137) + 11) % vocab }
-    { input_ids: { shape: [1, seq], data: ids, dtype: :i32 } }
-      .merge(Torobi::Models::ModernBERT.masks(config, seq:, lengths: [seq]))
+    Torobi::Models::ModernBERT.batch(config, [ids], seq:)
   end
 
   # With an objective, so the run has something to differentiate.
@@ -203,12 +202,100 @@ class ModernBertTest < Minitest::Test
     Torobi::Session.open(session_config,
                          pretrained: { m: File.join(dir, "model.safetensors") }) do |s|
       s.tap("hidden", stat: :full)
-      s.evaluate({ input_ids: { shape: [1, seq], data: ids, dtype: :i32 } }
-                   .merge(Torobi::Models::ModernBERT.masks(config, seq:, lengths: [seq])))
+      s.evaluate(Torobi::Models::ModernBERT.batch(config, [ids], seq:))
       rows = s.tapped.fetch("hidden")[:data].each_slice(dim).to_a
       pooled = Array.new(dim) { |j| rows.sum { |row| row[j] } / rows.size }
       length = Math.sqrt(pooled.sum { |v| v * v })
       pooled.map { |v| v / length }
+    end
+  end
+
+  # The line: what config.json determines is Torobi's, what is upstream of
+  # it is not. The pad token and the window come from the config this
+  # already reads; tokenizing does not.
+  def test_a_batch_is_built_from_ids_with_what_the_config_knows
+    b = Torobi::Models::ModernBERT.batch(config, [[1, 843, 2], [1, 90, 77, 55, 2]], seq: 6)
+
+    assert_equal [2, 6], b.dig(:input_ids, :shape)
+    assert_equal :i32, b.dig(:input_ids, :dtype)
+    pad = config.pad_token_id
+
+    assert_equal 3, pad, "ruri-v3 pads with 3, and this should read it rather than guess"
+    assert_equal [1, 843, 2, pad, pad, pad, 1, 90, 77, 55, 2, pad], b.dig(:input_ids, :data)
+
+    # Padding is masked out for every row, and the mask is per row.
+    global = b.dig(:mask, :data).each_slice(6).to_a
+
+    assert_equal [0.0, 0.0, 0.0], global[0].first(3)
+    assert(global[0].last(3).all?(&:negative?), "the first row's padding is masked")
+    assert_equal [0.0] * 5, global[6].first(5), "the second row keeps five positions"
+  end
+
+  def test_a_row_longer_than_the_graph_is_refused_rather_than_cut
+    e = assert_raises(Torobi::ConfigError) do
+      Torobi::Models::ModernBERT.batch(config, [[1, 2, 3, 4]], seq: 2)
+    end
+
+    assert_match(/4 tokens and this graph was built for 2/, e.message)
+    assert_match(/caller's to decide/, e.message)
+  end
+
+  # The window is the architecture's number, so the local mask is too.
+  def test_the_local_mask_is_the_window_the_config_names
+    seq = 300
+    half = config.local_attention / 2
+    b = Torobi::Models::ModernBERT.batch(config, [Array.new(seq, 1)], seq:)
+    local = b.dig(:local_mask, :data).each_slice(seq).to_a
+
+    assert_equal 0.0, local[0][half], "the far edge of the window is open"
+    assert_operator local[0][half + 1], :<, 0, "one past it is not"
+    assert_equal 0.0, local[200][200 - half]
+    assert_operator local[200][200 - half - 1], :<, 0
+    # The global mask has no window at all.
+    assert(b.dig(:mask, :data).all?(&:zero?), "nothing is padding here")
+  end
+
+  # Torobi is handed ids and does not know what produced them, so what
+  # produced them has to be written down. `dataset:` is where, and it
+  # reaches both the journal and every checkpoint.
+  def test_what_tokenized_the_ids_is_recorded_where_a_reader_will_find_it
+    require "stringio"
+    require "tmpdir"
+    tokenizer = { "tokenizer" => "cl-nagoya/ruri-v3-130m", "max_seq_length" => 512 }
+
+    Dir.mktmpdir("torobi-provenance") do |dir|
+      io = StringIO.new
+      # The published model would do, but this needs no half a gigabyte to
+      # show where provenance goes: the same builder, scaled down.
+      small = Torobi::Models::ModernBERT.from_hash(
+        oracle.fetch("config").merge(
+          "vocab_size" => 8, "hidden_size" => 8, "intermediate_size" => 8,
+          "num_hidden_layers" => 1, "num_attention_heads" => 2
+        )
+      )
+      encoder = Torobi::Models::ModernBERT.graph(small, seq: 4)
+      tiny = Torobi::GraphConfig.new(
+        models: { m: encoder },
+        objective: Torobi.objective(m: encoder) { |g|
+          g.output :loss, g.mean(g.from_model(:m, :hidden))
+        }
+      )
+      weights = { params: tiny.parameters.to_h { |parameter|
+        shape = parameter.spec.shape
+        [parameter.qualified_path, { shape:, data: Array.new(shape.reduce(1, :*), 0.01) }]
+      } }
+
+      Torobi::Session.open(tiny, weights:, io:, dataset: tokenizer) do |s|
+        s.step!(Torobi::Models::ModernBERT.batch(small, [[1, 2, 3]], seq: 4))
+        written = s.checkpoint!(File.join(dir, "c"))
+
+        assert_equal tokenizer,
+                     Torobi::Checkpoint.manifest(written).dig("run", "provenance", "dataset")
+      end
+
+      header = Torobi::Journal.read(io.string).first
+
+      assert_equal tokenizer, header.dig("provenance", "dataset")
     end
   end
 

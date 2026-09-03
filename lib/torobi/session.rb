@@ -61,6 +61,21 @@ module Torobi
     # section 8.6. Pass a Journal, or `io:` to have one made against this
     # config's provenance; without either, nothing is recorded and the
     # session is exactly as fast.
+    #
+    # `dataset:` is anything about the data that a later reader would need
+    # and cannot work out from here. It goes verbatim into the journal's
+    # provenance and into every checkpoint's record, and nothing
+    # interprets it.
+    #
+    # **What belongs there above all is the tokenizer.** Torobi is handed
+    # token ids and does not know what produced them; a run whose record
+    # does not say cannot be repeated, however exactly its parameters are
+    # restored. Convention rather than a requirement, because a spike has
+    # nothing to say and should not be made to say it:
+    #
+    #   dataset: { name: "jaqket-train", rows: 12_000,
+    #              tokenizer: "cl-nagoya/ruri-v3-130m",
+    #              tokenizer_revision: "e3114c6...", max_seq_length: 512 }
     def self.open(config, weights: nil, weights_file: nil, pretrained: nil,
                   optimizer: DEFAULT_OPTIMIZER, journal: nil, io: nil, dataset: nil)
       sources = { weights:, weights_file:, pretrained: }.compact

@@ -24,7 +24,7 @@ module Torobi
       Config = Data.define(
         :vocab_size, :hidden_size, :intermediate_size, :num_hidden_layers,
         :num_attention_heads, :norm_eps, :global_attn_every_n_layers,
-        :global_rope_theta, :local_rope_theta, :local_attention
+        :global_rope_theta, :local_rope_theta, :local_attention, :pad_token_id
       ) do
         def head_dim = hidden_size / num_attention_heads
 
@@ -63,7 +63,8 @@ module Torobi
           global_attn_every_n_layers: raw.fetch("global_attn_every_n_layers", 3),
           global_rope_theta: raw.fetch("global_rope_theta", 160_000.0),
           local_rope_theta: raw.fetch("local_rope_theta", 10_000.0),
-          local_attention: raw.fetch("local_attention", 128)
+          local_attention: raw.fetch("local_attention", 128),
+          pad_token_id: raw.fetch("pad_token_id", 0)
         ).check!
       end
 
@@ -151,8 +152,45 @@ module Torobi
         g.layer_norm(x, name:, bias: false, eps: config.norm_eps)
       end
 
+      # One batch, from token ids.
+      #
+      # Where the line falls: **what the model's config determines is
+      # Torobi's, and what is upstream of that is not.** The pad token, the
+      # sliding window and the vocabulary all come out of the same
+      # `config.json` this already reads, so leaving the caller to look
+      # them up would be withholding what is in hand. Tokenizing is
+      # upstream: it is decided by `tokenizer.json`, a different artifact
+      # with a different lifecycle, and owning it would mean a second
+      # native dependency for something the caller can do (docs/plan.md
+      # section 15.19).
+      #
+      #   ids = tokenizer.encode_batch(texts).map(&:ids)   # yours
+      #   batch = ModernBERT.batch(config, ids, seq: 128)  # this
+      #   session.step!(batch)
+      #
+      # Rows are padded to `seq`, which is the length the graph was built
+      # for; there is no other length it could be. A row longer than that
+      # is refused rather than truncated, because which end to drop is a
+      # decision about the data and not about the model.
+      def batch(config, rows, seq:)
+        lengths = rows.map(&:size)
+        too_long = lengths.each_with_index.select { |length, _| length > seq }
+        unless too_long.empty?
+          raise ConfigError,
+                "row #{too_long.first.last} has #{too_long.first.first} tokens and this " \
+                "graph was built for #{seq}. Tokenize to at most #{seq}, or build the " \
+                "graph for a longer sequence; where to cut a long text is the " \
+                "caller's to decide."
+        end
+
+        ids = rows.flat_map { |row| row + Array.new(seq - row.size, config.pad_token_id) }
+        { input_ids: { shape: [rows.size, seq], data: ids, dtype: :i32 } }
+          .merge(masks(config, seq:, lengths:))
+      end
+
       # The two masks a batch must carry, as {mask:, local_mask:} ready to
-      # go in.
+      # go in. `batch` calls this; it is public for a caller who has
+      # already padded its own ids.
       #
       # `lengths` is how many real tokens each row has; the rest is
       # padding, which nothing may attend to. The local mask is the same,
