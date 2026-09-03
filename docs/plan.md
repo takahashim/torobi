@@ -590,5 +590,14 @@ M0 と M1 の一部(§9.1 の M1 のうち single-step とその境界の初期�
 4. **journal のスキーマ**(§8.5)と replay 2 モードの骨格(§8.6)。実装は M2.5 だが、
    何を記録するかは G0 で決める
 
-その後 M1 の残り(異なる batch での学習、境界コスト実測、installed-gem smoke)を閉じ、
-M2(stateful core)に進む。
+### 15.1 G0 の進捗(2026-09-03)
+
+| 項目 | 状態 |
+| --- | --- |
+| batch 経路 | **済**。`step!(batch)` / `run(batches)`、packed encoding(§5A.2.1) |
+| 接続の型 | **済**。名前つき output、`Source`(batch / model output)、`stop_gradient`、model 名の名前空間、`train` 集合と argnums 規則 |
+| エラー 3 分類 | **済**。`ConfigError` / `StepError` / `EngineUnavailable`(§5A.4)。4 つ目(abort)は文書とテストで固定 |
+| journal スキーマ | **済**。`Torobi::Journal`(JSONL、6 種の entry)と `Provenance`。観測も記録する(§8.5 の訂正どおり) |
+
+その後 M1 の残り(境界コスト実測は済、**installed-gem smoke が未**)を閉じ、
+M2(stateful core: AdamW、RNG、checkpoint / resume)に進む。

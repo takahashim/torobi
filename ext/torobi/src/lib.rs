@@ -157,10 +157,20 @@ fn tensor_to_ruby(ruby: &Ruby, tensor: Tensor) -> (RArray, RArray) {
     )
 }
 
+/// What the engine was built from, as a Ruby Hash. A journal records it,
+/// so a run can say which build produced it.
+fn build_info(ruby: &Ruby) -> Result<Value, Error> {
+    let json = torobi_engine::build_info().to_string();
+    ruby.class_object()
+        .const_get::<_, magnus::RModule>("JSON")
+        .and_then(|json_module| json_module.funcall("parse", (json,)))
+}
+
 #[magnus::init]
 fn init(ruby: &Ruby) -> Result<(), Error> {
     let torobi = ruby.define_module("Torobi")?;
     let native = torobi.define_module("Native")?;
+    native.define_singleton_method("build_info", function!(build_info, 0))?;
     let class = native.define_class("Session", ruby.class_object())?;
     class.define_singleton_method("open", function!(Session::open, 2))?;
     class.define_method("run_step", method!(Session::run_step, 1))?;
