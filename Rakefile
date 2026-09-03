@@ -109,6 +109,16 @@ namespace :oracle do
     sh "ruby tools/inventory.rb #{dir.shellescape} test/oracle/ruri-v3-130m.json"
   end
 
+  # The one that needs no checkpoint on disk. A safetensors file says
+  # what it holds in a header at the front of it, so an inventory of a
+  # published model is a config.json and a byte range rather than the
+  # gigabytes underneath (tools/inventory.rb).
+  desc "record what Qwen/Qwen2.5-0.5B holds, for test/oracle (over the network)"
+  task :qwen2 do
+    sh RbConfig.ruby, "tools/inventory.rb", "Qwen/Qwen2.5-0.5B",
+       "test/oracle/qwen2.5-0.5b.json"
+  end
+
   desc "record what cl-nagoya/ruri-v3-reranker-310m holds, for test/oracle"
   task :reranker do
     dir = ENV["RURI_V3_RERANKER_310M"] ||
@@ -120,7 +130,7 @@ namespace :oracle do
 end
 
 desc "regenerate every oracle artifact"
-task oracle: ["oracle:ruri", "oracle:reranker", "oracle:forward"]
+task oracle: ["oracle:ruri", "oracle:reranker", "oracle:qwen2", "oracle:forward"]
 
 # Moving the MLX pin to another release of takahashim/mlx-prebuilt.
 #

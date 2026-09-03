@@ -150,8 +150,14 @@ reader cannot be relied on to catch.
 
 The milestones in [docs/plan.md](docs/plan.md) section 9.1 are met
 through M4: a distillation of a published ModernBERT runs to the end and
-leaves a record. Decoder architectures, LoRA, quantized ops and variable
-length attention are not implemented.
+leaves a record.
+
+Decoders are started rather than done: `Models::Qwen2` declares exactly
+what Qwen2.5-0.5B holds and its gradients agree with its forward, but it
+has not been held to a reference implementation's numbers. Generation is
+deliberately absent (no KV cache, no sampling loop); what Torobi does
+with a decoder is fine-tune it. LoRA, quantized ops and variable length
+attention are not implemented.
 
 The version is 0.0.1 and the API still moves.
 

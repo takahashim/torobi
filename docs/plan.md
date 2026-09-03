@@ -2418,6 +2418,47 @@ ModernBERT の kohagi 突き合わせ (§15.20) が fused kernel でもそのま
 この時点で Ruby 266 件 / Rust 126 件。次は `Models::Qwen2` と、その parity 相手と
 なる Python MLX の oracle。kohagi は encoder 専用なので、ここは新しい足場になる。
 
+### 15.49 Qwen2 を書いた。290 個が一発で合った(2026-09-04)
+
+段取りの 2 段目。**手元に decoder の重みが無く、Python MLX も入っていない**ところから
+始まった。5 分で分かったのは、必要なのは重みではなく**アーキテクチャの事実**である
+ということ: パラメータの名前と形。
+
+**safetensors はそれを先頭のヘッダに書いてある。** だから `tools/inventory.rb` に
+Hub モードを足した。config.json と、`model.safetensors` の**バイト範囲**を 2 回取る
+だけで棚卸しができる (`ruby tools/inventory.rb Qwen/Qwen2.5-0.5B out.json`)。
+1GB ではなく 32KB。artifact には見た commit を記録する。
+
+Qwen2.5-0.5B: hidden 896、24 層、query 14 head / key 2 head (GQA 7:1)、
+head_dim 64、intermediate 4864、rope_theta 1e6、**tie_word_embeddings: true**。
+テンソル 290 個で、**`lm_head.weight` は無い**。tie とはそういうことである。
+
+`Models::Qwen2` を書いて突き合わせたところ、**290 / 290 が名前も形も一発で一致した**
+(欠けも余りも不一致もゼロ)。§15.48 で埋めた 4 つの穴がちょうどこのモデルの形である
+ことの確認でもある: causal、GQA、SwiGLU、tie。
+
+**padding mask を持たない**のは省略ではなく主張である。右詰めで pad するので、実
+トークンの位置が pad の後に来ることはなく、causal である限り pad を見ない。pad の
+位置が出す値は objective が捨てる。
+
+テストは 2 種類ある。
+
+| | |
+| --- | --- |
+| **構造**: 公開 checkpoint の 290 個と名前・形が一致 | oracle artifact に対して。1GB は要らない |
+| **振る舞い**: 全パラメータで中心差分と一致 (小さい config) | GQA・causal・gated MLP・両端から読まれる表を通した backward |
+| **振る舞い**: **後ろのトークンを変えても前の位置は動かない** | decoder が decoder であることの主張で、**参照実装が要らない** |
+
+3 つ目が気に入っている。最後のトークンを変えて、それより前の位置の logits が
+1 bit も動かないことを見る。causal が本当に効いているかは、これで参照無しに言える。
+
+**まだ無い 3 つ目の種類**は「参照実装と数値が一致する」である (§9.2)。これには重みと、
+それを走らせる第 2 実装 (mlx-lm か transformers) が要る。kohagi は encoder 専用なので
+ここは新しい足場になる。Qwen2.5-0.5B は 1GB あり、環境も要るので、**やるかどうかは
+別の判断**として残す。
+
+この時点で Ruby 275 件 / Rust 126 件。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。
