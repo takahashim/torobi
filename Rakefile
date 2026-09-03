@@ -122,6 +122,79 @@ end
 desc "regenerate every oracle artifact"
 task oracle: ["oracle:ruri", "oracle:reranker", "oracle:forward"]
 
+# Moving the MLX pin to another release of takahashim/mlx-prebuilt.
+#
+#   rake mlx:pin          # whatever that repository released last
+#   rake mlx:pin[v0.4.2]  # a release by name
+#
+# What it automates is transcription, which is the part a person does
+# badly: it asks GitHub for the release, takes the asset and the digest
+# GitHub computed, writes ext/torobi/mlx_prebuilt.json, and then fetches
+# through the same code an install uses, so the download is verified
+# against the digest that was just recorded. If those bytes are not those
+# bytes, nothing is installed and the pin is left as it was.
+#
+# It stops there on purpose. What makes a pin trustworthy is a test run
+# against it, and that is `rake`, and then a commit.
+namespace :mlx do
+  desc "pin MLX to a release of the prebuilt archive (default: the latest)"
+  task :pin, [:tag] do |_task, args|
+    require_relative "ext/torobi/mlx_prebuilt"
+    require "json"
+    require "net/http"
+
+    pin = MlxPrebuilt::PIN.dup
+    tag = args[:tag]
+    api = "https://api.github.com/repos/#{pin.fetch("repo")}/releases/" \
+          "#{tag ? "tags/#{tag}" : "latest"}"
+    release = JSON.parse(fetch_json(api))
+    asset = release.fetch("assets").find { |a| a.fetch("name").end_with?(".tar.gz") }
+    abort "#{release["tag_name"]} has no .tar.gz asset" unless asset
+    digest = asset["digest"].to_s.delete_prefix("sha256:")
+    abort "#{asset["name"]} carries no sha256 digest" if digest.empty?
+
+    was = pin.slice("release", "asset", "digest")
+    pin["release"] = release.fetch("tag_name")
+    pin["asset"] = asset.fetch("name")
+    pin["digest"] = digest
+    write_pin(pin)
+
+    # Through the same path an install takes, so the digest is checked
+    # against the bytes rather than believed.
+    MlxPrebuilt.ensure!(io: $stdout)
+    said = MlxPrebuilt.manifest
+    if said
+      pin["mlx"] = said.fetch("mlx", pin["mlx"]).delete_prefix("v")
+      pin["mlx_c"] = said.fetch("mlx-c", pin["mlx_c"]).delete_prefix("v")
+      write_pin(pin)
+    else
+      warn "torobi: the archive has no MANIFEST.txt, so the versions are unchanged"
+    end
+
+    puts was == pin.slice("release", "asset", "digest") ? "unchanged" : "pinned:"
+    %w[release asset digest mlx mlx_c].each { |key| puts "  #{key}: #{pin[key]}" }
+    puts "now run `rake`, and commit ext/torobi/mlx_prebuilt.json if it passes"
+  end
+end
+
+def write_pin(pin)
+  File.write("ext/torobi/mlx_prebuilt.json", "#{JSON.pretty_generate(pin)}\n")
+end
+
+# One GitHub API read, following its redirects and saying what went wrong
+# in its own words (a rate limit is the usual answer).
+def fetch_json(url, hops: 5)
+  abort "#{url} redirects too far" if hops.zero?
+
+  uri = URI.parse(url)
+  response = Net::HTTP.get_response(uri)
+  case response
+  when Net::HTTPRedirection then fetch_json(response["location"], hops: hops - 1)
+  when Net::HTTPSuccess then response.body
+  else abort "#{url} answered #{response.code} #{response.message}: #{response.body[0, 200]}"
+  end
+end
+
 # The engine held to exact arithmetic, through its command line
 # (engine/check). Part of the default task: it is cheap, it is the only
 # thing that runs the `torobi-engine` binary, and a check nobody runs is

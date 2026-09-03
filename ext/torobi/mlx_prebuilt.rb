@@ -2,6 +2,7 @@
 
 require "digest"
 require "fileutils"
+require "json"
 require "net/http"
 
 # The MLX binary this extension links, fetched once and checked.
@@ -25,24 +26,27 @@ require "net/http"
 # It is deliberately small and free of Torobi: it runs before anything is
 # built, so it may use only what ships with Ruby.
 module MlxPrebuilt
-  # Where the binary comes from. One constant per thing that would change
-  # if it came from somewhere else, so moving to another build is an edit
-  # here and nowhere else.
-  REPO = "takahashim/mlx-prebuilt"
-  RELEASE = "v0.4.1.0"
-  ASSET = "mlx-v0.30.1-mlxc-v0.4.1-macos-arm64.tar.gz"
+  # Which archive, beside this file rather than in it.
+  #
+  # A digest is written by whoever built the archive, not by whoever wrote
+  # this code, and a value transcribed by hand is a value that can be
+  # transcribed wrongly. `rake mlx:pin` puts it there, having downloaded
+  # the bytes and hashed them; this only reads it.
+  PIN = JSON.parse(File.read(File.join(__dir__, "mlx_prebuilt.json"))).freeze
+
+  REPO = PIN.fetch("repo")
+  RELEASE = PIN.fetch("release")
+  ASSET = PIN.fetch("asset")
   URL = "https://github.com/#{REPO}/releases/download/#{RELEASE}/#{ASSET}"
 
-  # SHA-256 of that asset, checked against the bytes rather than taken
-  # from the release page.
-  DIGEST = "ee7af2c6d511f82af67502017d55019abb4fa2252105dd7aa2f10156f933851a"
+  # SHA-256 of that asset. The whole point of this file: a release asset
+  # can be replaced without its URL changing, and this is what notices.
+  DIGEST = PIN.fetch("digest")
 
-  # What is inside, which the archive states rather than leaving to be
-  # read out of a binary with `strings`. mlx-c v0.4.1 is the version whose
-  # headers these bindings were generated from, and MLX v0.30.1 is what
-  # that mlx-c pins: the pair as upstream tagged it.
-  MLX_VERSION = "0.30.1"
-  MLX_C_VERSION = "0.4.1"
+  # What is inside, which the archive states in its manifest rather than
+  # leaving to be read out of a binary with `strings`.
+  MLX_VERSION = PIN.fetch("mlx")
+  MLX_C_VERSION = PIN.fetch("mlx_c")
 
   # What `mlx-sys` expects to find in a prebuilt directory.
   FILES = %w[libmlx.a libmlxc.a libgguflib.a mlx.metallib].freeze
@@ -90,6 +94,22 @@ module MlxPrebuilt
     raise Refused, "#{dir} holds no directory with #{FILES.join(", ")}" unless found
 
     found
+  end
+
+  # What the archive says it holds, or nil when it says nothing.
+  #
+  # `MANIFEST.txt` is a build's own account of itself: which mlx-c, which
+  # MLX, and on what. Read from here rather than from a caller, because
+  # where it sits is a fact about the archive and this is the file that
+  # knows about archives.
+  def manifest(into: cache_dir)
+    found = Dir.glob(File.join(into, "**", "MANIFEST.txt")).first
+    return nil unless found
+
+    File.read(found).lines.filter_map do |line|
+      key, value = line.split(/\s+/, 2)
+      [key, value.strip] if key && value
+    end.to_h
   end
 
   # Whether a previous run left a complete, checked copy here.

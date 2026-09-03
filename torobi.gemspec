@@ -21,7 +21,7 @@ Gem::Specification.new do |spec|
   # The extension is built from source at install time, so the crates and
   # the workspace manifest ship with it. docs/vendoring.md is in here
   # because it is the record of what the engine is built against.
-  spec.files = Dir["lib/**/*.rb", "config/ops.yml", "ext/**/*.{rs,rb,toml}",
+  spec.files = Dir["lib/**/*.rb", "config/ops.yml", "ext/**/*.{rs,rb,toml,json}",
                    "engine/**/*.{rs,toml}", "Cargo.toml", "Cargo.lock",
                    "README.md", "LICENSE", "docs/plan.md", "docs/vendoring.md"]
   spec.require_paths = ["lib"]
