@@ -666,4 +666,22 @@ M0 と M1 の一部(§9.1 の M1 のうち single-step とその境界の初期�
 optimizer は engine が所有(§5 の方針どおり mlx-rs のものを使わない)。checkpoint は
 digest・path・shape・optimizer 種別を読み戻しで検証し、不一致を拒否する。
 
-次は M2.5(窓: ノブ、フック、journal の実運用、2 種の replay)、または M3a(model import)。
+### 15.4 M2.5 の進捗(2026-09-03)
+
+| 出口条件 | 状態 |
+| --- | --- |
+| ノブ | **概ね済**。lr / seed / freeze / unfreeze / put / checkpoint。**残: rollback、損失重み**(後者は objective graph に入力として持たせる形が決まってから) |
+| フック | **済**。`s.on(event, every:)` と `s.use(policy)`、発火点は step / span_end / checkpoint_written。柵 4 本(登録順、再入禁止、例外で span 停止、調整は journal 経由)。標準ポリシー 5 つ |
+| journal の実運用 | **済**。全ての窓操作が自動記録。header に provenance、entry ごとに flush |
+| 観測タップ(B+) | **済**。ノードの安定命名 → `tap(name, stat:)`、norm / mean / extent / full。デバイス側縮約。**タップ有無で学習結果が一致する**ことを検証 |
+| 2 種の replay | **済**。`Replay.action`(policy を再実行せず操作を適用、bitwise 一致)と `Replay.rerun`(policy を再実行し、観測値と判断まで照合)。データは journal が digest でしか名指ししないので呼び出し側が供給する |
+| freeze を構造変更として | **済**。argnums の変更に optimizer slot が追随(保持 / 破棄 / ゼロ初期化)、step 数は据え置き |
+
+**残る作業**(M3a の前に片付けるか、並行するか):
+
+- checkpoint の完全性(§11.2 の graph.json、epoch、sampler position、dtype inventory)。
+  現状は engine-state checkpoint であって run checkpoint ではない
+- Rust 側の単体テストが 0 件
+- `session.rs` の分割(ExecutionPlan / TrainState / Executor / Session)
+- rollback ノブ、損失重みノブ
+- 長時間学習のための `Process.spawn` runner(§11.4 の配布方針と同じ判断)
