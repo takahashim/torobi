@@ -29,9 +29,16 @@ module Torobi
       before - after
     end
 
-    # Caps what this process may allocate on the device; 0 lifts the cap.
+    # Tells MLX what this process should hold on the device; 0 lifts it.
     # Read `limit` first if you mean to restore it: MLX reports the cap now
     # in force, not the one it replaced.
+    #
+    # **Not a ceiling.** Measured: a 336 MB peak ran to completion under a
+    # 67 MB limit, and a step reaching 14.5 GB ran under a 9 GB one, thirteen
+    # times slower than usual. MLX reads this as pressure on its cache, so
+    # it reclaims earlier and keeps going. A run that must not pass a size
+    # wants `Torobi::Policies::MemoryGuard` as well, which reads `active`
+    # between steps and stops.
     def limit=(bytes)
       Native.memory_limit = bytes
     end

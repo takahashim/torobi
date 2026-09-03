@@ -151,6 +151,50 @@ module Torobi
       end
     end
 
+    # Stops a run before the machine notices it.
+    #
+    # `Torobi::Memory.limit=` is not a refusal, which was measured rather
+    # than assumed: a 336 MB peak ran to completion under a 67 MB limit,
+    # and a step whose peak reached 14.5 GB ran under a 9 GB one (it took
+    # 41s where it usually takes 3, because the allocator was reclaiming
+    # rather than failing). MLX treats the limit as pressure on its cache,
+    # not as a ceiling.
+    #
+    # So the ceiling has to be Ruby's. This reads what the device is
+    # holding between steps and raises when it passes `bytes`, which the
+    # run's process reports as a failure and the parent reads from the
+    # journal. On unified memory the alternative is the machine stopping
+    # (docs/plan.md section 15.22), which no rescue sees.
+    #
+    #   s.use(Torobi::Policies::MemoryGuard.new(10 * 1024**3), every: 10)
+    #
+    # `every:` is worth using: reading costs a call through the runtime's
+    # gate, and device memory does not change between steps that are not
+    # taking any.
+    class MemoryGuard
+      # What the device was holding when this last looked.
+      attr_reader :seen
+
+      def initialize(bytes, on_limit: nil)
+        raise ArgumentError, "a guard needs a positive limit" unless bytes.positive?
+
+        @bytes = Integer(bytes)
+        @on_limit = on_limit
+        @seen = 0
+      end
+
+      def call(event)
+        @seen = Torobi::Memory.active
+        return if @seen <= @bytes
+
+        event.session.observe(memory_at: event.step, active: @seen, limit: @bytes)
+        return @on_limit.call(event) if @on_limit
+
+        raise Torobi::StepError,
+              "the device is holding #{@seen / 1024**2} MB at step #{event.step}, "               "past the #{@bytes / 1024**2} MB this run was given. Stopping here "               "rather than letting the machine find out"
+      end
+    end
+
     # Keeps a checkpoint of the best the run has been.
     class BestCheckpoint
       attr_reader :best, :path

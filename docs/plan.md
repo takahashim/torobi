@@ -1778,6 +1778,70 @@ facade の規則は「公開の経路は必ず `runtime().execute` を通る」�
 module に切り出すと 1 つのオブジェクトの振る舞いがファイルをまたぐ。コードが
 倍になったら (窓の操作がもう 5 つ増えるなど) 再考する。
 
+### 15.34 tech-ruri-data 型の学習を検討して、3 つ出た(2026-09-03)
+
+`~/git/tech-ruri-data` は sentence-transformers で ruri-v3-130m を検索モデルに
+fine-tune している (`CachedMultipleNegativesRankingLoss`、mean pooling、
+prefix 込み、hard negatives)。同じことが Torobi で書けるかを実際に組んで確かめた。
+
+**書ける。** 対照学習の損失は既存の語彙だけで書けた。engine の変更は要らない。
+
+    scores  = matmul(q, dᵀ) * scale        # 全クエリ × 全文書
+    matched = sum(q * d, axis: -1) * scale # 対応する対だけ
+    loss    = mean(log(sum(exp(scores), axis: -1)) - matched)
+
+小さな ModernBERT で 6 対を学習させ、**6 対すべてが自分の文書に最も近くなった**
+(loss 0.045 → 0)。クエリと文書は 1 つの batch に積んで**同じパラメータを 1 回
+通す** (`[2N, seq]` → `[2, N, H]` に reshape して割る) ので、モデルを 2 回適用する
+必要は無い。
+
+**出たもの 1: reduce の shape 規則のバグ。** `sum` / `mean` が **symbolic な batch
+次元を落としていた** (`[nil, 8, 16]` を axes [1] で畳むと `[16]`)。`filter_map` が
+「畳んだ軸」の nil と「batch が symbolic」の nil を区別していなかった。**mean
+pooling の分類器はこれで組み立てられなかった** (`matmul needs rank >= 2`)。
+ruri のリランカーは cls pooling なので今まで踏んでいない。
+
+**出たもの 2: batch を具体化する口が要る。** `slice` は symbolic 次元を意図的に
+拒否する。対照学習の負例は**同じ batch の他の行**なので、行の間で切る損失は batch
+の大きさを知らないと書けない。`ModernBERT.encode(rows:)` を足した (既定は今まで
+どおり symbolic)。graph が batch サイズを持つのは `seq` と同じ譲歩である。
+
+**出たもの 3 (これが重い): `Memory.limit=` は上限ではない。** 実測:
+
+| | |
+| --- | --- |
+| 67 MB の limit の下で | peak 336 MB が完走 |
+| 9 GB の limit の下で | peak 14,496 MB が完走 (1 step 41.8s、通常 3s) |
+
+MLX はこれを cache への圧力として読むので、**上限を超えても拒否せず、遅くなって
+進む**。`Runner` の LIMIT_VARIABLE は「cap が machine の停止を子が報告できる例外に
+変える」と書いていたが、**これは誤りだった**。§15.22 で OS を落として以来、この
+安全策に寄りかかって測ってきたので、訂正が要る。
+
+**天井は Ruby 側に置いた。** `Policies::MemoryGuard` が step の間に
+`Memory.active` を読み、超えたら止める。limit は依然として有用 (早めに回収する、
+遅くなるので兆候が見える) が、**天井は別に要る**。両方を設定する。
+
+**残る差**は 3 つで、いずれも書けないのではなく無いもの:
+
+| tech-ruri-data | Torobi |
+| --- | --- |
+| `CachedMultipleNegativesRankingLoss` (GradCache) | 無い。batch は載る大きさまで |
+| gradient accumulation | 無い。step は forward+backward+update で 1 つ |
+| 学習結果を HF/sentence-transformers 形式で書き出す | 無い (パラメータ名は一致しているので、prefix を外して safetensors を書くだけ) |
+
+**この機械で載る大きさ** (ruri-v3-130m、pair あたり 2 テキスト、AdamW):
+
+| | 1 step | peak |
+| --- | --- | --- |
+| seq 128 × 8 対 (16 テキスト) | 3.16s | 5,115 MB |
+| seq 256 × 8 対 | 3.89s | 8,244 MB |
+| seq 512 × 4 対 (8 テキスト) | 2.81s | 8,791 MB |
+| seq 512 × 8 対 | 41.83s | 14,496 MB (16GB 機では実質不可) |
+
+tech-ruri-data は 512 トークン・batch 8・negatives 2〜6 なので、**GradCache 無しで
+そこには届かない**。届く形は seq 256 で 8 対、あるいは seq 512 で 4 対まで。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

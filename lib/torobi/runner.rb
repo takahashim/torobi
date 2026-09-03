@@ -44,12 +44,19 @@ module Torobi
     # this after the fact, from a run it did not start.
     DIRECTORY_VARIABLE = "TOROBI_RUN_DIR"
 
-    # What the child may allocate on the device, in bytes.
+    # What the child is told it may allocate on the device, in bytes.
     #
     # MLX draws from the same memory the rest of the machine uses, so a run
     # that asks for more than there is does not fail: the machine stops
-    # answering and its watchdog ends the session. A cap turns that into an
-    # exception the child can report. Set it.
+    # answering and its watchdog ends the session.
+    #
+    # This does not prevent that on its own, which was measured: a step
+    # whose peak reached 14.5 GB ran to completion under a 9 GB limit, at
+    # 41s where it usually takes 3. MLX reads the limit as pressure on its
+    # cache rather than as a ceiling, so what it buys is earlier
+    # reclaiming and a warning sign in the timings. The ceiling is
+    # `Torobi::Policies::MemoryGuard`, which reads what is held between
+    # steps and stops the run. Set both.
     LIMIT_VARIABLE = "TOROBI_MEMORY_LIMIT"
 
     # What the child exits with. A signal is not in here on purpose: that is
@@ -309,16 +316,24 @@ module Torobi
         @memory_limit = memory_limit
       end
 
-      # Caps what this run may hold on the device, if the parent said so.
+      # Tells MLX what this run may hold on the device, if the parent said
+      # so, and answers what that is.
       #
-      # Before anything opens a session, because the point is to be told
-      # rather than to find out: past the cap MLX raises, and under it the
-      # machine stays answerable.
+      # Before anything opens a session, because the allocator should know
+      # before it starts. It is not a ceiling (see LIMIT_VARIABLE): a run
+      # that must not pass a size also wants a
+      # `Torobi::Policies::MemoryGuard` at that size, which is the half
+      # that raises.
       def cap!
         return unless @memory_limit && Torobi.const_defined?(:Memory)
 
         Torobi::Memory.limit = @memory_limit
+        @memory_limit
       end
+
+      # What the parent said this run may hold, or nil. What a
+      # `MemoryGuard` should be built with.
+      attr_reader :memory_limit
 
       attr_reader :dir
 

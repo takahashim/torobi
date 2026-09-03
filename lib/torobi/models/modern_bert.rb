@@ -92,13 +92,13 @@ module Torobi
       # classifiers keep it under `model.`; a classifier built on a bare
       # encoder checkpoint (ruri-v3-130m holds `embeddings.*` at the root)
       # wants none, and its head is `fresh:` because no file has one.
-      def classifier(config, seq:, encoder_prefix: "model")
+      def classifier(config, seq:, encoder_prefix: "model", rows: nil)
         config.check!
         Torobi.graph do |g|
           x = if encoder_prefix.to_s.empty?
-                encode(g, config, seq:)
+                encode(g, config, seq:, rows:)
               else
-                g.scope(encoder_prefix) { encode(g, config, seq:) }
+                g.scope(encoder_prefix) { encode(g, config, seq:, rows:) }
               end
           pooled = pool(g, x, config, seq:)
           # ModernBERT's head: a dense, gelu, a norm, then the classifier.
@@ -145,21 +145,28 @@ module Torobi
       # (`Config#local_attention`), and building them is the caller's:
       # the graph says attention, not which positions this batch has.
       # `ModernBERT.masks` builds both.
-      def graph(config, seq:)
+      def graph(config, seq:, rows: nil)
         config.check!
         Torobi.graph do |g|
           # Named as well as declared an output, so a tap can read it: an
           # output is what the objective consumes, and a tap is how a
           # caller sees a value without a second graph to see it with.
-          g.output :hidden, g.name("hidden", encode(g, config, seq:))
+          g.output :hidden, g.name("hidden", encode(g, config, seq:, rows:))
         end
       end
 
       # The encoder body, so the bare model and the classifier are one
       # description rather than two that must be kept in step.
-      def encode(g, config, seq:)
-        ids = g.input(:input_ids, [nil, seq], dtype: :i32)
-        padding = g.input(:mask, [nil, 1, 1, seq])
+      #
+      # `rows:` fixes how many rows a batch has, and is normally left
+      # alone: the batch is the dimension that varies between steps, and
+      # everything here works without knowing it. Naming it is for an
+      # objective that reads across the batch rather than down it, which
+      # a contrastive loss does (its negatives are the other rows), and
+      # which cannot be written against a dimension nothing knows.
+      def encode(g, config, seq:, rows: nil)
+        ids = g.input(:input_ids, [rows, seq], dtype: :i32)
+        padding = g.input(:mask, [rows, 1, 1, seq])
         # Summed once, not in each of the local layers: both are the same
         # for every one of them. Only when there is a local layer to read
         # it, so a configuration with none asks for no window.

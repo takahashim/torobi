@@ -171,10 +171,13 @@ module Torobi
       if axes.uniq.size != axes.size
         raise ConfigError, "#{where}: duplicate reduction axes #{attrs["axes"].inspect}"
       end
-      out = shape.each_with_index.filter_map do |dim, i|
-        next dim unless axes.include?(i)
+      # flat_map rather than filter_map: a dimension that is kept can
+      # itself be nil (the batch is symbolic), and dropping those was how
+      # a reduction over [nil, seq, hidden] came back as [hidden].
+      out = shape.each_with_index.flat_map do |dim, i|
+        next [dim] unless axes.include?(i)
 
-        keepdims ? 1 : nil
+        keepdims ? [1] : []
       end
       [out, inputs.first.dtype]
     end

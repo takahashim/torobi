@@ -148,6 +148,34 @@ class HooksTest < Minitest::Test
     end
   end
 
+  # `Memory.limit=` is not a ceiling: MLX reads it as pressure on its
+  # cache and keeps going (a 336 MB peak ran under a 67 MB limit). On
+  # unified memory the thing that notices next is the machine, so the
+  # ceiling has to be here.
+  def test_a_memory_guard_stops_a_run_that_holds_too_much
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
+      # One byte, which is under anything: a model this small holds 20 of
+      # them, and a size worth guarding is not something a test can know.
+      guard = Torobi::Policies::MemoryGuard.new(1)
+      s.use(guard)
+      e = assert_raises(Torobi::StepError) { s.repeat(batch, steps: 3) }
+
+      assert_match(/past the/, e.message)
+      assert_operator guard.seen, :>, 1
+      assert_equal 1, s.step, "it should stop at the first step past the limit"
+    end
+  end
+
+  # A limit nothing passes is a policy that does nothing.
+  def test_a_memory_guard_under_the_limit_is_quiet
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
+      s.use(Torobi::Policies::MemoryGuard.new(4 * 1024**3))
+      s.repeat(batch, steps: 3)
+
+      assert_equal 3, s.step
+    end
+  end
+
   # What a policy does goes through the same knobs, so it lands in the
   # journal like anything else.
   def test_what_a_policy_adjusts_is_journalled
