@@ -76,6 +76,34 @@ carries upstream's `repository = "https://github.com/oxideai/mlx-rs"`, so
 upstream rather than to what was compiled. Read `engine/Cargo.toml` and
 `Cargo.lock` for the truth; they name the fork and its commit.
 
+## What Apple publishes, and why it is not a drop-in
+
+`mlx-metal` on PyPI is official (`mlx@group.apple.com`, owners awni /
+katharas / mlx-dev), versioned per MLX release, one wheel per macOS
+version, **with a SHA-256 for every file**. At 0.32.2 a wheel holds:
+
+| | |
+|---|---|
+| `mlx/lib/mlx.metallib` | 129.55 MB, the compiled Metal kernels |
+| `mlx/lib/libmlx.dylib` | 20.86 MB, **dynamic** |
+| `mlx/lib/libjaccl.dylib` | 1.48 MB |
+| `mlx/include/**` | MLX's headers, 405 entries |
+
+What `mlx-sys` wants from `MLX_PREBUILT_PATH` is `libmlx.a`, `libmlxc.a`,
+`libgguflib.a` and `mlx.metallib`: **static** libraries, and `libmlxc.a`
+is mlx-c, a separate project that is in no MLX wheel. So the official
+artifact is not a substitute for OminiX's tarball as things stand.
+
+What it *is* good for is the expensive half. The metallib is the part
+that needs the Metal compiler and the part that is 130 MB, and Apple
+publishes it, versioned and hashed. Anyone building the rest has to
+answer one question first: **can a Metal-capable `libmlx.a` be compiled
+without the Metal toolchain when the kernels come from a prebuilt
+metallib?** If it can, a build repository needs nothing but clang. If it
+cannot, its runner needs `xcodebuild -downloadComponent MetalToolchain`,
+which GitHub's macOS runners can do. Either way the MLX version stops
+being a thing read out of a binary with `strings`.
+
 ## Which one to point at
 
 Three different questions, three different answers, and they are not in
@@ -95,7 +123,7 @@ the two that installs without Xcode, and that is not a preference.
 | what | state |
 |---|---|
 | mlx-rs / mlx-sys / mlx-c | **git dependency on `https://github.com/OminiX-ai/OminiX-MLX.git`, pinned to `4988a3fcfa48b8cb5d0780a501b92c6a41401523`.** Cargo.lock records the same commit; cargo resolves the mlx-c submodule itself |
-| MLX core | **not built from source here**: mlx-sys finds no Metal compiler on this machine and downloads OminiX's pre-built binary `mlx-prebuilt-v0.1.0-macos-arm64.tar.gz`. The exact MLX revision is whatever that tarball pins, which is the one thing this ledger still cannot name |
+| MLX core | **not built from source here**: mlx-sys finds no Metal compiler on this machine and downloads OminiX's pre-built binary `mlx-prebuilt-v0.1.0-macos-arm64.tar.gz`. **It is MLX 0.30.1**, from the version string in its `libmlx.a`; the release says nothing, so this is read off the bytes. Note that the pinned mlx-rs carries `d145d5b feat(qwen3-asr): batched decode, and require MLX 0.32.0` from six months after that tarball was built, and nothing checks the two against each other |
 | mlx.metallib | 105 MB. MLX locates it through `dladdr`, i.e. **beside whichever library holds the MLX symbols**: `target/release/` for the CLI, the install directory for the extension. `ext/torobi/extconf.rb` appends a Makefile rule that installs it beside the bundle; `rake metallib` does the same for a checkout. Any distribution must ship it beside the bundle |
 
 ## Licences
