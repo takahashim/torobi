@@ -106,25 +106,6 @@ module Torobi
       loss
     end
 
-    # Hands several batches to the engine at once, which runs them without
-    # returning to Ruby in between.
-    #
-    # Faster by a fraction of a percent, and worth it only where a span is
-    # short and known: it cannot be interrupted, and every batch is held in
-    # memory (as Ruby objects, as packed strings, and again inside the
-    # engine) before the first step runs. `run` is the normal way.
-    def run_uninterruptible(batches, limit: 1024)
-      packed = batches.first(limit + 1).map { |b| Batch.pack(b) }
-      raise ArgumentError, "a span needs at least one batch" if packed.empty?
-      if packed.size > limit
-        raise ArgumentError,
-              "run_uninterruptible takes at most #{limit} batches at a time; " \
-              "use run for a span this long"
-      end
-
-      @native.run_steps(packed)
-    end
-
     # A span: one step per batch, driven from here.
     #
     # One native call per step, not one per span. The boundary costs a
@@ -176,12 +157,15 @@ module Torobi
 
     # The same batch for `steps` steps. For fixed-data spikes and tests;
     # real training passes different batches.
+    #
+    # One `step!` per step, not a shortcut past it: a step that the journal
+    # does not hold is a step a replay cannot follow, and hooks fire here
+    # like anywhere else.
     def repeat(batch, steps:)
       raise ArgumentError, "steps must be positive" unless steps.positive?
 
-      packed = Batch.pack(batch)
       last = nil
-      steps.times { last = @native.run_step(packed) }
+      steps.times { last = step!(batch) }
       last
     end
 

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
+require "stringio"
 
 # How a session behaves under the things a long-running Ruby process does
 # to it: a second thread, a panic, a close, a fork. Each of these used to
@@ -147,15 +148,52 @@ class LifecycleTest < Minitest::Test
     end
   end
 
-  def test_the_bulk_form_is_bounded
-    Torobi::Session.open(config, weights) do |s|
-      e = assert_raises(ArgumentError) { s.run_uninterruptible(Array.new(5) { batch }, limit: 3) }
-      assert_match(/at most 3 batches/, e.message)
-      assert_equal 0, s.step
+  # `repeat` is sugar over `step!`, not a shortcut past it: every step it
+  # takes is journalled and fires its hooks like any other.
+  def test_repeat_is_a_span_like_any_other
+    io = StringIO.new
+    Torobi::Session.open(config, weights, io:) do |s|
+      fired = 0
+      s.on(:step) { fired += 1 }
+      s.repeat(batch, steps: 4)
 
-      s.run_uninterruptible(Array.new(3) { batch }, limit: 3)
-      assert_equal 3, s.step
+      assert_equal 4, s.step
+      assert_equal 4, fired
+      spans = s.journal.entries.count { |e| e["kind"] == "span" }
+      assert_equal 4, spans, "one entry per step"
     end
+  end
+
+  # An unclosed session is still the GC's to free, and freeing device
+  # memory is MLX work. Done beside another session's step, without the
+  # gate, that is a crash rather than an exception; in a subprocess for
+  # that reason.
+  def test_the_gc_frees_an_unclosed_session_while_another_one_runs
+    script = <<~SCRIPT
+      $LOAD_PATH.unshift(#{File.expand_path("../lib", __dir__).inspect})
+      require "torobi"
+      model = Torobi.graph do |g|
+        x = g.input :x, [nil, #{DIM}]
+        g.output :loss, g.mean(g.linear(x, #{DIM}, name: "l"))
+      end
+      config = Torobi::GraphConfig.new(models: { "m" => model })
+      weights = #{weights.inspect}
+      batch = #{batch.inspect}
+      keeps_going = Torobi::Session.open(config, weights)
+      worker = Thread.new { 300.times { keeps_going.step!(batch) } }
+      60.times do
+        # Opened and dropped without close, so the sweep has device memory
+        # to free while the worker is inside MLX.
+        Torobi::Session.open(config, weights).step!(batch)
+        GC.start
+      end
+      worker.join
+      puts "SURVIVED \#{keeps_going.step}"
+      keeps_going.close
+    SCRIPT
+    output = IO.popen([RbConfig.ruby, "-e", script], err: %i[child out], &:read)
+
+    assert_match(/SURVIVED 300/, output, output)
   end
 
   # Device memory is not something Ruby's GC can see, so it is something to

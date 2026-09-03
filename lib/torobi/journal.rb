@@ -79,8 +79,17 @@ module Torobi
 
     def to_jsonl = to_a.map { |entry| JSON.generate(entry) }.join("\n") << "\n"
 
+    # Parses a journal back.
+    #
+    # A run that was killed leaves whole lines and, possibly, a last one
+    # that never finished: entries are flushed one at a time, but a write
+    # is not atomic. So an unterminated final line is dropped, and only
+    # that one. A broken line anywhere else means the file is damaged
+    # rather than truncated, and saying so is better than reading past it.
     def self.read(text)
-      text.each_line.reject { |line| line.strip.empty? }.map { |line| JSON.parse(line) }
+      lines = text.lines
+      lines.pop if lines.last && !lines.last.end_with?("\n")
+      lines.reject { |line| line.strip.empty? }.map { |line| JSON.parse(line) }
     end
 
     private

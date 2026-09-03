@@ -12,7 +12,10 @@ crate-type = ["cdylib"]
 torobi-engine = { path = "../../engine" }
 # The narrow waist: magnus for the Ruby objects, rb-sys for the one thing
 # magnus does not cover (releasing the GVL around a long computation).
-magnus = "0.8"
+# The `rb-sys` feature brings `magnus::rb_sys::protect`, which is how a raw
+# Ruby C call that raises by longjmp is turned into a value this crate can
+# return from (see the interrupt check in `in_mlx`).
+magnus = { version = "0.8", features = ["rb-sys"] }
 rb-sys = "0.9"
 anyhow = "1"
 serde_json = "1"

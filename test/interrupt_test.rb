@@ -39,6 +39,23 @@ class InterruptTest < Minitest::Test
 
   def endless = Enumerator.new { |y| loop { y << batch } }
 
+  # Runs `body` in a fresh process with config/weights/batch already in
+  # scope. For the failures that are crashes rather than exceptions.
+  def run_script(body)
+    script = <<~PREAMBLE + body
+      $LOAD_PATH.unshift(#{File.expand_path("../lib", __dir__).inspect})
+      require "torobi"
+      model = Torobi.graph do |g|
+        x = g.input :x, [nil, #{DIM}]
+        g.output :loss, g.mean(g.linear(x, #{DIM}, name: "l"))
+      end
+      config = Torobi::GraphConfig.new(models: { "m" => model })
+      weights = #{weights.inspect}
+      batch = #{batch.inspect}
+    PREAMBLE
+    IO.popen([RbConfig.ruby, "-e", script], err: %i[child out], &:read)
+  end
+
   def test_a_timeout_during_a_span_leaves_the_session_usable
     session = Torobi::Session.open(config, weights)
     assert_raises(Timeout::Error) { Timeout.timeout(0.3) { session.run(endless) } }
@@ -115,29 +132,35 @@ class InterruptTest < Minitest::Test
   # about this pair: they used to submit to the same default stream at once
   # and Metal ended the process ("commit command buffer with uncommitted
   # encoder"). They now take turns
-  # (notes/SESSION_CONCURRENCY_SPEC.md section 9). In a subprocess, because
-  # the failure it pins is a crash, not an exception.
-  def test_two_sessions_stepped_at_once_take_turns_rather_than_crash
-    script = <<~SCRIPT
-      $LOAD_PATH.unshift(#{File.expand_path("../lib", __dir__).inspect})
-      require "torobi"
-      model = Torobi.graph do |g|
-        x = g.input :x, [nil, #{DIM}]
-        g.output :loss, g.mean(g.linear(x, #{DIM}, name: "l"))
-      end
-      config = Torobi::GraphConfig.new(models: { "m" => model })
-      weights = #{weights.inspect}
-      batch = #{batch.inspect}
+  # (notes/SESSION_CONCURRENCY_SPEC.md section 9.1). In a subprocess,
+  # because the failure it pins is a crash, not an exception.
+  #
+  # Stepping is not the only way in. Opening builds every parameter, an RNG
+  # key and the optimizer's slots; `fetch` evaluates an array and copies it
+  # off the device; `seed=` builds a key. Each of those used to run beside
+  # another session's step without the gate, so each gets a thread here.
+  def test_every_way_into_mlx_takes_turns_rather_than_crashing
+    output = run_script(<<~SCRIPT)
       a = Torobi::Session.open(config, weights)
+      threads = []
+      threads << Thread.new { 200.times { a.step!(batch) } }
+      # Opening and closing beside it.
+      threads << Thread.new do
+        40.times { Torobi::Session.open(config, weights) { |s| s.step!(batch) } }
+      end
+      # Reading a parameter off the device beside it.
       b = Torobi::Session.open(config, weights)
-      [a, b].map { |s| Thread.new { 200.times { s.step!(batch) } } }.each(&:join)
-      puts "BOTH \#{a.step} \#{b.step}"
-      a.close
-      b.close
+      threads << Thread.new { 200.times { b.fetch("m.l.weight") } }
+      # And building an RNG key beside it. Its own session: two threads on
+      # one session are told it is busy, which is a different rule.
+      c = Torobi::Session.open(config, weights)
+      threads << Thread.new { 200.times { |i| c.adjust(seed: i) } }
+      threads.each(&:join)
+      puts "SURVIVED \#{a.step} \#{c.seed}"
+      [a, b, c].each(&:close)
     SCRIPT
-    output = IO.popen([RbConfig.ruby, "-e", script], err: %i[child out], &:read)
 
-    assert_match(/BOTH 200 200/, output, output)
+    assert_match(/SURVIVED 200/, output, output)
   end
 
   # The interrupted entry path, hammered. `rb_nogvl` can refuse to start

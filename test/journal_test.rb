@@ -115,4 +115,41 @@ class JournalTest < Minitest::Test
     assert_raises(FrozenError) { entry["kind"] = "other" }
     assert_raises(FrozenError) { entry.fetch("detail")["nested"] << 3 }
   end
+
+  # A run that was killed leaves whole lines and, possibly, a last one that
+  # never finished: entries are flushed one at a time, but a write is not
+  # atomic. Reading that back has to work, because "an interrupted run
+  # leaves a readable file" is the promise the flushing is for.
+  def test_a_truncated_last_line_is_dropped_and_the_rest_reads
+    whole = <<~JSONL
+      {"schema_version":1,"provenance":{}}
+      {"kind":"span","step":1,"loss":0.5}
+    JSONL
+    text = "#{whole}{\"kind\":\"span\",\"step\":2,\"lo"
+
+    entries = Torobi::Journal.read(text)
+
+    assert_equal 2, entries.size
+    assert_equal 1, entries.last["step"]
+  end
+
+  # A broken line in the middle is damage, not truncation, and reading past
+  # it would be inventing a record.
+  def test_a_broken_line_in_the_middle_is_an_error
+    text = <<~JSONL
+      {"schema_version":1,"provenance":{}}
+      {"kind":"span","ste
+      {"kind":"span","step":2,"loss":0.4}
+    JSONL
+
+    assert_raises(JSON::ParserError) { Torobi::Journal.read(text) }
+  end
+
+  def test_a_complete_file_is_unaffected
+    journal = Torobi::Journal.new({ "config" => {} })
+    journal.span(steps: 1, loss: 0.5, step: 1)
+
+    assert_equal journal.to_a, Torobi::Journal.read(journal.to_jsonl)
+  end
+
 end

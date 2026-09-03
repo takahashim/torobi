@@ -8,6 +8,7 @@
 mod gvl;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use magnus::exception::ExceptionClass;
@@ -73,7 +74,7 @@ enum OnRefusal {
 /// blocking region can refuse to start, dropping the closure with whatever
 /// it holds, and for `close` that would be the engine itself. Returns the
 /// message of a panic inside `work` rather than resuming it.
-fn in_mlx<W, R>(work: W, refusal: OnRefusal) -> Result<R, String>
+fn in_mlx<W, R>(work: W, refusal: OnRefusal) -> Result<Ran2<R>, Error>
 where
     W: FnOnce() -> R,
 {
@@ -89,29 +90,40 @@ where
             work()
         });
         match outcome {
-            gvl::Outcome::Done(value) => return Ok(value),
-            gvl::Outcome::Panicked(what) => return Err(what),
+            gvl::Outcome::Done(value) => return Ok(Ran2::Done(value)),
+            gvl::Outcome::Panicked(what) => return Ok(Ran2::Panicked(what)),
             gvl::Outcome::Interrupted => {
                 // The region was never entered, so nothing ran and nothing
                 // was taken. The work is still here, in `pending`.
                 if matches!(refusal, OnRefusal::AskRuby) {
-                    // A real interrupt raises here, safely: this frame
-                    // holds nothing but the work. The scheduler's timer,
-                    // which is what usually sets that flag, is cleared.
-                    unsafe { rb_sys::rb_thread_check_ints() };
+                    // Let Ruby act on whatever it was flagging. Through
+                    // `protect`, because `rb_thread_check_ints` raises by
+                    // longjmp, and a longjmp through this frame would skip
+                    // every Rust destructor between here and Ruby: the
+                    // work, and the batch it borrows. `protect` turns that
+                    // into a value, so the return is an ordinary one and
+                    // everything is dropped on the way out.
+                    magnus::rb_sys::protect(|| {
+                        unsafe { rb_sys::rb_thread_check_ints() };
+                        rb_sys::special_consts::Qnil as rb_sys::VALUE
+                    })?;
+                    // Nothing was raised, so the flag was the scheduler's
+                    // timer, which that call has now cleared. Try again.
                 }
             }
         }
     }
 
-    // Ruby's flag stayed set. Do the work with the GVL held rather than
-    // refuse it: impolite for one call, but nothing is lost and this
-    // terminates.
+    // Ruby's flag stayed set through every round. Do the work with the GVL
+    // held rather than refuse it: it stalls the other Ruby threads for one
+    // call, but nothing is lost and this terminates (see the spec, 9.1,
+    // which names this and the GC's cleanup as the two exceptions to
+    // taking the gate with the GVL released).
     let work = pending.take().expect("no attempt entered the region");
     let _gate = MLX.lock().unwrap_or_else(|e| e.into_inner());
     match catch_unwind(AssertUnwindSafe(work)) {
-        Ok(value) => Ok(value),
-        Err(panic) => Err(gvl::describe(panic)),
+        Ok(value) => Ok(Ran2::Done(value)),
+        Err(panic) => Ok(Ran2::Panicked(gvl::describe(panic))),
     }
 }
 
@@ -136,6 +148,15 @@ struct Session {
     /// The process this session was opened in. Checked before every use,
     /// because a session that crossed a fork must not reach MLX.
     origin_pid: u32,
+    /// Whether a call that runs MLX is in progress for this session, which
+    /// includes waiting for the gate.
+    ///
+    /// Not the same as `Slot::Running`, which says the engine is out of
+    /// the slot. A second thread must be told the session is busy rather
+    /// than queued behind the gate and served afterwards: one session is
+    /// one conversation (the spec, section 1), and two threads taking
+    /// turns at one would interleave a run without saying so.
+    in_flight: AtomicBool,
     slot: Mutex<Slot>,
     /// The numbers a watcher reads, kept apart from the engine so that
     /// reading them never waits on a step. Its lock is held for a copy and
@@ -168,6 +189,42 @@ impl Snapshot {
             lr: engine.lr(),
             seed: engine.seed(),
         }
+    }
+}
+
+/// Holds a session's claim for as long as one MLX call needs it.
+struct Claim<'a>(&'a AtomicBool);
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// The GC frees device memory as surely as `close` does.
+///
+/// Without this, forgetting to close (or an exception between `open` and
+/// the block that would have closed it) let Ruby's sweep drop the engine
+/// wherever it happened to run, beside another session's step. The gate is
+/// taken with the GVL held here, which the spec names as its second
+/// exception (9.1): a sweep cannot hand the GVL back, and the thread it
+/// waits for does not want it.
+impl Drop for Session {
+    fn drop(&mut self) {
+        let engine = match self.slot.get_mut() {
+            Ok(slot) => match std::mem::replace(slot, Slot::Closed) {
+                Slot::Ready(engine) => engine,
+                _ => return,
+            },
+            Err(_) => return,
+        };
+        if self.origin_pid != std::process::id() {
+            // The device those arrays belong to did not survive the fork.
+            std::mem::forget(engine);
+            return;
+        }
+        let _gate = MLX.lock().unwrap_or_else(|e| e.into_inner());
+        drop(engine);
     }
 }
 
@@ -222,6 +279,13 @@ impl Refusal {
             ),
         }
     }
+}
+
+/// What a GVL-released call produced. `Panicked` is separate from the
+/// engine's own errors because it is the session that is lost, not a step.
+enum Ran2<R> {
+    Done(R),
+    Panicked(String),
 }
 
 /// What one call produced, decided where the GVL may be released.
@@ -298,9 +362,20 @@ impl Session {
         let optimizer = serde_json::from_str(&optimizer_json).map_err(|e| {
             Error::new(ruby.exception_arg_error(), format!("bad optimizer: {e}"))
         })?;
-        EngineSession::open_with(&graph_json, &weights_json, optimizer)
+        // Opening builds every parameter, the RNG key and the optimizer's
+        // slots: MLX work, and it used to run beside another session's
+        // step.
+        let opened = match in_mlx(
+            || EngineSession::open_with(&graph_json, &weights_json, optimizer),
+            OnRefusal::AskRuby,
+        )? {
+            Ran2::Done(opened) => opened,
+            Ran2::Panicked(what) => return Err(poisoned(ruby, &what)),
+        };
+        opened
             .map(|session| Self {
                 origin_pid: std::process::id(),
+                in_flight: AtomicBool::new(false),
                 snapshot: Mutex::new(Snapshot::of(&session)),
                 slot: Mutex::new(Slot::Ready(Box::new(session))),
             })
@@ -324,7 +399,6 @@ impl Session {
     fn with_engine<T>(
         &self,
         ruby: &Ruby,
-        runs_mlx: bool,
         work: impl FnOnce(&mut EngineSession) -> anyhow::Result<T>,
     ) -> Result<T, Error> {
         // Before anything else, and before any lock: a session that has
@@ -334,21 +408,54 @@ impl Session {
             return Err(foreign_process(ruby));
         }
 
-        if !runs_mlx {
-            // Reading what the plan already knows: no MLX, so no gate and
-            // no reason to hand back the GVL.
-            return self.run(work).into_result(ruby);
-        }
+        // Claimed before the gate, so a second thread on this session is
+        // told rather than queued behind it.
+        let _claim = self.claim().ok_or_else(|| busy(ruby))?;
 
-        match in_mlx(|| self.run(work), OnRefusal::AskRuby) {
-            Ok(ran) => ran.into_result(ruby),
-            Err(what) => Err(poisoned(ruby, &what)),
+        match in_mlx(|| self.run(work), OnRefusal::AskRuby)? {
+            Ran2::Done(ran) => ran.into_result(ruby),
+            Ran2::Panicked(what) => Err(poisoned(ruby, &what)),
         }
+    }
+
+    /// The exception: work that provably touches no MLX, run with the GVL
+    /// held and without the gate.
+    ///
+    /// Everything else goes through [`Session::with_engine`], because
+    /// deciding per call site which one runs MLX is a decision that gets
+    /// made wrongly. `seed=` looked like a setter and built an RNG key;
+    /// `fetch` looked like a read and evaluated an array and copied it off
+    /// the device. Both were bypassing the gate.
+    ///
+    /// What may use this: reading names the plan already holds (`taps`,
+    /// `node_names`, `trainable`, `parameter_paths`, `input_names`),
+    /// changing the tap set, and copying out the host-side tensors a
+    /// previous pass already brought back (`tapped`). Nothing that builds,
+    /// evaluates or frees an `Array`.
+    fn on_cpu<T>(
+        &self,
+        ruby: &Ruby,
+        work: impl FnOnce(&mut EngineSession) -> anyhow::Result<T>,
+    ) -> Result<T, Error> {
+        if !self.here() {
+            return Err(foreign_process(ruby));
+        }
+        self.run(work).into_result(ruby)
     }
 
     /// Whether this session belongs to the running process.
     fn here(&self) -> bool {
         self.origin_pid == std::process::id() && native_process()
+    }
+
+    /// Claims this session for one MLX call, or answers that someone else
+    /// has it. Released when the returned guard is dropped, which happens
+    /// on every path out: nothing here raises by longjmp.
+    fn claim(&self) -> Option<Claim<'_>> {
+        self.in_flight
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| Claim(&self.in_flight))
     }
 
     /// Take the engine, use it, put it back. Touches no Ruby, so this is
@@ -414,9 +521,9 @@ impl Session {
         };
     }
 
-    /// A reading, which needs no GVL release and no engine mutation.
+    /// A name the plan already holds. See [`Session::on_cpu`].
     fn read<T>(&self, ruby: &Ruby, work: impl FnOnce(&EngineSession) -> T) -> Result<T, Error> {
-        self.with_engine(ruby, false, |engine| Ok(work(engine)))
+        self.on_cpu(ruby, |engine| Ok(work(engine)))
     }
 
     /// One step on one batch, with the GVL released.
@@ -426,44 +533,27 @@ impl Session {
     /// Measurement chose this over JSON (docs/plan.md section 5A.2.1).
     fn run_step(ruby: &Ruby, rb_self: &Self, batch: RHash) -> Result<f32, Error> {
         let batch = read_batch(ruby, batch)?;
-        rb_self.with_engine(ruby, true, |engine| engine.run_step(&batch))
-    }
-
-    /// A span: one step per batch, all of them read before the GVL is
-    /// released, so the engine never asks anyone for data mid-span.
-    fn run_steps(ruby: &Ruby, rb_self: &Self, batches: RArray) -> Result<f32, Error> {
-        let batches: Vec<Batch> = batches
-            .into_iter()
-            .map(|value| {
-                read_batch(
-                    ruby,
-                    RHash::from_value(value).ok_or_else(|| {
-                        Error::new(ruby.exception_arg_error(), "each batch must be a Hash")
-                    })?,
-                )
-            })
-            .collect::<Result<_, Error>>()?;
-        rb_self.with_engine(ruby, true, |engine| engine.run_steps(&batches))
+        rb_self.with_engine(ruby, |engine| engine.run_step(&batch))
     }
 
     /// The loss for one batch without taking a step: no gradients, no
     /// randomness, nothing moved. What a validation set is read with.
     fn evaluate(ruby: &Ruby, rb_self: &Self, batch: RHash) -> Result<f32, Error> {
         let batch = read_batch(ruby, batch)?;
-        rb_self.with_engine(ruby, true, |engine| engine.evaluate(&batch))
+        rb_self.with_engine(ruby, |engine| engine.evaluate(&batch))
     }
 
     /// Writes the run's state and returns where it landed. `run` is the
     /// caller's own record (epoch, batch position, sampler state) as JSON;
     /// the engine writes it verbatim and never reads it.
     fn save(ruby: &Ruby, rb_self: &Self, dir: String, run: String) -> Result<String, Error> {
-        rb_self.with_engine(ruby, true, |engine| engine.save(&dir, &run))
+        rb_self.with_engine(ruby, |engine| engine.save(&dir, &run))
     }
 
     /// Restores state written by `save`, refusing what does not belong.
     /// Returns the caller's record as JSON.
     fn restore(ruby: &Ruby, rb_self: &Self, dir: String) -> Result<String, Error> {
-        rb_self.with_engine(ruby, true, |engine| engine.restore(&dir))
+        rb_self.with_engine(ruby, |engine| engine.restore(&dir))
     }
 
     /// Releases the engine and its device memory. Idempotent, and the
@@ -502,7 +592,7 @@ impl Session {
         };
         let was_live = engine.is_some();
         if let Some(engine) = engine {
-            let _ = in_mlx(move || drop(engine), OnRefusal::PressOn);
+            let _ = in_mlx(move || drop(engine), OnRefusal::PressOn)?;
         }
         Ok(was_live)
     }
@@ -535,7 +625,7 @@ impl Session {
     }
 
     fn set_lr(ruby: &Ruby, rb_self: &Self, lr: f32) -> Result<f32, Error> {
-        rb_self.with_engine(ruby, false, |engine| {
+        rb_self.on_cpu(ruby, |engine| {
             engine.set_lr(lr);
             Ok(lr)
         })
@@ -546,7 +636,7 @@ impl Session {
     }
 
     fn set_seed(ruby: &Ruby, rb_self: &Self, seed: u64) -> Result<u64, Error> {
-        rb_self.with_engine(ruby, false, |engine| {
+        rb_self.with_engine(ruby, |engine| {
             engine.set_seed(seed)?;
             Ok(seed)
         })
@@ -559,7 +649,7 @@ impl Session {
         pattern: String,
         frozen: bool,
     ) -> Result<RArray, Error> {
-        let moved = rb_self.with_engine(ruby, true, |engine| {
+        let moved = rb_self.with_engine(ruby, |engine| {
             engine.set_frozen(&pattern, frozen)
         })?;
         Ok(ruby.ary_from_vec(moved))
@@ -578,16 +668,16 @@ impl Session {
         let tensor = batch
             .remove(&path)
             .ok_or_else(|| Error::new(ruby.exception_arg_error(), "no tensor given"))?;
-        rb_self.with_engine(ruby, true, |engine| engine.put(&path, &tensor))
+        rb_self.with_engine(ruby, |engine| engine.put(&path, &tensor))
     }
 
     /// Watches a named value. Read-only, and in force from the next step.
     fn tap(ruby: &Ruby, rb_self: &Self, name: String, stat: String) -> Result<(), Error> {
-        rb_self.with_engine(ruby, false, |engine| engine.tap(&name, &stat))
+        rb_self.on_cpu(ruby, |engine| engine.tap(&name, &stat))
     }
 
     fn untap(ruby: &Ruby, rb_self: &Self, name: String) -> Result<bool, Error> {
-        rb_self.with_engine(ruby, false, |engine| Ok(engine.untap(&name)))
+        rb_self.on_cpu(ruby, |engine| Ok(engine.untap(&name)))
     }
 
     fn taps(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
@@ -602,7 +692,7 @@ impl Session {
 
     /// What the last step's taps saw: [name, shape, data] each.
     fn tapped(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
-        let seen = rb_self.with_engine(ruby, false, |engine| engine.tapped())?;
+        let seen = rb_self.on_cpu(ruby, |engine| engine.tapped())?;
         let out = ruby.ary_new_capa(seen.len());
         for (name, tensor) in seen {
             let (shape, data) = tensor_to_ruby(ruby, tensor);
@@ -622,13 +712,13 @@ impl Session {
     }
 
     fn fetch(ruby: &Ruby, rb_self: &Self, path: String) -> Result<(RArray, RArray), Error> {
-        let tensor = rb_self.with_engine(ruby, false, |engine| engine.fetch(&path))?;
+        let tensor = rb_self.with_engine(ruby, |engine| engine.fetch(&path))?;
         Ok(tensor_to_ruby(ruby, tensor))
     }
 
     fn gradients(ruby: &Ruby, rb_self: &Self, batch: RHash) -> Result<RArray, Error> {
         let batch = read_batch(ruby, batch)?;
-        let grads = rb_self.with_engine(ruby, true, |engine| engine.gradients(&batch))?;
+        let grads = rb_self.with_engine(ruby, |engine| engine.gradients(&batch))?;
         let out = ruby.ary_new_capa(grads.len());
         for (path, tensor) in grads {
             let (shape, data) = tensor_to_ruby(ruby, tensor);
@@ -684,9 +774,9 @@ fn global_mlx<R>(ruby: &Ruby, work: impl FnOnce() -> anyhow::Result<R>) -> Resul
     if !native_process() {
         return Err(foreign_process(ruby));
     }
-    match in_mlx(work, OnRefusal::AskRuby) {
-        Ok(result) => result.map_err(|e| to_error(ruby, e)),
-        Err(what) => Err(poisoned(ruby, &what)),
+    match in_mlx(work, OnRefusal::AskRuby)? {
+        Ran2::Done(result) => result.map_err(|e| to_error(ruby, e)),
+        Ran2::Panicked(what) => Err(poisoned(ruby, &what)),
     }
 }
 
@@ -747,7 +837,6 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let class = native.define_class("Session", ruby.class_object())?;
     class.define_singleton_method("open", function!(Session::open, 3))?;
     class.define_method("run_step", method!(Session::run_step, 1))?;
-    class.define_method("run_steps", method!(Session::run_steps, 1))?;
     class.define_method("evaluate", method!(Session::evaluate, 1))?;
     class.define_method("save", method!(Session::save, 2))?;
     class.define_method("restore", method!(Session::restore, 1))?;

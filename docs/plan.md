@@ -669,7 +669,7 @@ M0 と M1 の一部(§9.1 の M1 のうち single-step とその境界の初期�
 | --- | --- | --- |
 | `RefCell` を GVL 解放中に保持 → 別スレッドの読みで panic → **Ruby fatal でプロセス終了** | 再現(`RefCell already mutably borrowed`) | `Mutex` + `try_lock` の状態機械。使用中の session は **busy を答えて生き続ける**。blocking lock は GVL 待ちで deadlock するため使わない |
 | Rust panic は回復可能な例外ではない(magnus が fatal に変換) | 再現 | GVL ラッパは panic を **返す**(resume しない)。session は **Poisoned** になり以後拒否。プロセスは生存 |
-| `run` が全 batch を先に materialize → 無限 enumerable が始まらない、多重保持、Ctrl-C が span 末尾まで効かない | コード上明白 | `run` は **step 単位で Ruby が駆動**(境界コストは実測で誤差)。block を渡せば step ごとに yield。bulk は `run_uninterruptible`(上限付き)に分離 |
+| `run` が全 batch を先に materialize → 無限 enumerable が始まらない、多重保持、Ctrl-C が span 末尾まで効かない | コード上明白 | `run` は **step 単位で Ruby が駆動**(境界コストは実測で誤差)。block を渡せば step ごとに yield。bulk 形は §15.10 で削除した |
 | fork 後の安全性を probe では保証できない(`@probe_result` が子に継承される) | — | 拡張ロード時 PID を記録し、不一致なら `EngineUnavailable`。probe の記憶も PID に紐づけ。prefork worker(Puma clustered / Sidekiq / Spring)は非対応と明記 |
 | `close` がなく、GPU 資源の解放が GC 任せ | — | 冪等な `close` と `Closed` 状態、block 形式の `ensure`。device memory の観測(`Torobi::Memory`: active / cache / peak / limit、`clear_cache!`、`limit=`)。「開いて閉じた 20 session が MB 単位を残さない」ことをテスト |
 
@@ -865,3 +865,43 @@ M3b の「tiny dataset の過学習」も M4 の「実験が完走し記録が�
 これは近いうちに必ず当たっていた。
 
 この時点で Ruby 164 件 / Rust 81 件。
+
+### 15.10 ゲートの穴を 5 つ塞ぐ(2026-09-03)
+
+並行契約のレビューで 5 点。4 つは P1 で、いずれも実在した。
+
+**1. ゲートの迂回。** `Session.open` は parameter・RNG key・optimizer slot を作るのに
+ゲートを通っていなかった。`seed=` は setter の顔で RNG key を作り、`fetch` は読み出しの
+顔で array を評価して device から copy していた。どちらも「MLX を呼ばない」側に分類
+されていた。**呼び出しごとに判断させる形が間違いのもと**なので、既定を「ゲートを通す」に
+反転し、通さないものを `on_cpu` として列挙した(plan が持つ名前の読み出し、tap 集合の
+変更、host 側 tensor のコピー)。
+
+その副作用で、同一 Session の 2 本目がゲートに並んで**成功する**ようになった。これは
+§1 の single writer を黙って崩す(1 つの Session を 2 thread で共有した呼び出し側が、
+交互に step を取られる)。ゲートの前に session を claim し、取れなければ `Busy` を返す
+ようにした。
+
+**2. GC による解放がゲート外。** `close` を忘れた session を Ruby の sweep が drop すると、
+別 thread が MLX の中にいる最中に device memory が解放される。native の `Drop` を足し、
+そこでも PID を先に見て、親ならゲート下で解放、fork 子なら `forget` する。
+
+**3. `rb_thread_check_ints` が §0 を再導入していた。** 生で呼ぶと longjmp で送出するので、
+そこから Ruby までの Rust フレームの destructor が飛ぶ。engine は slot に残るので session は
+壊れないが、retry のために持っている work とそれが借りる batch が漏れる。
+`magnus::rb_sys::protect` で包み、longjmp を値に変えた。
+
+**4. journal の完全性を満たさない公開 API。** `run_uninterruptible` は複数 step を 1 回の
+native 呼び出しで回すので、**step ごとの entry を書けない**。実測で「a fraction of a
+percent」しか効かない最適化のためにその穴を残す理由がないので、engine 側の `run_steps`
+ごと削除した。`repeat` も `step!` の繰り返しに直した。engine を進める公開 API は
+`run_step` 1 つになった。
+
+**5. JSONL の読み戻し。** entry ごとの flush は 1 行の書き込みが不可分であることまでは
+保証しない。`Journal.read` は改行で終わっていない最後の行だけを捨て、途中の壊れた行は
+エラーにする。前者は途中で殺されたこと、後者はファイルが壊れたことで、読み進めるのは
+記録を捏造することになる。あわせて spec §9.1 の「ゲートは GVL 解放状態でのみ取る」に
+例外 2 つ(区間拒否の最後の手段、GC の sweep)を明記した。どちらも待つ相手が GVL を
+要らないので deadlock しない。
+
+この時点で Ruby 168 件 / Rust 81 件。
