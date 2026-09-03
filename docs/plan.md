@@ -2051,6 +2051,45 @@ mlx-sys が prebuilt を、それぞれの配布元から取ってくる。Torob
 表示、OminiX-MLX の表示、README での明示) を `docs/vendoring.md` に列挙した。
 **後で気付くのではなく、判断のときに視野に入っているように**書いてある。
 
+### 15.40 取ってくるものを自分で確かめる。作る側の下ごしらえも(2026-09-03)
+
+「prebuilt を検証なしで取ってくるのは良くない、CI か専用リポジトリでビルドすべき」
+という指摘から。**A (検証) を入れ、B (自前ビルド) の中身を用意した。**
+
+**先に 1 つ訂正した。** 「B ができれば A は不要」ではない。B は誰が作るかの話で、
+A は取ってきたものを確かめて cargo に渡す仕掛けである。自前 release を作っても、
+Torobi 側にそれを指す口が無ければ届かない。**A は B の前提**である。
+
+**A: `ext/torobi/mlx_prebuilt.rb`。** mlx-sys は誰も指定しなければ自分で
+`curl -L -f` して、TLS 以外の検査をせずにリンクする。それを先回りして、
+
+1. streaming で落とし (open-uri は本体を Tempfile に丸ごと落としてから渡すので、
+   40MB を二重に書くうえ進捗も出せない。`Net::HTTP` にした。リダイレクトは
+   https のみ 5 hop まで)
+2. **記録した SHA-256 と照合し**、違えば何も置かずに断り
+3. `~/.cache/torobi/` に展開して、`MLX_PREBUILT_PATH` で cargo に渡す
+
+`extconf.rb` は生成された Makefile に `export` を書く (make が cargo を起動する
+ときには extconf のプロセスは終わっているため)。Rakefile は engine 側のビルド用に
+同じものを使う。**拡張と engine で 1 つの検証済みコピーを共有する**。
+
+digest は release ページの値を写したのではなく、**自分で 40MB を落として計算し**、
+GitHub が公表している値と一致することを確かめた
+(`8be50f29…c77aed5`)。
+
+検証は 3 つ: 壊した archive を断ること、正しいものを受け入れること、そして
+**まっさらな target ディレクトリでビルドしてダウンロードが 1 回も走らないこと**
+(build.rs が第 1 分岐を取った証拠)。installed-gem smoke も 31 秒で通った。
+
+**B: `~/git/mlx-prebuilt/` に用意した** (作成と push は未実施)。`build.sh` +
+GitHub Actions + README + `NOTICE.md` (MLX と mlx-c の MIT 全文)。版は自由に
+選べるものではない: **mlx-c 0.4.1 が `FetchContent` で MLX を `v0.32.0` に固定
+している**ので、その組でなければヘッダと実体が別物になる。**今まさにそれが
+起きている** (ヘッダは v0.32.0 前提、リンクしているのは 0.30.1)。
+
+B の runner には Metal toolchain が要る (§ 直前の調査)。CI で 1 度も走らせて
+いないので、README にそう書いた。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。
