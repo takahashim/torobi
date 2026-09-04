@@ -18,7 +18,7 @@ use mlx_rs::transforms::eval;
 use mlx_rs::Array;
 use serde::Deserialize;
 
-use crate::graph::{GraphConfig, ParameterSpec};
+use crate::graph::{GraphConfig, InputSpec, ParameterSpec};
 use crate::op::{qualified, Program, OBJECTIVE};
 use crate::tensor::{dtype_named, Tensor};
 
@@ -302,43 +302,55 @@ impl Plan {
                 if fields.contains_key(field) {
                     continue;
                 }
-                let t = batch
+                let given = batch
                     .get(field)
                     .with_context(|| format!("the batch is missing input {field:?}"))?;
-                anyhow::ensure!(
-                    t.shape.len() == spec.shape.len(),
-                    "input {field:?}: rank {} does not match the declared {}",
-                    t.shape.len(),
-                    spec.shape.len()
-                );
-                for (axis, (given, declared)) in t.shape.iter().zip(&spec.shape).enumerate() {
-                    if let Some(declared) = declared {
-                        anyhow::ensure!(
-                            given == declared,
-                            "input {field:?}: dimension {axis} is {given}, declared {declared}"
-                        );
-                    }
-                }
-                let declared = crate::tensor::dtype_named(&spec.dtype)
-                    .with_context(|| format!("input {field:?}: unknown dtype in the graph"))?;
-                anyhow::ensure!(
-                    t.dtype == declared,
-                    "input {field:?}: given {:?}, declared {}",
-                    t.dtype,
-                    spec.dtype
-                );
-                let expected: usize = t.shape.iter().map(|d| *d as usize).product();
-                anyhow::ensure!(
-                    t.values.len() == expected,
-                    "input {field:?}: {} values for shape {:?}",
-                    t.values.len(),
-                    t.shape
-                );
-                fields.insert(field.to_string(), t.to_array());
+                fields.insert(field.to_string(), bind_one(field, spec, given)?);
             }
         }
         Ok(fields)
     }
+}
+
+/// One field, checked against what the graph declared and converted.
+///
+/// Five things have to hold, and each of them is a way a batch can be
+/// wrong that nothing downstream would say plainly: the rank, every
+/// concrete dimension, the dtype, and that the payload is as long as the
+/// shape says. A null dimension is symbolic and may differ from step to
+/// step (docs/plan.md 6.2), which is the one thing here that is allowed
+/// to vary.
+fn bind_one(field: &str, spec: &InputSpec, given: &Tensor) -> Result<Array> {
+    anyhow::ensure!(
+        given.shape.len() == spec.shape.len(),
+        "input {field:?}: rank {} does not match the declared {}",
+        given.shape.len(),
+        spec.shape.len()
+    );
+    for (axis, (given, declared)) in given.shape.iter().zip(&spec.shape).enumerate() {
+        if let Some(declared) = declared {
+            anyhow::ensure!(
+                given == declared,
+                "input {field:?}: dimension {axis} is {given}, declared {declared}"
+            );
+        }
+    }
+    let declared = crate::tensor::dtype_named(&spec.dtype)
+        .with_context(|| format!("input {field:?}: unknown dtype in the graph"))?;
+    anyhow::ensure!(
+        given.dtype == declared,
+        "input {field:?}: given {:?}, declared {}",
+        given.dtype,
+        spec.dtype
+    );
+    let expected: usize = given.shape.iter().map(|d| *d as usize).product();
+    anyhow::ensure!(
+        given.values.len() == expected,
+        "input {field:?}: {} values for shape {:?}",
+        given.values.len(),
+        given.shape
+    );
+    Ok(given.to_array())
 }
 
 /// Initial parameters, read and waiting to be matched to what the graph

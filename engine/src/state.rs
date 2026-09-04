@@ -16,7 +16,7 @@ use mlx_rs::{Array, Dtype};
 
 use crate::checkpoint;
 use crate::optimizer::{Config as OptimizerConfig, Optimizer};
-use crate::plan::{Pattern, Plan};
+use crate::plan::{Model, Pattern, Plan};
 use crate::tensor::{to_tensor, Tensor};
 
 /// A checkpoint that has been read and found to belong to this run.
@@ -430,27 +430,16 @@ impl TrainState {
                     plan.models.iter().map(|m| &m.name).collect::<Vec<_>>()
                 )
             })?;
+        let owned = self.published(plan, model)?;
+        let renamed = plan.paths[model.slice.clone()]
+            .iter()
+            .cloned()
+            .zip(owned.iter().map(|(path, _)| path.clone()))
+            .collect();
+
         let dir = Path::new(dir);
         std::fs::create_dir_all(dir)
             .with_context(|| format!("creating {}", dir.display()))?;
-
-        let prefix = format!("{}.", model.name);
-        let mut renamed = Vec::new();
-        let mut owned: Vec<(String, Array)> = Vec::new();
-        for (path, array) in plan.paths[model.slice.clone()]
-            .iter()
-            .zip(&self.params[model.slice.clone()])
-        {
-            let new_path = path.strip_prefix(&prefix).unwrap_or(path).to_string();
-            renamed.push((path.clone(), new_path.clone()));
-            let array = if array.dtype() == Dtype::Float32 {
-                array.clone()
-            } else {
-                array.as_dtype(Dtype::Float32)?
-            };
-            owned.push((new_path, array));
-        }
-        eval(owned.iter().map(|(_, a)| a))?;
         // `{"format": "pt"}`, which is what a published checkpoint carries
         // and what a loader looks for: transformers reads the metadata and
         // refuses a file whose format it does not recognize. The bytes are
@@ -487,6 +476,31 @@ impl TrainState {
             owned.len()
         );
         Ok(renamed)
+    }
+
+    /// One model's parameters under the names a published checkpoint uses,
+    /// in fp32.
+    ///
+    /// Pure: it decides what would be written and touches no disk, so what
+    /// goes in a file can be looked at without making one. The model's own
+    /// name is stripped, so a model declared with `encoder_prefix:` keeps
+    /// that prefix and the keys line up with the published layout.
+    fn published(&self, plan: &Plan, model: &Model) -> Result<Vec<(String, Array)>> {
+        let prefix = format!("{}.", model.name);
+        let owned: Vec<(String, Array)> = plan.paths[model.slice.clone()]
+            .iter()
+            .zip(&self.params[model.slice.clone()])
+            .map(|(path, array)| {
+                let array = if array.dtype() == Dtype::Float32 {
+                    array.clone()
+                } else {
+                    array.as_dtype(Dtype::Float32)?
+                };
+                Ok((path.strip_prefix(&prefix).unwrap_or(path).to_string(), array))
+            })
+            .collect::<Result<_>>()?;
+        eval(owned.iter().map(|(_, a)| a))?;
+        Ok(owned)
     }
 
     /// Restores state written by [`TrainState::save`], refusing anything
