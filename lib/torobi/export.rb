@@ -46,7 +46,30 @@ module Torobi
     # Where the pooling module's own configuration lives.
     POOLING = File.join("1_Pooling", "config.json").freeze
 
+    # What the engine writes the weights as (`state.rs`). Named here
+    # because everything in this file is about what sits beside them.
+    WEIGHTS = "model.safetensors"
+
     module_function
+
+    # Everything that goes beside the weights, in the order it has to
+    # happen. Returns what was carried from the source.
+    #
+    # **The order is why this is one call rather than three.** The widths
+    # have to be read before anything is written, because what they
+    # answer is whether the descriptions about to be written are about
+    # these weights; and carrying has to happen before the metadata,
+    # which starts from whatever pooling config the source had so that
+    # keys this code knows nothing about survive. A caller holding three
+    # steps in the right order is a caller that can hold them in the
+    # wrong one, and `Session#export_model!` was that caller.
+    def publish(dir, from: nil, pooling: nil, pooling_dim: nil)
+      dir = dir.to_s
+      seen = widths(File.join(dir, WEIGHTS))
+      carried = carry(from, dir)
+      write_metadata(dir, pooling:, pooling_dim:, widths: seen)
+      carried
+    end
 
     # Copies what `from` holds beside the weights, and returns the names
     # copied. `nil` copies nothing, which is what a model trained from

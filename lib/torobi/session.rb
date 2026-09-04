@@ -430,11 +430,7 @@ module Torobi
       model ||= sole_model
       atomically do
         written = @native.export_model(model.to_s, dir.to_s)
-        # The widths the weights actually have, which is what says whether
-        # the descriptions about to be written are about these weights.
-        widths = Export.widths(File.join(dir.to_s, "model.safetensors"))
-        carried = Export.carry(from, dir.to_s)
-        Export.write_metadata(dir.to_s, pooling:, pooling_dim:, widths:)
+        carried = Export.publish(dir.to_s, from:, pooling:, pooling_dim:)
         # Last, so that a record of an export is a record of one that is
         # on disk whole.
         @journal&.note(step: @native.step, event: "exported", model: model.to_s,
