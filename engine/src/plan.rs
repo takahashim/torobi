@@ -118,6 +118,11 @@ pub struct Plan {
 impl Plan {
     /// Reads a GraphConfig and its initial parameters, returning the plan
     /// and the parameters in the order the plan names them.
+    ///
+    /// Seedless, so only for the tests: a run states its seed, because a
+    /// parameter built from its declaration is drawn from where the first
+    /// step will draw from.
+    #[cfg(test)]
     pub fn open(graph_json: &str, weights: Weights<'_>) -> Result<(Self, Vec<Array>)> {
         Self::open_seeded(graph_json, weights, 0)
     }

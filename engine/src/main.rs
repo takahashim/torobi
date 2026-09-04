@@ -10,8 +10,7 @@
 
 use anyhow::{bail, Result};
 use torobi_engine::tensor::{Batch, Tensor, Values};
-use torobi_engine::plan::Weights;
-use torobi_engine::Session;
+use torobi_engine::{Session, Weights};
 
 use mlx_rs::Dtype;
 use serde::Deserialize;

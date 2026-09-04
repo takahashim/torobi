@@ -32,9 +32,8 @@ use std::sync::Mutex;
 use magnus::exception::ExceptionClass;
 use magnus::value::ReprValue;
 use magnus::{function, method, prelude::*, Error, RArray, RHash, RString, Ruby, Value};
-use torobi_engine::plan::Weights;
 use torobi_engine::tensor::{Batch, Tensor};
-use torobi_engine::{RuntimeError, Session as EngineSession};
+use torobi_engine::{RuntimeError, Session as EngineSession, Weights};
 
 use gvl::{OnRefusal, Outcome};
 

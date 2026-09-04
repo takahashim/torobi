@@ -13,7 +13,6 @@
 //! Those used to surface from inside `value_and_grad`, as MLX exceptions,
 //! at step one.
 
-use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
@@ -385,7 +384,6 @@ fn boolean(attributes: &Map<String, Value>, key: &str) -> bool {
 }
 
 /// A resolved graph's outputs, by name, as the caller reads them.
-pub type Outputs = BTreeMap<String, mlx_rs::Array>;
 
 #[cfg(test)]
 mod tests {

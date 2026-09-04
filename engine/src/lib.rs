@@ -5,22 +5,39 @@
 //! can reach: no tensors cross the boundary (only copies, by name), no
 //! callbacks come back in, and the model never leaves this crate.
 
+// What escapes this crate, and nothing else.
+//
+// **The gate is the whole design, so the compiler should hold it.** Every
+// public route to MLX goes through `runtime::execute` (`crate::runtime`),
+// and that was true of `Session` while `state`, `executor`, `interp` and
+// `op` were public beside it: a caller could build a `TrainState` and
+// differentiate with it, off the gate, and the failure that follows is
+// two threads on one command queue, which ends the process rather than
+// returning. Enforced by convention is enforced until somebody is in a
+// hurry.
+//
+// What is public is what the Ruby extension and the command-line tool
+// actually use: a session, the values that cross to it, where its
+// parameters come from, the allocator's numbers, and a checkpoint's
+// manifest.
 pub mod checkpoint;
-pub mod executor;
+pub(crate) mod executor;
 #[cfg(test)]
 mod fixtures;
-pub mod graph;
+pub(crate) mod graph;
 pub mod init;
-pub mod interp;
+pub(crate) mod interp;
 pub mod memory;
-pub mod op;
-pub mod optimizer;
-pub mod plan;
+pub(crate) mod op;
+pub(crate) mod optimizer;
+pub(crate) mod plan;
 pub mod runtime;
 pub mod session;
-pub mod state;
+pub(crate) mod state;
 pub mod tensor;
 
+pub use optimizer::Config as Optimizer;
+pub use plan::Weights;
 pub use runtime::{initialize, RuntimeError};
 pub use session::Session;
 
