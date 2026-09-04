@@ -19,6 +19,26 @@ module Torobi
     # so this is the difference between a reader that is fast enough and
     # one that is not.
     module Snappy
+      # Google's own, if this machine has it.
+      #
+      # Optional on purpose. The reader's point is that it needs nothing,
+      # and a required C extension would take that back; but a caller who
+      # has `gem install snappy` gets the same answers **11.6 times
+      # faster** on a file, which is measured rather than assumed
+      # (docs/plan.md section 15.59). Decompression is 27 MB/s here and
+      # 369 MB/s there, and it is nine tenths of what reading a parquet
+      # file costs either way.
+      #
+      # Both paths are held to each other: `pure` is what this does
+      # without the gem, and it is tested whether or not the gem is
+      # installed.
+      NATIVE = begin
+        require "snappy"
+        true
+      rescue LoadError
+        false
+      end
+
       # One loop rather than three methods.
       #
       # Ruby's method calls are tens of nanoseconds and this makes one
@@ -27,6 +47,16 @@ module Torobi
       # the time. What is left is the two things that cannot be avoided:
       # a slice per element, and an append per element.
       def self.inflate(bytes)
+        return pure(bytes) unless NATIVE
+
+        ::Snappy.inflate(bytes)
+      rescue StandardError => e
+        # Whatever the library calls it, what it means here is that a
+        # page did not decompress.
+        raise Error, "a page did not decompress (#{e.class}: #{e.message})"
+      end
+
+      def self.pure(bytes)
         length, at = varint(bytes, 0)
         out = +""
         out.force_encoding(Encoding::BINARY)

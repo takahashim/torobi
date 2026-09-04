@@ -122,7 +122,52 @@ class ParquetTest < Minitest::Test
     # snappy's way of saying "repeat that three more times".
     block = [8, (1 << 2), "ab", 0b0000_1001, 2].pack("CCa2CC")
 
-    assert_equal "abababab", Torobi::Parquet::Snappy.inflate(block)
+    assert_equal "abababab", Torobi::Parquet::Snappy.pure(block)
+  end
+
+  # The decompressor this has of its own, on real pages rather than on
+  # one made up. Called by name, because a machine with the snappy gem
+  # would otherwise never run it.
+  def test_the_decompressor_it_carries_reads_every_page
+    seen = pages_of("plain")
+
+    assert_operator seen.size, :>, 1
+    seen.each do |page, declared|
+      assert_equal declared, Torobi::Parquet::Snappy.pure(page).bytesize
+    end
+  end
+
+  # And that the fast path is the same path. Where the gem is not
+  # installed these are one method and this says so.
+  def test_the_two_decompressors_agree
+    unless Torobi::Parquet::Snappy::NATIVE
+      skip "the snappy gem is not installed, so there is one decompressor"
+    end
+
+    pages_of("plain").map(&:first).each do |page|
+      assert_equal Torobi::Parquet::Snappy.pure(page), Torobi::Parquet::Snappy.inflate(page)
+    end
+  end
+
+  # Every compressed page of a fixture, with the size its header claims.
+  def pages_of(name)
+    File.open(fixture(name), "rb") do |io|
+      _, groups = Torobi::Parquet::Metadata.read(io)
+      groups.flat_map do |group|
+        group.chunks.flat_map do |chunk|
+          io.seek(chunk.start)
+          bytes = io.read(chunk.compressed)
+          at = 0
+          found = []
+          while at < bytes.bytesize
+            header, body = Torobi::Parquet::Metadata.page(bytes, at)
+            found << [bytes.byteslice(body, header[:compressed]), header[:uncompressed]]
+            at = body + header[:compressed]
+          end
+          found
+        end
+      end
+    end
   end
 
   def test_a_thrift_struct_comes_back_by_field_number

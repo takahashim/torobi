@@ -52,13 +52,28 @@ on an M2. That is a hundred thousand pairs in about three seconds, and
 the whole of `auto-wiki-qa`'s two columns in about a minute and a half.
 It is preprocessing, done once.
 
-Making it much faster means leaving Ruby: the floor is the interpreter's
-cost per element, which a loop doing nothing already spends 46ns on.
+If that is not fast enough, install Google's own:
+
+```
+gem install snappy
+```
+
+Nothing else changes: the reader finds it, the answers are identical
+(there is a test for that), and a file reads **11.6 times faster**
+(0.125s to 0.011s). It stays optional because needing nothing is the
+point of this: the gem is a C extension, and requiring it would bring
+back the build and the platform matrix this exists to avoid.
+
+Making it much faster **within** Ruby is not on offer, and that was
+measured rather than assumed: the floor is the interpreter's cost per
+element, which a loop doing nothing already spends 46ns on.
 What was measured on the way to that number: folding the loop into one
 method bought 12%, and writing into a preallocated `IO::Buffer` rather
 than appending to a String bought 19%, because `copy` is a memcpy where
 `<<` of a `byteslice` allocates (25ns against 42 to 64). Everything else
-here (Thrift, the levels, the values) is a rounding error beside snappy.
+here (Thrift, the levels, the values) is a rounding error beside snappy:
+with the gem doing the decompression, a file that took 125ms takes 11,
+of which 9 is still snappy.
 
 Both numbers come from running the two alternately in one process. Run
 one after the other they say something else, and the first attempt at
