@@ -18,8 +18,18 @@ require_relative "torobi/models/llama"
 
 # The engine, and the session that drives it. Optional: the pure-Ruby half
 # (the DSL and the IR) stands on its own, and its tests need no extension.
+#
+# Only the extension's own absence is caught. Everything after it is this
+# library's, and a LoadError from one of those means something is wrong
+# rather than uncompiled: swallowing it would make a missing require look
+# exactly like "run rake compile", which is a wrong answer that reads as
+# a right one (`benchmark` stopped being a default gem in Ruby 4.0, and
+# that is the shape it would have arrived in).
 begin
   require_relative "torobi/torobi"
+rescue LoadError
+  # Not compiled yet (rake compile); Torobi::Session is simply absent.
+else
   require_relative "torobi/preflight"
   require_relative "torobi/tensor_data"
   require_relative "torobi/weights"
@@ -34,8 +44,6 @@ begin
   require_relative "torobi/grad_cache"
   require_relative "torobi/freshness"
   Torobi::Freshness.warn!
-rescue LoadError
-  # Not compiled yet (rake compile); Torobi::Session is simply absent.
 end
 
 # Torobi describes models and training objectives in Ruby, once, as an

@@ -112,7 +112,7 @@ module Torobi
       end
       raise ArgumentError, "on(#{event.inspect}) needs a block" unless block
 
-      @registered << { event:, every:, call: block }
+      @registered << { event:, every: cadence(every), call: block }
       self
     end
 
@@ -123,7 +123,7 @@ module Torobi
         raise ArgumentError, "a policy must respond to #call, and #{policy.class} does not"
       end
 
-      @registered << { event:, every:, call: policy }
+      @registered << { event:, every: cadence(every), call: policy }
       self
     end
 
@@ -151,6 +151,22 @@ module Torobi
     # Whether a span is currently inside a hook, which is how the session
     # refuses reentry.
     def firing? = @firing
+
+    private
+
+    # How many windows apart a hook fires.
+    #
+    # Checked where it is given rather than where it is divided by: a 0
+    # is a ZeroDivisionError at the first step, which arrives far from
+    # the call that caused it and says nothing about which knob it was.
+    def cadence(every)
+      every = Integer(every)
+      return every if every.positive?
+
+      raise ArgumentError,
+            "every: is how many windows apart a hook fires, so it is at least 1 " \
+            "(got #{every})"
+    end
   end
 
   # The standard policies: the crosscutting concerns worth writing once.

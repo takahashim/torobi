@@ -323,4 +323,19 @@ class HooksTest < Minitest::Test
     assert_operator seen.first, :>, seen.last, "the rate came down as the run went on"
     assert_operator seen.first, :<=, 0.1
   end
+
+  # `every: 0` used to be a ZeroDivisionError at the first step, which
+  # arrives far from the call that caused it.
+  def test_a_cadence_that_never_comes_round_is_refused
+    hooks = Torobi::Hooks.new(nil)
+
+    seen = []
+    e = assert_raises(ArgumentError) { hooks.on(:step, every: 0) { |event| seen << event } }
+
+    assert_match(/at least 1/, e.message)
+    assert_empty seen
+    watching = Torobi::Policies::Progress.new { |step, _| seen << step }
+
+    assert_raises(ArgumentError) { hooks.use(watching, every: -1) }
+  end
 end
