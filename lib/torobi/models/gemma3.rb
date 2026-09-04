@@ -178,7 +178,7 @@ module Torobi
           dim = @config.head_dim
           theta = @config.theta(index)
           to_heads = lambda do |h, count|
-            h.reshape(shape: [-1, @build.seq, count, dim]).transpose(axes: [0, 2, 1, 3])
+            h.reshape(shape: [0, 0, count, dim]).transpose(axes: [0, 2, 1, 3])
           end
           q = to_heads.call(linear(x, heads * dim, name: "self_attn.q_proj", bias: false), heads)
           k = to_heads.call(linear(x, kv * dim, name: "self_attn.k_proj", bias: false), kv)
@@ -195,7 +195,7 @@ module Torobi
               sdpa(q, k, v, causal: true, scale: @config.scale)
             end
           folded = attended.transpose(axes: [0, 2, 1, 3])
-                           .reshape(shape: [-1, @build.seq, @config.attention_size])
+                           .reshape(shape: [0, 0, @config.attention_size])
           linear(folded, @config.hidden_size, name: "self_attn.o_proj", bias: false)
         end
 

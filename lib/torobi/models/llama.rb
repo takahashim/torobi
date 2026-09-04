@@ -223,15 +223,20 @@ module Torobi
           # [batch, seq, heads * dim] -> [batch, heads, seq, dim]. The key
           # heads are fewer and stay that way: the backend takes them
           # untiled, which is the whole saving.
+          #
+          # The two leading dimensions are kept as they are (`0`) rather
+          # than restated, so neither has to be known here: only the last
+          # one is being divided up, and it is the one this knows
+          # (docs/plan.md 15.63).
           to_heads = lambda do |h, count|
-            h.reshape(shape: [-1, @build.seq, count, dim]).transpose(axes: [0, 2, 1, 3])
+            h.reshape(shape: [0, 0, count, dim]).transpose(axes: [0, 2, 1, 3])
           end
           attended = sdpa(to_heads.call(q, heads).rope(theta:),
                           to_heads.call(k, kv).rope(theta:),
                           to_heads.call(v, kv),
                           causal: true)
           folded = attended.transpose(axes: [0, 2, 1, 3])
-                           .reshape(shape: [-1, @build.seq, heads * dim])
+                           .reshape(shape: [0, 0, heads * dim])
           linear(folded, @config.hidden_size, name: "self_attn.o_proj", bias: false)
         end
 
