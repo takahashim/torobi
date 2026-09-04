@@ -21,11 +21,18 @@
 # from, which is what makes the negatives hard for *that* model rather
 # than for some other one.
 #
-# It is quadratic: every query is scored against every passage. That is
-# the honest shape of the job and the reason to mine a slice rather than
-# a corpus (a hundred thousand against a hundred thousand is a hundred
-# thousand million dot products, which is not a Ruby program). At ten
-# thousand each it is minutes.
+# It is quadratic: every query is scored against every passage. **The
+# scoring is a matmul, so it happens where matmuls happen.** Measured on
+# 510 pairs of ruri-v3-30m, the same answers to the last index: 2.943 s
+# of Ruby dot products against 0.039 s of MLX, which is 75x, and which
+# at ten thousand pairs is nineteen minutes against fifteen seconds
+# (docs/plan.md 15.61).
+#
+# What sets the ceiling now is the embedding, which is linear and was
+# 584 ms per hundred texts: ten thousand pairs is about four minutes, a
+# hundred thousand about forty. The quadratic half is no longer the
+# expensive half, so the thing to watch at that size is `CHUNK` rather
+# than the clock.
 
 $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
 require "torobi"
@@ -38,6 +45,12 @@ BATCH = Integer(ENV.fetch("BATCH", 16))
 # dataset did not label, and teaching a model that a right answer is
 # wrong is worse than teaching it nothing.
 SKIP = Integer(ENV.fetch("SKIP", 1))
+# How many queries are scored at once. The scores of one chunk against
+# every document come back to Ruby as numbers, so this is what decides
+# how many are in memory: 256 against ten thousand documents is two and
+# a half million of them. Against a hundred thousand it is ten times
+# that, and the answer is a smaller chunk rather than a bigger machine.
+CHUNK = Integer(ENV.fetch("CHUNK", 256))
 
 def rows_of(path)
   File.readlines(path).reject { |line| line.strip.empty? }.map { |line| JSON.parse(line) }
@@ -58,10 +71,41 @@ def embed(session, config, ids, width)
   end
 end
 
-def dot(a, b)
-  total = 0.0
-  a.each_index { |i| total += a[i] * b[i] }
-  total
+# Every query against every document, as the one matmul it is.
+#
+# The vectors are already of length one, so this is cosine similarity,
+# and the graph holds nothing: it is opened to be a calculator.
+def scorer(width, documents)
+  graph = Torobi.graph do |g|
+    q = g.input :queries, [nil, width]
+    d = g.input :documents, [documents, width]
+    g.output :scores, g.matmul(q, d.transpose(axes: [1, 0]))
+  end
+  Torobi::GraphConfig.new(models: { m: graph }, train: [])
+end
+
+# The `count` nearest documents to each query, by index, skipping its own
+# and however many the caller wants left alone.
+#
+# In chunks because the answer is one number per query per document and
+# all of them at once is a matrix nobody needs whole.
+def nearest(queries, documents, width, count:, skip:)
+  flat = documents.flatten
+  held = Torobi::TensorData.from_a([documents.size, width], flat)
+  Torobi::Session.open(scorer(width, documents.size), weights: { params: {} }) do |session|
+    queries.each_slice(CHUNK).with_index.flat_map do |slice, chunk|
+      scores = session.forward(
+        { queries: Torobi::TensorData.from_a([slice.size, width], slice.flatten),
+          documents: held }
+      ).fetch("m.scores").to_a
+      scores.each_slice(documents.size).with_index.map do |row, i|
+        own = (chunk * CHUNK) + i
+        row.each_index.reject { |j| j == own }
+           .max_by(count + skip) { |j| row[j] }
+           .drop(skip).first(count)
+      end
+    end
+  end
 end
 
 def main
@@ -83,14 +127,13 @@ def main
     queries = embed(session, config, pairs.map { |row| row.fetch("query_ids") }, width)
     puts "embedded #{queries.size} queries and #{documents.size} passages"
 
+    # The nearest passages that are not this query's own answer, taken
+    # after `SKIP` of them: the nearest is often another right answer
+    # nobody labelled, and teaching a model that a right answer is wrong
+    # is worse than teaching it nothing.
+    mined = nearest(queries, documents, width, count:, skip: SKIP)
     pairs.each_with_index.map do |row, i|
-      # The nearest passages that are not this query's own answer. Taken
-      # after `SKIP` of them, because the nearest is often another right
-      # answer nobody labelled.
-      ranked = documents.each_index.reject { |j| j == i }
-                        .max_by(count + SKIP) { |j| dot(queries[i], documents[j]) }
-      row.merge("negative_ids" => ranked.drop(SKIP).first(count)
-                                        .map { |j| pairs[j].fetch("text_ids") })
+      row.merge("negative_ids" => mined[i].map { |j| pairs[j].fetch("text_ids") })
     end
   end
 

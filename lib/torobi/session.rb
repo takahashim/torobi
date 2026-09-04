@@ -332,7 +332,17 @@ module Torobi
     # Every value is a TensorData, whatever its shape. What an output is
     # for is its shape, and a caller that wants the number out of a
     # scalar can say `.to_a.first`.
-    def forward(batch, outputs: nil)
+    def forward(batch = nil, outputs: nil, **fields)
+      # `forward(x: ids)` is the batch written the way it reads, and in
+      # Ruby 3 it is keywords, so the batch arrives as nothing at all.
+      # Caught here because what Ruby says about it ("unknown keyword",
+      # or an argument count) is true and no help.
+      if batch.nil? || !fields.empty?
+        raise ArgumentError,
+              "forward takes its batch as one argument: forward({x: ...}), not " \
+              "forward(x: ...). The braces are what keep it from being keywords."
+      end
+
       wanted = Array(outputs).map(&:to_s)
       @native.forward(Batch.pack(batch), wanted).to_h do |name, dtype, shape, bytes|
         [name, TensorData.new(shape, bytes, dtype: dtype.to_sym)]

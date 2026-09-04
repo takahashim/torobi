@@ -84,6 +84,17 @@ class ForwardTest < Minitest::Test
     assert_match(/m.hidden/, e.message)
   end
 
+  # `forward(x: ids)` is the batch written the way it reads, and in Ruby
+  # 3 it is keywords, so the method is called with no batch at all. The
+  # count Ruby reports for that says nothing about the braces that fix
+  # it, and this has now cost an afternoon twice.
+  def test_a_batch_written_as_keywords_is_told_about_the_braces
+    e = assert_raises(ArgumentError) { open_run { |s| s.forward(x: 1) } }
+
+    assert_match(/forward\(\{x: \.\.\.\}\)/, e.message)
+    assert_match(/keywords/, e.message)
+  end
+
   # The objective's fields are the training run's, not the model's. A
   # model being asked what it thinks is not being marked against anything.
   def test_a_forward_needs_only_what_the_models_read
