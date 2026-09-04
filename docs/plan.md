@@ -2878,6 +2878,30 @@ hard negative と調整された schedule で学習されている。それを�
 上がらなければ、**上がらないことが答え**である — 強い公開モデルを易しい negative で
 fine-tune しても良くならない、という当たり前の事実に、この枠組みで到達したことになる。
 
+### 15.58 前処理を Ruby でもできるようにした(2026-09-04)
+
+「tokenizers gem があれば足りるか」を測った。**tokenizer は足りる。parquet が足りない。**
+
+`tokenizers` gem は arm64-darwin の precompiled で入り (cargo すら要らない)、
+ruri-v3 の `tokenizer.json` に対して **Python と ids が完全に一致した** (prefix と
+truncation を含めて)。同じ HuggingFace の実装なので当然ではあるが、**測っていない
+一致は一致ではない**。
+
+parquet は遠い。`red-parquet` は Homebrew の apache-arrow-glib を要り、この環境では
+extconf が落ちる。だから入口を分けた:
+
+| | 入口 | 相手 |
+| --- | --- | --- |
+| `tools/retrieval_pairs.py` | parquet | Hub から降ってくるデータセット |
+| `tools/retrieval_pairs.rb` | JSON Lines | **自分のデータ** |
+
+自分のデータを使うなら JSONL は自然な形であり、そのとき**パイプラインに Python が
+1 行も要らなくなる**。2 つの道具が同じ入力に対して同じ ids を出すことは確かめてある。
+
+`tokenizers` は **Torobi の依存にしていない**。ライブラリは ids を渡されるもので
+tokenize しない (§15.19) という線は動かしていない。Python 側が `uv run --with` で
+頼むのと同じように、この script も無ければ `gem install tokenizers` と言って終わる。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。
