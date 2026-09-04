@@ -85,6 +85,23 @@ encode = lambda do |text, prefix|
   tokenizer.encode("#{prefix}#{text}").ids
 end
 
+# How many came back at the cap, said out loud.
+#
+# **Truncation is silent otherwise, and it is not a small thing.**
+# Measured on NLPJournal: the same untouched ruri-v3-130m scores 0.7313
+# at a 192-token cap, 0.8851 at 512 and 0.9466 at 1024, against a
+# published 0.9645. Three quarters of every introduction had been thrown
+# away and nothing said so, which cost a day of reading the difference as
+# the model's (docs/plan.md 15.70).
+def cut(name, rows, limit)
+  at_cap = rows.count { |ids| ids.size >= limit }
+  return "" if at_cap.zero?
+
+  said = ", #{at_cap} of #{rows.size} #{name} at the #{limit}-token cap"
+  said += " (so this is mostly their first #{limit} tokens)" if at_cap * 2 > rows.size
+  said
+end
+
 # Rows from wherever they are, by what the path looks like: parquet is
 # columnar and a glob of it is several files, JSON Lines is one.
 def rows_of(path, columns: nil, limit: nil)
@@ -121,6 +138,7 @@ end
 if options[:pairs]
   columns = [options[:query_key], options[:text_key], options[:title_key]].compact
   rows = rows_of(options[:pairs], columns:, limit: options[:rows])
+  texts = []
   File.open(options[:out], "w") do |out|
     rows.each do |row|
       unless row.key?(options[:query_key]) && row.key?(options[:text_key])
@@ -128,14 +146,17 @@ if options[:pairs]
               "in #{row.keys.inspect}"
       end
 
+      text_ids = encode.call(document(row, options[:text_key], options[:title_key]),
+                             options[:text_prefix])
+      texts << text_ids
       out.puts JSON.generate(
         "query_ids" => encode.call(row.fetch(options[:query_key]), options[:query_prefix]),
-        "text_ids" => encode.call(document(row, options[:text_key], options[:title_key]),
-                                  options[:text_prefix])
+        "text_ids" => text_ids
       )
     end
   end
-  puts "wrote #{options[:out]}: #{rows.size} pairs from #{options[:pairs]}"
+  puts "wrote #{options[:out]}: #{rows.size} pairs from #{options[:pairs]}" \
+       "#{cut("texts", texts, options[:seq])}"
 elsif options[:queries] && options[:corpus] && options[:qrels]
   relevant = Hash.new { |h, k| h[k] = {} }
   rows_of(options[:qrels]).each do |row|
@@ -156,7 +177,8 @@ elsif options[:queries] && options[:corpus] && options[:qrels]
   }
   File.write(options[:out], "#{JSON.generate(bundle)}\n")
   puts "wrote #{options[:out]}: #{bundle["queries"].size} queries over " \
-       "#{bundle["corpus"].size} documents"
+       "#{bundle["corpus"].size} documents" \
+       "#{cut("documents", bundle["corpus"].map { |d| d.fetch("ids") }, options[:seq])}"
 else
   abort "one of --pairs, or --queries with --corpus and --qrels"
 end

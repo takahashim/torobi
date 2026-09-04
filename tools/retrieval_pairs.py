@@ -63,6 +63,25 @@ def encoder(path, limit):
     return encode
 
 
+def cut(name, rows, limit):
+    """How many of `rows` came back at the cap, said out loud.
+
+    **Truncation is silent otherwise, and it is not a small thing.**
+    Measured on NLPJournal: the same untouched ruri-v3-130m scores 0.7313
+    at a 192-token cap, 0.8851 at 512 and 0.9466 at 1024, against a
+    published 0.9645. Three quarters of every introduction had been thrown
+    away and nothing said so, which cost a day of reading the difference
+    as the model's (docs/plan.md 15.70).
+    """
+    at_cap = sum(1 for ids in rows if len(ids) >= limit)
+    if not at_cap:
+        return ""
+    said = f", {at_cap} of {len(rows)} {name} at the {limit}-token cap"
+    if at_cap * 2 > len(rows):
+        said += f" (so this is mostly their first {limit} tokens)"
+    return said
+
+
 def pairs(args, encode):
     table = read(args.pairs)
     columns = table.column_names
@@ -80,19 +99,20 @@ def pairs(args, encode):
         titles = table[args.title_column].to_pylist()
         texts = [f"{t}\n{body}" if t else body for t, body in zip(titles, texts)]
     rows = list(zip(queries, texts))[: args.rows]
+    encoded = [
+        (encode(query, QUERY_PREFIX), encode(text, TEXT_PREFIX)) for query, text in rows
+    ]
     with open(args.out, "w") as f:
-        for query, text in rows:
+        for query_ids, text_ids in encoded:
             f.write(
                 json.dumps(
-                    {
-                        "query_ids": encode(query, QUERY_PREFIX),
-                        "text_ids": encode(text, TEXT_PREFIX),
-                    },
+                    {"query_ids": query_ids, "text_ids": text_ids},
                     ensure_ascii=False,
                 )
                 + "\n"
             )
-    print(f"wrote {args.out}: {len(rows)} pairs from {args.pairs}")
+    said = cut("texts", [text for _, text in encoded], args.seq)
+    print(f"wrote {args.out}: {len(rows)} pairs from {args.pairs}{said}")
 
 
 def mteb(args, encode):
@@ -127,9 +147,10 @@ def mteb(args, encode):
     with open(args.out, "w") as f:
         json.dump(bundle, f, ensure_ascii=False)
         f.write("\n")
+    said = cut("documents", [d["ids"] for d in bundle["corpus"]], args.seq)
     print(
         f"wrote {args.out}: {len(bundle['queries'])} queries over "
-        f"{len(bundle['corpus'])} documents"
+        f"{len(bundle['corpus'])} documents{said}"
     )
 
 
