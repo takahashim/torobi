@@ -288,14 +288,15 @@ impl SessionCore {
             &mut tapped,
         )?;
         let mut found = Vec::with_capacity(names.len());
-        for name in names {
-            let (model, output) = name
-                .split_once('.')
-                .expect("an output name is qualified by its model");
+        for name in &names {
+            let (model, output) = self
+                .plan
+                .output_named(name)
+                .with_context(|| format!("no output is named {name:?} here"))?;
             let value = produced
                 .get(&(model.to_string(), output.to_string()))
-                .expect("output_names comes from the same programs that just ran");
-            found.push((name, value.clone()));
+                .with_context(|| format!("{name:?} was not produced by the pass"))?;
+            found.push((name.clone(), value.clone()));
         }
         eval(found.iter().map(|(_, value)| value))?;
         self.record(tapped)?;
@@ -1023,6 +1024,37 @@ mod tests {
         close(&values(&produced[0].1), &[1.0, 1.0]);
         close(&values(&produced[1].1), &[3.0, 4.0]);
         assert_eq!(produced[0].1.shape, vec![1, 2]);
+    }
+
+    /// A qualified output name is found rather than parsed.
+    ///
+    /// The engine is handed names, not promises about them. Ruby refuses a
+    /// model name holding a dot, because "a.b.out" would otherwise have
+    /// two readings; this side does not depend on that, and the version
+    /// that did split at the first dot panicked here, which poisoned the
+    /// gate and closed the whole process to MLX.
+    #[test]
+    fn a_model_name_with_a_dot_is_answered_rather_than_split() {
+        let graph = serde_json::json!({
+            "inputs": [fixtures::input(0, "x", serde_json::json!([null, 2]), "f32")],
+            "parameters": [],
+            "nodes": [fixtures::node(0, "square", serde_json::json!(["input:0"]), serde_json::json!([]))],
+            "outputs": {"out": "node:0"},
+        });
+        let config = fixtures::config(
+            serde_json::json!({ "a.b": graph }),
+            serde_json::Value::Null,
+            serde_json::json!([]),
+        );
+        let mut session = session((config, "{\"params\": {}}".to_string()));
+
+        assert_eq!(session.output_names().unwrap(), vec!["a.b.out"]);
+        let produced = session
+            .forward(&fixtures::batch_x(&[3.0, 4.0]), &[])
+            .unwrap();
+
+        assert_eq!(produced[0].0, "a.b.out");
+        close(&values(&produced[0].1), &[9.0, 16.0]);
     }
 
     /// And asked for one of them by name. A name no model declares is

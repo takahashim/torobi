@@ -35,6 +35,17 @@ module Torobi
       models = models.to_h do |name, graph|
         name = name.to_s
         raise ConfigError, "model name must not be empty" if name.empty?
+        # A model name qualifies what the model declares ("m.embedding",
+        # "m.layers.0.attn.Wqkv.weight"), and the dot is what joins them.
+        # An output's own name may hold one (`towers` declares
+        # "queries.embedding"), so a name with a dot on both sides has two
+        # readings: model "a" with output "b.c", or model "a.b" with
+        # output "c". Refused here, where the ambiguity is created.
+        if name.include?(".")
+          raise ConfigError,
+                "model name #{name.inspect} holds a dot, and a dot is what joins a " \
+                "model to what it declares; #{name}.x could then be two things"
+        end
         unless graph.is_a?(IR::Graph)
           raise ConfigError, "model #{name.inspect} is a #{graph.class}, expected Torobi::IR::Graph"
         end

@@ -220,6 +220,25 @@ impl Plan {
         &self.output_names
     }
 
+    /// The model and the output a qualified name refers to.
+    ///
+    /// **Found rather than parsed.** The names are made here, by joining
+    /// with a dot, and an output's own name may hold one: a two-tower
+    /// model declares "queries.embedding", so "m.queries.embedding"
+    /// cannot be taken apart by looking at it. Splitting at the first dot
+    /// is right only while no model name holds one, which is a promise
+    /// the caller makes and this side should not depend on.
+    pub fn output_named(&self, name: &str) -> Option<(&str, &str)> {
+        self.models.iter().find_map(|model| {
+            model
+                .program
+                .outputs
+                .iter()
+                .find(|(output, _)| qualified(&model.name, output) == name)
+                .map(|(output, _)| (model.name.as_str(), output.as_str()))
+        })
+    }
+
     pub fn index_of(&self, path: &str) -> Option<usize> {
         self.paths.iter().position(|p| p == path)
     }

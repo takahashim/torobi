@@ -79,4 +79,17 @@ class GraphConfigTest < Minitest::Test
       Torobi::GraphConfig.new(models: { "m" => g }, metadata: { "k" => Object.new })
     end
   end
+
+  # A model name qualifies everything the model declares, and an output's
+  # own name may hold a dot ("queries.embedding"), so a dotted model name
+  # would make "a.b.c" two things. The engine used to split such a name at
+  # the first dot and panic, which poisoned the process's MLX.
+  def test_a_model_name_holding_a_dot_is_refused
+    e = assert_raises(Torobi::ConfigError) do
+      Torobi::GraphConfig.new(models: { "a.b" => Torobi::TestGraphs.linear_graph })
+    end
+
+    assert_match(/holds a dot/, e.message)
+    assert_match(/could then be two things/, e.message)
+  end
 end
