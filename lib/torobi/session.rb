@@ -401,6 +401,7 @@ module Torobi
     # shape it produces for itself.
     def export_model!(dir, from: nil, model: nil, pooling: nil, pooling_dim: nil)
       model ||= sole_model
+      merged!(model)
       atomically do
         written = @native.export_model(model.to_s, dir.to_s)
         carried = Export.publish(dir.to_s, from:, pooling:, pooling_dim:)
@@ -626,6 +627,32 @@ module Torobi
             "#{what} needs a loss, and this run has none: nothing is trained and " \
             "no model output is an f32 scalar. That is what a config opened for " \
             "inference looks like, and `forward` is what it can do."
+    end
+
+    # That there is a model here to export, rather than a model and an
+    # adapter beside it.
+    #
+    # LoRA leaves the weight alone and trains a pair of small matrices
+    # next to it, so an adapted run holds the base weights it started
+    # with and never moved. Exporting writes every parameter, which would
+    # be those weights plus `lora_A` and `lora_B` tensors nothing else
+    # knows: **a directory that looks trained and is not.** Merging them
+    # (W + scale * BA, and the adapter dropped) is what makes one, and it
+    # is not built yet. Until it is, this refuses rather than writes
+    # something misleading; the checkpoint holds both halves, so nothing
+    # is lost by waiting.
+    def merged!(model)
+      adapted = @native.parameter_paths.select do |path|
+        path.start_with?("#{model}.") && LoRA.adapted?(path)
+      end
+      return if adapted.empty?
+
+      raise ConfigError,
+            "#{model.inspect} was trained through an adapter (#{adapted.size} " \
+            "parameters like #{adapted.first.inspect}), and its base weights have " \
+            "not moved. Writing them would be a model that looks trained and is " \
+            "not. Merging the adapter into the weights is not implemented; the " \
+            "checkpoint holds both halves."
     end
 
     # Which model to export when the run holds only one.

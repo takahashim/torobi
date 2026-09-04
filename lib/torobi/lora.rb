@@ -74,8 +74,16 @@ module Torobi
       config.parameters.map(&:qualified_path).select { |path| adapted?(path) }
     end
 
-    def adapted?(path)
+    # Whether a parameter path is an adapter's own.
+    #
+    # A fact about the name rather than about any particular adapter, so
+    # it is asked of the class: `Session#export_model!` wants to know
+    # whether what it is about to write holds an adapter, and it has the
+    # paths rather than the LoRA that made them.
+    def self.adapted?(path)
       SUFFIXES.any? { |suffix| path.to_s.end_with?(".#{suffix}") }
     end
+
+    def adapted?(path) = self.class.adapted?(path)
   end
 end

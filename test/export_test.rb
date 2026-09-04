@@ -269,6 +269,32 @@ class ExportTest < Minitest::Test
     end
   end
 
+  # LoRA leaves the weight alone, so an adapted run holds base weights
+  # that never moved. Exporting them beside the adapter's matrices would
+  # be a directory that looks trained and is not, and merging is not
+  # built yet (docs/plan.md 15.68).
+  def test_an_adapted_run_refuses_to_export
+    adapter = Torobi::LoRA.new(rank: 2, on: %w[head])
+    graph = Torobi.graph do |g|
+      x = g.input :x, [nil, 2]
+      g.adapting(adapter) { g.output :loss, g.mean(g.linear(x, 1, name: "head")) }
+    end
+    config = Torobi::GraphConfig.new(models: { m: graph })
+    rng = Random.new(3)
+    params = config.parameters.to_h do |p|
+      [p.qualified_path,
+       { shape: p.spec.shape, data: Array.new(p.spec.shape.reduce(1, :*)) { rng.rand } }]
+    end
+
+    e = Torobi::Session.open(config, weights: { params: }) do |s|
+      assert_raises(Torobi::ConfigError) { s.export_model!(File.join(Dir.mktmpdir, "out")) }
+    end
+
+    assert_match(/trained through an adapter/, e.message)
+    assert_match(/looks trained and is not/, e.message)
+    assert_match(/not implemented/, e.message)
+  end
+
   private
 
   # A minimal safetensors reader, just enough to check the export layout.
