@@ -24,8 +24,8 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use mlx_rs::transforms::eval;
 
-use crate::executor::{self, Taps};
-use crate::interp::Stat;
+use crate::executor;
+use crate::interp::{Stat, Taps, Tapped, Watch};
 use crate::optimizer::Config as OptimizerConfig;
 use crate::plan::{Plan, Weights};
 use crate::runtime::{runtime, RuntimeError};
@@ -279,13 +279,12 @@ impl SessionCore {
     ) -> Result<Vec<(String, Tensor)>> {
         let names = self.wanted(wanted)?;
         let fields = self.plan.bind_models(batch)?;
-        let mut tapped = executor::Tapped::new();
+        let mut tapped = Tapped::new();
         let produced = executor::produce(
             &self.plan,
             self.state.pass().params,
             &fields,
-            &self.taps,
-            &mut tapped,
+            &mut Watch::new(&self.taps, &mut tapped),
         )?;
         let mut found = Vec::with_capacity(names.len());
         for name in &names {
@@ -407,12 +406,12 @@ impl SessionCore {
     }
 
     /// Keeps what the taps saw, as host-side copies.
-    fn record(&mut self, tapped: executor::Tapped) -> Result<()> {
+    fn record(&mut self, tapped: Tapped) -> Result<()> {
         self.tapped = Self::to_host(tapped)?;
         Ok(())
     }
 
-    fn to_host(tapped: executor::Tapped) -> Result<BTreeMap<String, Tensor>> {
+    fn to_host(tapped: Tapped) -> Result<BTreeMap<String, Tensor>> {
         tapped
             .iter()
             .map(|(name, value)| Ok((name.clone(), to_tensor(value)?)))

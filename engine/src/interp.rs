@@ -18,6 +18,59 @@ use crate::op::{qualified, Node, Op, Program};
 
 type Result<T> = std::result::Result<T, Exception>;
 
+/// What a tap asked for, by node name.
+pub type Taps = BTreeMap<String, Stat>;
+
+/// What the taps saw, by node name.
+pub type Tapped = BTreeMap<String, Array>;
+
+/// What is being watched, and where what it saw goes.
+///
+/// The two always travelled together and as two parameters: one to say
+/// which nodes are wanted, one to put them in. Two chances to pass a
+/// mismatched pair, and the deciding (is anything watching? is this node
+/// one of them? reduce it how?) sat inline in the interpreter's innermost
+/// loop, which is not what that loop is about.
+pub struct Watch<'a> {
+    taps: &'a Taps,
+    collected: &'a mut Tapped,
+}
+
+impl<'a> Watch<'a> {
+    pub fn new(taps: &'a Taps, collected: &'a mut Tapped) -> Self {
+        Self { taps, collected }
+    }
+
+    /// Nothing is watched, whatever is passed in to collect into.
+    ///
+    /// What a traced pass wants: the values a `value_and_grad` produces
+    /// belong to the trace, and reading them out is not what a tap means
+    /// (`crate::executor::differentiate`).
+    pub fn none(collected: &'a mut Tapped) -> Self {
+        static NOTHING: std::sync::OnceLock<Taps> = std::sync::OnceLock::new();
+        Self {
+            taps: NOTHING.get_or_init(Taps::new),
+            collected,
+        }
+    }
+
+    /// Keeps what a node produced, if that node is one of the watched.
+    ///
+    /// Nothing is watched most of the time, and this is called once per
+    /// node per pass, so the usual answer is the first line.
+    fn saw(&mut self, qualifier: &str, name: &str, value: &Array) -> Result<()> {
+        if self.taps.is_empty() {
+            return Ok(());
+        }
+        let watched = qualified(qualifier, name);
+        let Some(stat) = self.taps.get(&watched) else {
+            return Ok(());
+        };
+        self.collected.insert(watched, stat.apply(value)?);
+        Ok(())
+    }
+}
+
 /// What a tap asks for: a node's name, and how much of it to bring back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Stat {
@@ -81,8 +134,7 @@ pub fn evaluate_tapped(
     inputs: &BTreeMap<String, Array>,
     rng: Option<&Array>,
     qualifier: &str,
-    taps: &BTreeMap<String, Stat>,
-    collected: &mut BTreeMap<String, Array>,
+    watch: &mut Watch<'_>,
 ) -> Result<BTreeMap<String, Array>> {
     // One key per random op, split from the graph's, so two dropouts in one
     // step draw different masks and the same step always draws the same
@@ -97,15 +149,8 @@ pub fn evaluate_tapped(
             .map(|r| read(r, program, inputs, &values))
             .collect::<Result<_>>()?;
         let out = apply(node, &ins, params, &mut key)?;
-        // Only when something is watching: this is a step's inner loop,
-        // and the usual answer is that nothing is.
-        if !taps.is_empty() {
-            if let Some(name) = &node.name {
-                let watched = qualified(qualifier, name);
-                if let Some(stat) = taps.get(&watched) {
-                    collected.insert(watched, stat.apply(&out)?);
-                }
-            }
+        if let Some(name) = &node.name {
+            watch.saw(qualifier, name, &out)?;
         }
         values.push(out);
     }

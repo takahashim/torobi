@@ -13,16 +13,10 @@ use mlx_rs::error::Exception;
 use mlx_rs::transforms::{eval, value_and_grad_with_argnums};
 use mlx_rs::Array;
 
-use crate::interp::{self, Stat};
+use crate::interp::{self, Taps, Tapped, Watch};
 use crate::op::{Program, OBJECTIVE};
 use crate::plan::{Model, Plan};
 use crate::state::Pass;
-
-/// What a tap asked for, by node name.
-pub type Taps = BTreeMap<String, Stat>;
-
-/// What the taps saw, by node name.
-pub type Tapped = BTreeMap<String, Array>;
 
 /// What the models produced, by model and output name.
 pub type Produced = BTreeMap<(String, String), Array>;
@@ -40,10 +34,28 @@ pub fn produce(
     plan: &Plan,
     params: &[Array],
     fields: &BTreeMap<String, Array>,
-    taps: &Taps,
-    collected: &mut Tapped,
+    watch: &mut Watch<'_>,
 ) -> Result<Produced> {
+    Ok(models(plan, params, fields, None, watch)?.0)
+}
+
+/// Every model, in order, each reading what the ones before it produced.
+///
+/// The one loop both passes are made of. `rng` is the step's randomness
+/// and the mode with it: a key means a training pass, and the key that
+/// comes back is what is left for the objective. No key means an
+/// evaluation, where the random ops stand aside.
+fn models(
+    plan: &Plan,
+    params: &[Array],
+    fields: &BTreeMap<String, Array>,
+    rng: Option<&Array>,
+    watch: &mut Watch<'_>,
+) -> std::result::Result<(Produced, Option<Array>), Exception> {
     let mut produced = Produced::new();
+    // One key per graph, split from the step's, so a model and the
+    // objective never draw the same numbers.
+    let mut key = rng.cloned();
     for Model {
         name,
         program,
@@ -51,20 +63,27 @@ pub fn produce(
     } in &plan.models
     {
         let inputs = resolve(program, fields, &produced, name)?;
+        let mine = match &key {
+            Some(current) => {
+                let (next, mine) = mlx_rs::random::split(current, 2)?;
+                key = Some(next);
+                Some(mine)
+            }
+            None => None,
+        };
         let values = interp::evaluate_tapped(
             program,
             &params[slice.clone()],
             &inputs,
-            None,
+            mine.as_ref(),
             name,
-            taps,
-            collected,
+            watch,
         )?;
         for (output, value) in values {
             produced.insert((name.clone(), output), value);
         }
     }
-    Ok(produced)
+    Ok((produced, key))
 }
 
 /// Runs every model, then the objective over their outputs.
@@ -77,43 +96,10 @@ pub fn forward(
     params: &[Array],
     fields: &BTreeMap<String, Array>,
     rng: Option<&Array>,
-    taps: &Taps,
-    collected: &mut Tapped,
+    watch: &mut Watch<'_>,
 ) -> std::result::Result<Array, Exception> {
     let fail = |what: String| Exception::custom(what);
-    let mut outputs: BTreeMap<(String, String), Array> = BTreeMap::new();
-
-    // One key per graph, split from the step's, so a model and the
-    // objective never draw the same numbers.
-    let mut key = rng.cloned();
-    for Model {
-        name,
-        program,
-        slice,
-    } in &plan.models
-    {
-        let inputs = resolve(program, fields, &outputs, name)?;
-        let mine = match &key {
-            Some(current) => {
-                let (next, mine) = mlx_rs::random::split(current, 2)?;
-                key = Some(next);
-                Some(mine)
-            }
-            None => None,
-        };
-        let produced = interp::evaluate_tapped(
-            program,
-            &params[slice.clone()],
-            &inputs,
-            mine.as_ref(),
-            name,
-            taps,
-            collected,
-        )?;
-        for (output, value) in produced {
-            outputs.insert((name.clone(), output), value);
-        }
-    }
+    let (outputs, key) = models(plan, params, fields, rng, watch)?;
 
     let Some(objective) = plan.objective.as_ref() else {
         // No objective: a single model's only output is the loss.
@@ -124,15 +110,8 @@ pub fn forward(
     };
 
     let inputs = resolve(objective, fields, &outputs, OBJECTIVE)?;
-    let produced = interp::evaluate_tapped(
-        objective,
-        &[],
-        &inputs,
-        key.as_ref(),
-        OBJECTIVE,
-        taps,
-        collected,
-    )?;
+    let produced =
+        interp::evaluate_tapped(objective, &[], &inputs, key.as_ref(), OBJECTIVE, watch)?;
     produced
         .into_values()
         .next()
@@ -190,7 +169,7 @@ pub fn differentiate(
     let rng = pass.rng;
     let fun = |ps: &[Array]| -> std::result::Result<Vec<Array>, Exception> {
         let mut inner = Tapped::new();
-        forward(plan, ps, fields, Some(rng), &Taps::new(), &mut inner).map(|loss| vec![loss])
+        forward(plan, ps, fields, Some(rng), &mut Watch::none(&mut inner)).map(|loss| vec![loss])
     };
     let mut vg = value_and_grad_with_argnums(fun, pass.argnums);
     let (mut values, grads) = vg(pass.params)?;
@@ -199,7 +178,13 @@ pub fn differentiate(
 
     let mut collected = Tapped::new();
     if !taps.is_empty() {
-        forward(plan, pass.params, fields, Some(rng), taps, &mut collected)?;
+        forward(
+            plan,
+            pass.params,
+            fields,
+            Some(rng),
+            &mut Watch::new(taps, &mut collected),
+        )?;
         eval(collected.values())?;
     }
     Ok((loss, grads, collected))
@@ -238,7 +223,7 @@ pub fn differentiate_fields(
             all.insert(name.clone(), x.clone());
         }
         let mut inner = Tapped::new();
-        forward(plan, params, &all, None, &Taps::new(), &mut inner).map(|loss| vec![loss])
+        forward(plan, params, &all, None, &mut Watch::none(&mut inner)).map(|loss| vec![loss])
     };
     let argnums: Vec<i32> = (0..of.len() as i32).collect();
     let mut vg = value_and_grad_with_argnums(fun, &argnums);
@@ -260,7 +245,13 @@ pub fn evaluate(
     taps: &Taps,
 ) -> Result<(Array, Tapped)> {
     let mut collected = Tapped::new();
-    let loss = forward(plan, params, fields, None, taps, &mut collected)?;
+    let loss = forward(
+        plan,
+        params,
+        fields,
+        None,
+        &mut Watch::new(taps, &mut collected),
+    )?;
     eval(std::iter::once(&loss).chain(collected.values()))?;
     Ok((loss, collected))
 }

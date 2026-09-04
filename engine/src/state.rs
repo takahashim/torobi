@@ -638,7 +638,8 @@ impl TrainState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executor::{self, Taps};
+    use crate::executor;
+    use crate::interp::Taps;
     use crate::fixtures;
     use crate::plan::Weights;
     use crate::tensor::{Tensor, Values};
