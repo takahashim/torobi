@@ -145,17 +145,22 @@ module Torobi
 
       def param(name, shape, init:, dtype: :f32, trainable: true)
         path = scoped(name)
-        if @sharing.positive? && (already = @parameters.find { |p| p.path == path })
-          return shared(already, shape:, dtype:, init:, trainable:)
-        end
-
         # Inside an adapting block, what is trained is the adapter and
         # nothing else. Said here rather than at each parameter, because
         # a base model left trainable by an oversight is not a LoRA
         # fine-tune, and no pattern anybody writes later can undo it: the
         # window's `unfreeze!` moves within what the graph declared
         # trainable, so this is the declaration that matters.
+        #
+        # Before the sharing lookup, so that a second application is
+        # compared with what the first actually declared: an adapted base
+        # weight is frozen, and asking whether it is the same parameter
+        # has to ask about the same thing.
         trainable &&= @adapter.adapted?(path) if @adapter
+        if @sharing.positive? && (already = @parameters.find { |p| p.path == path })
+          return shared(already, shape:, dtype:, init:, trainable:)
+        end
+
         spec = IR::ParameterSpec.new(id: @parameters.size, path:, shape:,
                                      dtype:, initializer: init, trainable:)
         @parameters << spec

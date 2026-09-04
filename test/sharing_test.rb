@@ -115,6 +115,26 @@ class SharingTest < Minitest::Test
     assert_match(/named "w"/, e.message)
   end
 
+  # An adapter decides what is trainable, and it decides it at the
+  # declaration. So it has to speak before the sharing lookup does:
+  # asking whether a second application declares the same parameter has
+  # to ask about what the first actually declared, which for an adapted
+  # base weight is a frozen one.
+  def test_towers_can_be_adapted
+    adapter = Torobi::LoRA.new(rank: 2, on: %w[Wqkv Wo])
+    two = Torobi::Models::ModernBERT.towers(config, { queries: nil, documents: nil },
+                                            normalize: false, adapter:)
+    one = Torobi::Models::ModernBERT.embedder(config, seq: nil, pooling: :mean,
+                                              normalize: false, adapter:)
+
+    assert_equal one.parameters.map(&:path), two.parameters.map(&:path)
+    trainable = two.parameters.select(&:trainable).map(&:path)
+
+    assert(trainable.all? { |path| adapter.adapted?(path) },
+           "an adapted graph trains the adapter and nothing else")
+    assert_operator trainable.size, :>, 0
+  end
+
   # --- the numbers ---
 
   # A side of a shared graph is the model it would have been on its own.

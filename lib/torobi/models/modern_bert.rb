@@ -135,15 +135,22 @@ module Torobi
       # makes it the recipe's rather than the model's; this stops at the
       # vector. `rows:` is for the objective that does read across, which
       # cannot be written against a dimension nothing knows.
+      # `adapter:` is a `Torobi::LoRA`, and adapts the linears it names
+      # rather than this description having to know about it. An adapted
+      # embedder starts as the embedder it adapts (LoRA's `B` is zero),
+      # so it is what a fine-tune that means to keep the model it started
+      # from asks for.
       def embedder(config, seq:, pooling: :mean, encoder_prefix: "", rows: nil,
-                   normalize: true, dtype: :f32)
+                   normalize: true, dtype: :f32, adapter: nil)
         config.check!
         build = Build.new(seq:, rows:, dtype:)
         Torobi.graph do |g|
-          x = g.name("hidden", body(g, config, build, encoder_prefix))
-          pooled = pool(g, x, config, build, mode: pooling)
-          pooled = normalized(g, pooled) if normalize
-          g.output :embedding, g.name("embedding", pooled)
+          g.adapting(adapter) do
+            x = g.name("hidden", body(g, config, build, encoder_prefix))
+            pooled = pool(g, x, config, build, mode: pooling)
+            pooled = normalized(g, pooled) if normalize
+            g.output :embedding, g.name("embedding", pooled)
+          end
         end
       end
 
@@ -175,18 +182,20 @@ module Torobi
       # across the batch cannot be written against a dimension nothing
       # knows.
       def towers(config, sides, pooling: :mean, encoder_prefix: "", normalize: true,
-                 dtype: :f32)
+                 dtype: :f32, adapter: nil)
         config.check!
         raise ConfigError, "towers needs at least one side" if sides.empty?
 
         Torobi.graph do |g|
-          sides.each do |side, rows|
-            build = Build.new(seq: nil, rows:, dtype:, fields: "#{side}.")
-            g.sharing(side) do
-              x = g.name("hidden", body(g, config, build, encoder_prefix))
-              pooled = pool(g, x, config, build, mode: pooling)
-              pooled = normalized(g, pooled) if normalize
-              g.output :"#{side}.embedding", g.name("embedding", pooled)
+          g.adapting(adapter) do
+            sides.each do |side, rows|
+              build = Build.new(seq: nil, rows:, dtype:, fields: "#{side}.")
+              g.sharing(side) do
+                x = g.name("hidden", body(g, config, build, encoder_prefix))
+                pooled = pool(g, x, config, build, mode: pooling)
+                pooled = normalized(g, pooled) if normalize
+                g.output :"#{side}.embedding", g.name("embedding", pooled)
+              end
             end
           end
         end

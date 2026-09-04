@@ -12,7 +12,15 @@
 # training set does not overlap.
 #
 #   ruby experiments/embed_retrieval.rb <encoder-dir> <train.jsonl> \
-#     <eval.json> <run-dir> [steps]
+#     <eval.json[,eval.json...]> <run-dir> [steps]
+#
+# **Measure against more than one.** A run that falls on a benchmark and
+# rises on a held-out slice of its own training data has moved rather
+# than broken, and either number alone would have been read as a verdict
+# (docs/plan.md 15.67). `tools/holdout.rb` makes the second one.
+#
+# `LORA=8` trains an adapter instead of the whole model, which is the
+# knob for how much of what the model already knew survives.
 #
 # **It resumes.** Run it again against a directory that holds a
 # checkpoint and it carries on from there, with the same parameters, the
@@ -23,9 +31,10 @@
 # Both inputs are token ids and nothing else: `tools/retrieval_pairs.py`
 # made them, which is where the tokenizer lives (docs/plan.md 15.19).
 #
-# **Do not train on the benchmark.** The eval bundle is what the number
-# is reported against; if the pairs came from it, the number means
-# nothing. auto-wiki-qa trains, NLPJournal measures.
+# **Do not train on the benchmark.** The eval bundles are what the
+# numbers are reported against; if the pairs came from one, that number
+# means nothing. auto-wiki-qa trains, NLPJournal measures, and the
+# held-out slice is split off before the negatives are mined.
 #
 # What it is not is a framework. Section 7.3 says experiments stay plain
 # Ruby until dogfooding says what the shape should be, so this is a
@@ -65,6 +74,21 @@ LEARNING_RATE = Float(ENV.fetch("LR", 5e-6))
 WARMUP = Float(ENV.fetch("WARMUP", 0.05))
 # sentence-transformers' default temperature of 0.05, as its reciprocal.
 SCALE = Float(ENV.fetch("SCALE", 20.0))
+# The rank of a LoRA adapter, or 0 for a full fine-tune.
+#
+# A full fine-tune of a published retriever moves every weight, and what
+# it loses is what it knew that the training set does not say: run 003
+# fell from 0.7313 to 0.6684 on NLPJournal while its own distribution
+# went up (docs/plan.md 15.65 and 15.67). An adapter is the standard
+# answer to that: the update is confined to a low-rank subspace beside
+# each weight, and the model it started from is still in there.
+LORA = Integer(ENV.fetch("LORA", 0))
+# Which linears the adapter wraps, by their last segment. These are
+# ModernBERT's names; `Wqkv` is the whole of attention's input side.
+LORA_ON = ENV.fetch("LORA_ON", "Wqkv,Wo").split(",").map(&:strip)
+LORA_ALPHA = ENV.fetch("LORA_ALPHA", nil)&.then { |v| Float(v) }
+# The adapter this run trains through, or nil for a full fine-tune.
+ADAPTER = (Torobi::LoRA.new(rank: LORA, alpha: LORA_ALPHA, on: LORA_ON) unless LORA.zero?)
 EVALUATION_BATCH = Integer(ENV.fetch("EVALUATION_BATCH", 16))
 EVERY = Integer(ENV.fetch("EVERY", 100))
 CAP = Integer(ENV.fetch("CAP_GIB", 12)) * 1024 * 1024 * 1024
@@ -79,7 +103,7 @@ end
 # queries costs what queries cost rather than what documents do.
 def embedder(config, rows: nil)
   Torobi::Models::ModernBERT.embedder(config, seq: nil, pooling: :mean,
-                                      encoder_prefix: "", rows:)
+                                      encoder_prefix: "", rows:, adapter: ADAPTER)
 end
 
 # One part of a step's rows, padded to its own longest row.
@@ -188,6 +212,33 @@ def ndcg(session, config, bundle, width, at: 10)
   scores.sum / scores.size
 end
 
+# The evaluation bundles, by the name each will be reported under.
+#
+# **More than one, because one cannot tell being better from being
+# somewhere else.** Run 003 fell on NLPJournal and run 004 rose on a
+# held-out slice of its own training data; either alone would have been
+# read as a verdict on the recipe, and together they said the model had
+# moved rather than broken (docs/plan.md 15.67). Every run should say
+# both from now on.
+#
+#   runs/held.json,runs/nlpjournal.json
+#
+# The first is the one `best` follows, because a run has to keep
+# something and only one of them can decide what.
+def bundles_of(paths)
+  paths = paths.split(",").map(&:strip).reject(&:empty?)
+  names = paths.map { |path| File.basename(path, ".*") }
+  # Two bundles under one name is one bundle, silently, and the whole
+  # point of measuring two is that neither is dropped.
+  repeated = names.tally.select { |_, n| n > 1 }.keys
+  unless repeated.empty?
+    abort "two evaluation bundles are both called #{repeated.join(", ")} " \
+          "(#{paths.join(", ")}); a run reports them by name, so rename one"
+  end
+
+  names.zip(paths).to_h { |name, path| [name, JSON.parse(File.read(path))] }
+end
+
 def dot(a, b)
   total = 0.0
   a.each_index { |i| total += a[i] * b[i] }
@@ -197,13 +248,14 @@ end
 def main
   encoder, train_path, eval_path, dir, steps = ARGV
   unless encoder && train_path && eval_path && dir
-    abort "usage: embed_retrieval.rb <encoder-dir> <train.jsonl> <eval.json> <run-dir> [steps]"
+    abort "usage: embed_retrieval.rb <encoder-dir> <train.jsonl> " \
+          "<eval.json[,eval.json...]> <run-dir> [steps]"
   end
 
   config = Torobi::Models::ModernBERT.from_config_file(File.join(encoder, "config.json"))
   width = config.hidden_size
   pairs = rows_of(train_path).shuffle(random: Random.new(SEED))
-  bundle = JSON.parse(File.read(eval_path))
+  bundles = bundles_of(eval_path)
   steps = (steps || (pairs.size / PAIRS)).to_i
   FileUtils.mkdir_p(dir)
 
@@ -215,11 +267,17 @@ def main
   record = { started_at: Time.now.utc.iso8601, encoder:, train: train_path, eval: eval_path,
              seed: SEED, seq: SEQ, pairs: PAIRS, part: PART, lr: LEARNING_RATE,
              warmup: WARMUP, scale: SCALE, negatives: NEGATIVES, steps:,
-             measurements: [] }
+             lora: LORA.zero? ? nil : { rank: LORA, alpha: LORA_ALPHA, on: LORA_ON },
+             measurements: [] }.compact
 
+  training = seeded(embedder(config))
   Torobi::Session.open(
-    seeded(embedder(config)),
+    training,
     pretrained: { m: File.join(encoder, "model.safetensors") },
+    # The adapter's matrices are in no published checkpoint, and saying
+    # which parameters are meant to be new is what tells a fresh one from
+    # a typo (`Torobi::LoRA#fresh`).
+    fresh: ADAPTER ? ADAPTER.fresh(training) : [],
     optimizer: { kind: :adamw, lr: LEARNING_RATE }, seed: SEED, io: journal,
     dataset: { name: File.basename(train_path), pairs: pairs.size,
                tokenizer: File.basename(encoder), max_seq_length: SEQ }
@@ -235,20 +293,23 @@ def main
       best = { step: nil, ndcg: -1.0 }
       at = 0
       measure = lambda do |step|
-        score = ndcg(session, config, bundle, width)
-        record[:measurements] << { step:, ndcg: score.round(4), lr: session.lr,
-                                   memory: Torobi::Memory.peak }
-        session.observe(ndcg: score)
-        puts format("step %5d  nDCG@10 %.4f  lr %.2e  peak %.1f GiB",
-                    step, score, session.lr, Torobi::Memory.peak / (1024.0**3))
+        scores = bundles.transform_values { |b| ndcg(session, config, b, width) }
+        record[:measurements] << { step:, ndcg: scores.transform_values { |v| v.round(4) },
+                                   lr: session.lr, memory: Torobi::Memory.peak }
+        session.observe(ndcg: scores)
+        said = scores.map { |name, value| format("%s %.4f", name, value) }.join("  ")
+        puts format("step %5d  %s  lr %.2e  peak %.1f GiB",
+                    step, said, session.lr, Torobi::Memory.peak / (1024.0**3))
         # Kept rather than only reported: the last state of a run is not
         # the best one it passed through, and a run that ends worse than
-        # it started should still leave what it reached.
-        if score > best[:ndcg]
-          best = { step:, ndcg: score }
+        # it started should still leave what it reached. The first bundle
+        # decides, because only one of them can.
+        deciding = scores.values.first
+        if deciding > best[:ndcg]
+          best = { step:, ndcg: deciding }
           session.checkpoint!(File.join(dir, "best"), at: { at: }) if step.positive?
         end
-        score
+        scores
       end
 
       # Where a run that was interrupted got to.
@@ -286,14 +347,29 @@ def main
       record[:best] = best
     end
 
-    session.export_model!(File.join(dir, "export"), from: encoder)
+    if ADAPTER.nil?
+      session.export_model!(File.join(dir, "export"), from: encoder)
+    else
+      # An adapted run holds the base weights it started with and the
+      # adapter beside them, and `export_model!` writes every parameter
+      # it has. That directory would carry `lora_A` and `lora_B` tensors
+      # nothing else knows, over base weights that never moved: a model
+      # that looks trained and is not. Merging (W + scale * BA, and the
+      # adapter dropped) is what makes one, and it is not built yet.
+      puts "no export: this run trained an adapter, and merging it into " \
+           "the weights is not implemented. The checkpoints hold both halves."
+    end
   end
 
   record[:finished_at] = Time.now.utc.iso8601
   File.write(File.join(dir, "record.json"), "#{JSON.pretty_generate(record)}\n")
-  puts format("nDCG@10 %.4f -> %.4f (best %.4f at step %s), written to %s",
-              record[:before], record[:after], record.dig(:best, :ndcg),
-              record.dig(:best, :step), dir)
+  bundles.each_key do |name|
+    puts format("%-20s %.4f -> %.4f", name, record[:before].fetch(name),
+                record[:after].fetch(name))
+  end
+  puts format("best %.4f at step %s (by %s), written to %s",
+              record.dig(:best, :ndcg), record.dig(:best, :step),
+              bundles.keys.first, dir)
 end
 
 main if $PROGRAM_NAME == __FILE__
