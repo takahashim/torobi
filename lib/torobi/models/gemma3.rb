@@ -117,9 +117,10 @@ module Torobi
       # (`Models::Llama#causal_lm` says what that looks like).
       def causal_lm(config, seq:, rows: nil, adapter: nil, dtype: :f32)
         config.check!
+        build = Build.new(seq:, rows:, dtype:)
         Torobi.graph do |g|
           hidden = g.adapting(adapter) do
-            g.name("hidden", g.scope("model") { encode(g, config, seq:, rows:, dtype:) })
+            g.name("hidden", g.scope("model") { encode(g, config, build) })
           end
           g.output :logits, head(g, hidden, config)
         end
@@ -133,10 +134,10 @@ module Torobi
         g.matmul(hidden, g.parameter("model.embed_tokens.weight").transpose(axes: [1, 0]))
       end
 
-      def encode(g, config, seq:, rows: nil, dtype: :f32)
-        ids = g.input(:input_ids, [rows, seq], dtype: :i32)
+      def encode(g, config, build)
+        ids = g.input(build.field(:input_ids), [build.rows, build.seq], dtype: :i32)
         x = g.embedding(ids, vocab: config.vocab_size, dim: config.hidden_size,
-                        name: "embed_tokens", dtype:)
+                        name: "embed_tokens", dtype: build.dtype)
         # Gemma scales its embeddings by the square root of the width.
         # Part of the model rather than an initialization detail: leave it
         # out and every layer sees something 25 times too small.
@@ -144,19 +145,22 @@ module Torobi
         # One mask for every local layer, and none for the global ones,
         # which say what they need with `causal:`. It depends on nothing
         # in the batch, so there is one of it however many rows there are.
-        window = (g.cast(g.input(:window, [1, 1, seq, seq]), dtype) if config.any_sliding?)
+        window = if config.any_sliding?
+                   g.cast(g.input(build.field(:window),
+                                  [1, 1, build.seq, build.seq]), build.dtype)
+                 end
 
         config.num_hidden_layers.times do |i|
-          x = g.scope("layers.#{i}") { layer(g, x, config, i, window, seq:) }
+          x = g.scope("layers.#{i}") { layer(g, x, config, i, window, build) }
         end
         norm(g, x, config, name: "norm")
       end
 
       # One block, wrapped rather than preceded: normalized going in, and
       # normalized again on the way out before the residual takes it.
-      def layer(g, x, config, index, window, seq:)
+      def layer(g, x, config, index, window, build)
         attended = attention(g, norm(g, x, config, name: "input_layernorm"),
-                             config, index, window, seq:)
+                             config, index, window, build)
         x += norm(g, attended, config, name: "post_attention_layernorm")
         fed = mlp(g, norm(g, x, config, name: "pre_feedforward_layernorm"), config)
         x + norm(g, fed, config, name: "post_feedforward_layernorm")
@@ -164,13 +168,13 @@ module Torobi
 
       # Attention over fewer keys than queries, normalized per head before
       # it is rotated, and looking back no further than this layer may.
-      def attention(g, x, config, index, window, seq:)
+      def attention(g, x, config, index, window, build)
         heads = config.num_attention_heads
         kv = config.num_key_value_heads
         dim = config.head_dim
         theta = config.theta(index)
         to_heads = lambda do |h, count|
-          h.reshape(shape: [-1, seq, count, dim]).transpose(axes: [0, 2, 1, 3])
+          h.reshape(shape: [-1, build.seq, count, dim]).transpose(axes: [0, 2, 1, 3])
         end
         q = to_heads.call(g.linear(x, heads * dim, name: "self_attn.q_proj", bias: false), heads)
         k = to_heads.call(g.linear(x, kv * dim, name: "self_attn.k_proj", bias: false), kv)
@@ -187,7 +191,7 @@ module Torobi
             g.sdpa(q, k, v, causal: true, scale: config.scale)
           end
         folded = attended.transpose(axes: [0, 2, 1, 3])
-                         .reshape(shape: [-1, seq, config.attention_size])
+                         .reshape(shape: [-1, build.seq, config.attention_size])
         g.linear(folded, config.hidden_size, name: "self_attn.o_proj", bias: false)
       end
 

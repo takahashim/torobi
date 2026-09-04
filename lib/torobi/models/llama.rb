@@ -143,9 +143,10 @@ module Torobi
       # back (`g.cast(logits, :f32)`).
       def causal_lm(config, seq:, rows: nil, adapter: nil, dtype: :f32)
         config.check!
+        build = Build.new(seq:, rows:, dtype:)
         Torobi.graph do |g|
           hidden = g.adapting(adapter) do
-            g.name("hidden", g.scope("model") { encode(g, config, seq:, rows:, dtype:) })
+            g.name("hidden", g.scope("model") { encode(g, config, build) })
           end
           # Not named: an untied head is a `linear`, which names its own
           # node after its parameters, and `forward` reaches an output by
@@ -173,20 +174,20 @@ module Torobi
 
       # The decoder body: ids in, hidden states out, under `model.` as the
       # checkpoint has it.
-      def encode(g, config, seq:, rows: nil, dtype: :f32)
-        ids = g.input(:input_ids, [rows, seq], dtype: :i32)
+      def encode(g, config, build)
+        ids = g.input(build.field(:input_ids), [build.rows, build.seq], dtype: :i32)
         x = g.embedding(ids, vocab: config.vocab_size, dim: config.hidden_size,
-                        name: "embed_tokens", dtype:)
+                        name: "embed_tokens", dtype: build.dtype)
         config.num_hidden_layers.times do |i|
-          x = g.scope("layers.#{i}") { layer(g, x, config, seq:) }
+          x = g.scope("layers.#{i}") { layer(g, x, config, build) }
         end
         norm(g, x, config, name: "norm")
       end
 
       # One block: attention with a residual, then the MLP with another,
       # each normalized before rather than after (pre-norm).
-      def layer(g, x, config, seq:)
-        x += attention(g, norm(g, x, config, name: "input_layernorm"), config, seq:)
+      def layer(g, x, config, build)
+        x += attention(g, norm(g, x, config, name: "input_layernorm"), config, build)
         x + mlp(g, norm(g, x, config, name: "post_attention_layernorm"), config)
       end
 
@@ -205,7 +206,7 @@ module Torobi
       # Whether q, k and v carry biases is the family's own asymmetry:
       # Qwen2 has them and Llama does not. The output projection has none
       # either way.
-      def attention(g, x, config, seq:)
+      def attention(g, x, config, build)
         heads = config.num_attention_heads
         kv = config.num_key_value_heads
         dim = config.head_dim
@@ -218,14 +219,14 @@ module Torobi
         # heads are fewer and stay that way: the backend takes them
         # untiled, which is the whole saving.
         to_heads = lambda do |h, count|
-          h.reshape(shape: [-1, seq, count, dim]).transpose(axes: [0, 2, 1, 3])
+          h.reshape(shape: [-1, build.seq, count, dim]).transpose(axes: [0, 2, 1, 3])
         end
         attended = g.sdpa(to_heads.call(q, heads).rope(theta:),
                           to_heads.call(k, kv).rope(theta:),
                           to_heads.call(v, kv),
                           causal: true)
         folded = attended.transpose(axes: [0, 2, 1, 3])
-                         .reshape(shape: [-1, seq, heads * dim])
+                         .reshape(shape: [-1, build.seq, heads * dim])
         g.linear(folded, config.hidden_size, name: "self_attn.o_proj", bias: false)
       end
 

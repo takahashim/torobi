@@ -100,15 +100,16 @@ module Torobi
       def classifier(config, seq:, encoder_prefix: "model", rows: nil, adapter: nil,
                      dtype: :f32)
         config.check!
+        build = Build.new(seq:, rows:, dtype:)
         Torobi.graph do |g|
-          g.adapting(adapter) { classify(g, config, seq:, rows:, encoder_prefix:, dtype:) }
+          g.adapting(adapter) { classify(g, config, build, encoder_prefix) }
         end
       end
 
       # The classifier's body, so that `adapting` has something to wrap.
-      def classify(g, config, seq:, rows:, encoder_prefix:, dtype: :f32)
-        x = body(g, config, seq:, rows:, encoder_prefix:, dtype:)
-        pooled = pool(g, x, config, seq:, rows:)
+      def classify(g, config, build, encoder_prefix)
+        x = body(g, config, build, encoder_prefix)
+        pooled = pool(g, x, config, build)
         # ModernBERT's head: a dense, gelu, a norm, then the classifier.
         pooled = norm(g, g.linear(pooled, config.hidden_size, name: "head.dense",
                                   bias: false).gelu,
@@ -137,9 +138,10 @@ module Torobi
       def embedder(config, seq:, pooling: :mean, encoder_prefix: "", rows: nil,
                    normalize: true, dtype: :f32)
         config.check!
+        build = Build.new(seq:, rows:, dtype:)
         Torobi.graph do |g|
-          x = g.name("hidden", body(g, config, seq:, rows:, encoder_prefix:, dtype:))
-          pooled = pool(g, x, config, seq:, rows:, mode: pooling)
+          x = g.name("hidden", body(g, config, build, encoder_prefix))
+          pooled = pool(g, x, config, build, mode: pooling)
           pooled = normalized(g, pooled) if normalize
           g.output :embedding, g.name("embedding", pooled)
         end
@@ -179,11 +181,10 @@ module Torobi
 
         Torobi.graph do |g|
           sides.each do |side, rows|
+            build = Build.new(seq: nil, rows:, dtype:, fields: "#{side}.")
             g.sharing(side) do
-              x = g.name("hidden", body(g, config, seq: nil, rows:, encoder_prefix:,
-                                        dtype:, fields: "#{side}."))
-              pooled = pool(g, x, config, seq: nil, rows:, mode: pooling,
-                            fields: "#{side}.")
+              x = g.name("hidden", body(g, config, build, encoder_prefix))
+              pooled = pool(g, x, config, build, mode: pooling)
               pooled = normalized(g, pooled) if normalize
               g.output :"#{side}.embedding", g.name("embedding", pooled)
             end
@@ -194,10 +195,10 @@ module Torobi
       # The encoder under wherever its parameters sit. Published
       # classifiers keep them under `model.` and bare encoders at the root,
       # and that is the only difference between the two graphs above.
-      def body(g, config, seq:, rows:, encoder_prefix:, dtype: :f32, fields: "")
-        return encode(g, config, seq:, rows:, dtype:, fields:) if encoder_prefix.to_s.empty?
+      def body(g, config, build, encoder_prefix)
+        return encode(g, config, build) if encoder_prefix.to_s.empty?
 
-        g.scope(encoder_prefix) { encode(g, config, seq:, rows:, dtype:, fields:) }
+        g.scope(encoder_prefix) { encode(g, config, build) }
       end
 
       # A vector of length one, so a dot product is a cosine.
@@ -218,14 +219,14 @@ module Torobi
       # derived from the attention mask: what a mask holds is whatever the
       # caller built it from, and a weight that must be exactly one or
       # exactly zero should not be read out of a large negative number.
-      def pool(g, x, config, seq:, rows: nil, mode: config.classifier_pooling, fields: "")
+      def pool(g, x, config, build, mode: config.classifier_pooling)
         case mode
         when :cls
           x.slice(axis: 1, start: 0, length: 1).reshape(shape: [-1, config.hidden_size])
         when :mean
           # Cast to what it is weighing: a batch carries f32, and the
           # model may be held in something narrower.
-          weights = g.cast(g.input(:"#{fields}tokens", [rows, seq, 1]), x.dtype)
+          weights = g.cast(g.input(build.field(:tokens), [build.rows, build.seq, 1]), x.dtype)
           g.sum(x * weights, axes: [1]) / g.sum(weights, axes: [1])
         else
           raise ConfigError, "unknown pooling #{mode.inspect}"
@@ -234,10 +235,10 @@ module Torobi
 
       # The encoder as a graph: token ids in, hidden states out.
       #
-      # `seq` is the sequence length this graph is built for. It is fixed
-      # rather than symbolic because the head split needs a concrete
-      # dimension to reshape into; the batch stays symbolic, which is the
-      # one that varies between steps.
+      # `build.seq` is the sequence length this graph is declared for,
+      # and may be nil: since the head split keeps the dimensions it does
+      # not know (docs/plan.md 15.63), nothing here needs a concrete one,
+      # and each batch says how long it is.
       #
       # Two additive attention masks arrive from the batch, each
       # [batch, 1, seq, seq]: zero where a position may be attended to and
@@ -249,40 +250,45 @@ module Torobi
       # `ModernBERT.masks` builds both.
       def graph(config, seq:, rows: nil, dtype: :f32)
         config.check!
+        build = Build.new(seq:, rows:, dtype:)
         Torobi.graph do |g|
           # Named as well as declared an output, so a tap can read it: an
           # output is what the objective consumes, and a tap is how a
           # caller sees a value without a second graph to see it with.
-          g.output :hidden, g.name("hidden", encode(g, config, seq:, rows:, dtype:))
+          g.output :hidden, g.name("hidden", encode(g, config, build))
         end
       end
 
       # The encoder body, so the bare model and the classifier are one
       # description rather than two that must be kept in step.
       #
-      # `rows:` fixes how many rows a batch has, and is normally left
-      # alone: the batch is the dimension that varies between steps, and
-      # everything here works without knowing it. Naming it is for an
-      # objective that reads across the batch rather than down it, which
-      # a contrastive loss does (its negatives are the other rows), and
-      # which cannot be written against a dimension nothing knows.
-      def encode(g, config, seq:, rows: nil, dtype: :f32, fields: "")
-        ids = g.input(:"#{fields}input_ids", [rows, seq], dtype: :i32)
+      # What it is being built for arrives as one value (`Models::Build`):
+      # the sequence, the rows, the precision, and which batch fields to
+      # read. `build.rows` is normally nil, because the batch is the
+      # dimension that varies between steps and everything here works
+      # without knowing it; naming it is for an objective that reads
+      # across the batch rather than down it, which a contrastive loss
+      # does (its negatives are the other rows), and which cannot be
+      # written against a dimension nothing knows.
+      def encode(g, config, build)
+        ids = g.input(build.field(:input_ids), [build.rows, build.seq], dtype: :i32)
         # The masks arrive as f32, which is what a batch carries, and are
         # cast to what the model is held in. Nothing is cast when there is
         # nothing to cast to (`g.cast`).
-        padding = g.cast(g.input(:"#{fields}mask", [rows, 1, 1, seq]), dtype)
+        padding = g.cast(g.input(build.field(:mask), [build.rows, 1, 1, build.seq]),
+                         build.dtype)
         # Summed once, not in each of the local layers: both are the same
         # for every one of them. Only when there is a local layer to read
         # it, so a configuration with none asks for no window.
         local = if config.any_local?
-                  padding + g.cast(g.input(:"#{fields}window", [1, 1, seq, seq]), dtype)
+                  padding + g.cast(g.input(build.field(:window),
+                                           [1, 1, build.seq, build.seq]), build.dtype)
                 else
                   padding
                 end
 
         x = g.embedding(ids, vocab: config.vocab_size, dim: config.hidden_size,
-                        name: "embeddings.tok_embeddings", dtype:)
+                        name: "embeddings.tok_embeddings", dtype: build.dtype)
         x = norm(g, x, config, name: "embeddings.norm")
 
         config.num_hidden_layers.times do |i|
