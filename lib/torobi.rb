@@ -29,6 +29,8 @@ begin
   require_relative "torobi/runner"
   require_relative "torobi/export"
   require_relative "torobi/grad_cache"
+  require_relative "torobi/freshness"
+  Torobi::Freshness.warn!
 rescue LoadError
   # Not compiled yet (rake compile); Torobi::Session is simply absent.
 end
