@@ -85,6 +85,12 @@ between two versions people have.
 - **`rake mlx:pin`**, and a prebuilt MLX fetched by digest rather than
   by URL alone.
 
+- **`parquet/`**, a reader for the part of parquet that datasets are
+  written in: flat columns, snappy, dictionary-encoded pages of the
+  first version, and no dependencies at all. It is its own gemspec in
+  this repository and is not published; what it does not implement it
+  refuses by name.
+
 ### Known limitations
 
 - Other decoder architectures, quantized ops and variable length

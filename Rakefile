@@ -256,6 +256,23 @@ def fetch_json(url, hops: 5)
   end
 end
 
+# The parquet reader, which is its own gem in the same repository: no
+# dependencies, no extension, and nothing of Torobi in it. It is here
+# because it has one user, and it can be split out the day it has two.
+namespace :parquet do
+  desc "run the parquet reader's tests"
+  task :test do
+    sh RbConfig.ruby, "-Iparquet/lib", "-Iparquet/test", "parquet/test/parquet_test.rb"
+  end
+
+  # The files it is held to, made with pyarrow rather than borrowed from
+  # somebody's dataset: what is tested is the format.
+  desc "regenerate the parquet fixtures (needs uv)"
+  task :fixtures do
+    sh "uv", "run", "--with", "pyarrow", "python", "parquet/test/fixtures.py"
+  end
+end
+
 # The engine held to exact arithmetic, through its command line
 # (engine/check). Part of the default task: it is cheap, it is the only
 # thing that runs the `torobi-engine` binary, and a check nobody runs is
@@ -315,5 +332,5 @@ task compile: [] # defined by RbSys::ExtensionTask above
 task test: %i[compile metallib]
 
 # Lint first: it is five seconds, and the rest is a compile.
-DEFAULT = %w[test rust_test rust_test:facade engine:check].freeze
+DEFAULT = %w[test parquet:test rust_test rust_test:facade engine:check].freeze
 task default: (Rake::Task.task_defined?(:rubocop) ? ["rubocop", *DEFAULT] : DEFAULT)

@@ -1,13 +1,14 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-# The same preprocessing as `tools/retrieval_pairs.py`, in Ruby, for data
-# that is already yours.
+# The same preprocessing as `tools/retrieval_pairs.py`, in Ruby.
 #
-# Why both: the Python one reads parquet, which is how a dataset arrives
-# from the Hub and is not something Ruby reaches without Homebrew's
-# arrow. This one reads JSON Lines, which is what your own data looks
-# like, and then nothing about the pipeline needs another language.
+# It reads JSON Lines, which is what your own data looks like, and
+# parquet, which is what a dataset from the Hub arrives as
+# (`torobi-parquet`, in this repository, with no dependencies of its
+# own). So the pipeline needs no other language, and the Python one
+# stays for the parquet this does not read: gzip, pages of the second
+# version, nested columns.
 #
 # The tokenizer is the same tokenizer. `tokenizers` is HuggingFace's,
 # with the same `tokenizer.json` and the same ids: measured on ruri-v3,
@@ -20,11 +21,14 @@
 # what it needs the way the Python one asks `uv`.
 #
 #   ruby tools/retrieval_pairs.rb --tokenizer <ruri>/tokenizer.json \
-#     --pairs mine.jsonl --query-key question --text-key body \
-#     --seq 192 --out train.jsonl
+#     --pairs 'data/*.parquet' --query-key query --text-key text \
+#     --title-key title --rows 100000 --seq 192 --out train.jsonl
 #
 #   ruby tools/retrieval_pairs.rb --tokenizer <ruri>/tokenizer.json \
-#     --queries q.jsonl --corpus c.jsonl --qrels qrels.jsonl --out eval.json
+#     --mteb <snapshot> --seq 192 --out eval.json
+#
+# A path that ends in `.parquet` (or a glob that matches some) is read
+# as parquet; anything else is read as JSON Lines.
 #
 # **The prefixes matter.** ruri-v3 is trained with the task written into
 # the text, and its pooling config says the prefix is inside the average.
@@ -34,6 +38,9 @@
 require "json"
 require "optparse"
 require "fileutils"
+
+$LOAD_PATH.unshift File.expand_path("../parquet/lib", __dir__)
+require "torobi/parquet"
 
 begin
   require "tokenizers"
@@ -56,9 +63,10 @@ OptionParser.new do |o|
   o.on("--title-key KEY", "prepended to the text where a row has one") do |v|
     options[:title_key] = v
   end
-  o.on("--queries PATH", "JSON Lines of {id, text}") { |v| options[:queries] = v }
-  o.on("--corpus PATH", "JSON Lines of {id, text, title?}") { |v| options[:corpus] = v }
-  o.on("--qrels PATH", "JSON Lines of {query-id, corpus-id, score}") { |v| options[:qrels] = v }
+  o.on("--queries PATH", "rows of {id, text}") { |v| options[:queries] = v }
+  o.on("--corpus PATH", "rows of {id, text, title?}") { |v| options[:corpus] = v }
+  o.on("--qrels PATH", "rows of {query-id, corpus-id, score}") { |v| options[:qrels] = v }
+  o.on("--mteb DIR", "a directory of queries/corpus/qrels parquet") { |v| options[:mteb] = v }
   o.on("--query-prefix TEXT") { |v| options[:query_prefix] = v }
   o.on("--text-prefix TEXT") { |v| options[:text_prefix] = v }
 end.parse!
@@ -77,10 +85,24 @@ encode = lambda do |text, prefix|
   tokenizer.encode("#{prefix}#{text}").ids
 end
 
-def lines_of(path)
-  File.foreach(path).filter_map do |line|
-    JSON.parse(line) unless line.strip.empty?
+# Rows from wherever they are, by what the path looks like: parquet is
+# columnar and a glob of it is several files, JSON Lines is one.
+def rows_of(path, columns: nil, limit: nil)
+  files = Dir[path]
+  return parquet_rows(files, columns:, limit:) if files.any? { |f| f.end_with?(".parquet") }
+
+  File.foreach(path).filter_map { |line| JSON.parse(line) unless line.strip.empty? }
+end
+
+def parquet_rows(files, columns: nil, limit: nil)
+  rows = []
+  files.sort.each do |file|
+    Torobi::Parquet.each_row(file, columns:, rows: limit && (limit - rows.size)) do |row|
+      rows << row
+    end
+    break if limit && rows.size >= limit
   end
+  limit ? rows.first(limit) : rows
 end
 
 # A document is what somebody would index, and a corpus that has titles
@@ -90,8 +112,15 @@ def document(row, text_key, title_key)
   title.to_s.empty? ? row.fetch(text_key) : "#{title}\n#{row.fetch(text_key)}"
 end
 
+if options[:mteb]
+  options[:queries] ||= File.join(options[:mteb], "queries", "*.parquet")
+  options[:corpus] ||= File.join(options[:mteb], "corpus", "*.parquet")
+  options[:qrels] ||= File.join(options[:mteb], "qrels", "*.parquet")
+end
+
 if options[:pairs]
-  rows = lines_of(options[:pairs]).first(options[:rows])
+  columns = [options[:query_key], options[:text_key], options[:title_key]].compact
+  rows = rows_of(options[:pairs], columns:, limit: options[:rows])
   File.open(options[:out], "w") do |out|
     rows.each do |row|
       unless row.key?(options[:query_key]) && row.key?(options[:text_key])
@@ -109,17 +138,17 @@ if options[:pairs]
   puts "wrote #{options[:out]}: #{rows.size} pairs from #{options[:pairs]}"
 elsif options[:queries] && options[:corpus] && options[:qrels]
   relevant = Hash.new { |h, k| h[k] = {} }
-  lines_of(options[:qrels]).each do |row|
+  rows_of(options[:qrels]).each do |row|
     relevant[row.fetch("query-id").to_s][row.fetch("corpus-id").to_s] = row.fetch("score").to_i
   end
   bundle = {
-    "queries" => lines_of(options[:queries])
+    "queries" => rows_of(options[:queries])
                  .select { |q| relevant.key?(q.fetch(options[:id_key]).to_s) }
                  .map do |q|
                    { "id" => q.fetch(options[:id_key]).to_s,
                      "ids" => encode.call(q.fetch("text"), options[:query_prefix]) }
                  end,
-    "corpus" => lines_of(options[:corpus]).map do |c|
+    "corpus" => rows_of(options[:corpus]).map do |c|
       { "id" => c.fetch(options[:id_key]).to_s,
         "ids" => encode.call(document(c, "text", "title"), options[:text_prefix]) }
     end,

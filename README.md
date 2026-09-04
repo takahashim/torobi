@@ -161,6 +161,21 @@ runner.stop              # asks it to stop at the next step boundary
 runner.wait.finished?    # => true
 ```
 
+## Preprocessing
+
+Torobi is handed token ids and does not tokenize. What turns a dataset
+into them lives beside it, in whichever language you have:
+
+```
+ruby tools/retrieval_pairs.rb --tokenizer <model>/tokenizer.json \
+  --pairs 'data/*.parquet' --rows 100000 --seq 192 --out train.jsonl
+```
+
+That needs the `tokenizers` gem and nothing else: the parquet is read by
+`parquet/`, a reader for the part of the format datasets are written in,
+with no dependencies and no extension of its own. `tools/retrieval_pairs.py`
+is the same thing through pyarrow, for the parquet the Ruby one refuses.
+
 ## Development
 
 ```
