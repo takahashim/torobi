@@ -52,11 +52,15 @@ on an M2. That is a hundred thousand pairs in about three seconds, and
 the whole of `auto-wiki-qa`'s two columns in about a minute and a half.
 It is preprocessing, done once.
 
-Making it faster means leaving Ruby. The floor is the interpreter's cost
-per element rather than allocation, which was measured rather than
-assumed: folding the loop into one method bought 12%, and writing into a
-preallocated `IO::Buffer` instead of appending to a String bought
-nothing at all (it was 10% slower when the two were run alternately in
-one process; an earlier measurement that favoured it had measured them
-one after the other, which is not a comparison). Everything else here
-(Thrift, the levels, the values) is a rounding error beside snappy.
+Making it much faster means leaving Ruby: the floor is the interpreter's
+cost per element, which a loop doing nothing already spends 46ns on.
+What was measured on the way to that number: folding the loop into one
+method bought 12%, and writing into a preallocated `IO::Buffer` rather
+than appending to a String bought 19%, because `copy` is a memcpy where
+`<<` of a `byteslice` allocates (25ns against 42 to 64). Everything else
+here (Thrift, the levels, the values) is a rounding error beside snappy.
+
+Both numbers come from running the two alternately in one process. Run
+one after the other they say something else, and the first attempt at
+the buffer was abandoned on that reading before a fair one put it
+ahead.
