@@ -144,105 +144,111 @@ module Torobi
       def causal_lm(config, seq:, rows: nil, adapter: nil, dtype: :f32)
         config.check!
         build = Build.new(seq:, rows:, dtype:)
-        Torobi.graph do |g|
-          hidden = g.adapting(adapter) do
-            g.name("hidden", g.scope("model") { encode(g, config, build) })
-          end
+        Torobi.graph { |g| Describe.new(g, config, build).causal_lm(adapter) }
+      end
+
+      # The description itself: the builder, the config and what it is
+      # built for are held once (`Models::Description`), so what a method
+      # takes is the value flowing through it.
+      class Describe < Description
+        def causal_lm(adapter)
+          hidden = adapting(adapter) { name("hidden", scope("model") { encode }) }
           # Not named: an untied head is a `linear`, which names its own
           # node after its parameters, and `forward` reaches an output by
           # the name the output has.
-          g.output :logits, head(g, hidden, config)
-        end
-      end
-
-      # The output projection, which is usually not a parameter of its own.
-      #
-      # **Tied weights are one parameter read twice**, not two that are
-      # kept equal: the table that turns an id into a vector turns a
-      # vector back into scores over ids, transposed. Qwen2.5-0.5B holds
-      # no `lm_head.weight` at all for that reason, and a graph that
-      # declared one would be asking a checkpoint for something it does
-      # not have.
-      def head(g, hidden, config)
-        unless config.tie_word_embeddings
-          return g.linear(hidden, config.vocab_size, name: "lm_head", bias: false)
+          output :logits, head(hidden)
         end
 
-        table = g.parameter("model.embed_tokens.weight")
-        g.matmul(hidden, table.transpose(axes: [1, 0]))
-      end
+        # The output projection, which is usually not a parameter of its
+        # own.
+        #
+        # **Tied weights are one parameter read twice**, not two that are
+        # kept equal: the table that turns an id into a vector turns a
+        # vector back into scores over ids, transposed. Qwen2.5-0.5B holds
+        # no `lm_head.weight` at all for that reason, and a graph that
+        # declared one would be asking a checkpoint for something it does
+        # not have.
+        def head(hidden)
+          unless @config.tie_word_embeddings
+            return linear(hidden, @config.vocab_size, name: "lm_head", bias: false)
+          end
 
-      # The decoder body: ids in, hidden states out, under `model.` as the
-      # checkpoint has it.
-      def encode(g, config, build)
-        ids = g.input(build.field(:input_ids), [build.rows, build.seq], dtype: :i32)
-        x = g.embedding(ids, vocab: config.vocab_size, dim: config.hidden_size,
-                        name: "embed_tokens", dtype: build.dtype)
-        config.num_hidden_layers.times do |i|
-          x = g.scope("layers.#{i}") { layer(g, x, config, build) }
+          table = parameter("model.embed_tokens.weight")
+          matmul(hidden, table.transpose(axes: [1, 0]))
         end
-        norm(g, x, config, name: "norm")
-      end
 
-      # One block: attention with a residual, then the MLP with another,
-      # each normalized before rather than after (pre-norm).
-      def layer(g, x, config, build)
-        x += attention(g, norm(g, x, config, name: "input_layernorm"), config, build)
-        x + mlp(g, norm(g, x, config, name: "post_attention_layernorm"), config)
-      end
-
-      # Attention that only looks backwards, over fewer keys than queries.
-      #
-      # `causal: true` rather than a mask in the batch: the triangle
-      # depends on nothing but the sequence length, and handing over
-      # [1, 1, seq, seq] of the same number every step is megabytes to say
-      # what the attention already knows.
-      #
-      # There is no padding mask either, and that is a claim rather than
-      # an omission: rows are padded on the right, so a real position is
-      # never after a padded one and never attends to it. What the padded
-      # positions themselves produce is discarded by the objective.
-      #
-      # Whether q, k and v carry biases is the family's own asymmetry:
-      # Qwen2 has them and Llama does not. The output projection has none
-      # either way.
-      def attention(g, x, config, build)
-        heads = config.num_attention_heads
-        kv = config.num_key_value_heads
-        dim = config.head_dim
-        theta = config.rope_theta
-        bias = config.attention_bias
-        q = g.linear(x, heads * dim, name: "self_attn.q_proj", bias:)
-        k = g.linear(x, kv * dim, name: "self_attn.k_proj", bias:)
-        v = g.linear(x, kv * dim, name: "self_attn.v_proj", bias:)
-        # [batch, seq, heads * dim] -> [batch, heads, seq, dim]. The key
-        # heads are fewer and stay that way: the backend takes them
-        # untiled, which is the whole saving.
-        to_heads = lambda do |h, count|
-          h.reshape(shape: [-1, build.seq, count, dim]).transpose(axes: [0, 2, 1, 3])
+        # The decoder body: ids in, hidden states out, under `model.` as
+        # the checkpoint has it.
+        def encode
+          ids = input(@build.field(:input_ids), [@build.rows, @build.seq], dtype: :i32)
+          x = embedding(ids, vocab: @config.vocab_size, dim: @config.hidden_size,
+                        name: "embed_tokens", dtype: @build.dtype)
+          @config.num_hidden_layers.times do |i|
+            x = scope("layers.#{i}") { layer(x) }
+          end
+          norm(x, name: "norm")
         end
-        attended = g.sdpa(to_heads.call(q, heads).rope(theta:),
+
+        # One block: attention with a residual, then the MLP with another,
+        # each normalized before rather than after (pre-norm).
+        def layer(x)
+          x += attention(norm(x, name: "input_layernorm"))
+          x + mlp(norm(x, name: "post_attention_layernorm"))
+        end
+
+        # Attention that only looks backwards, over fewer keys than queries.
+        #
+        # `causal: true` rather than a mask in the batch: the triangle
+        # depends on nothing but the sequence length, and handing over
+        # [1, 1, seq, seq] of the same number every step is megabytes to say
+        # what the attention already knows.
+        #
+        # There is no padding mask either, and that is a claim rather than
+        # an omission: rows are padded on the right, so a real position is
+        # never after a padded one and never attends to it. What the padded
+        # positions themselves produce is discarded by the objective.
+        #
+        # Whether q, k and v carry biases is the family's own asymmetry:
+        # Qwen2 has them and Llama does not. The output projection has none
+        # either way.
+        def attention(x)
+          heads = @config.num_attention_heads
+          kv = @config.num_key_value_heads
+          dim = @config.head_dim
+          theta = @config.rope_theta
+          bias = @config.attention_bias
+          q = linear(x, heads * dim, name: "self_attn.q_proj", bias:)
+          k = linear(x, kv * dim, name: "self_attn.k_proj", bias:)
+          v = linear(x, kv * dim, name: "self_attn.v_proj", bias:)
+          # [batch, seq, heads * dim] -> [batch, heads, seq, dim]. The key
+          # heads are fewer and stay that way: the backend takes them
+          # untiled, which is the whole saving.
+          to_heads = lambda do |h, count|
+            h.reshape(shape: [-1, @build.seq, count, dim]).transpose(axes: [0, 2, 1, 3])
+          end
+          attended = sdpa(to_heads.call(q, heads).rope(theta:),
                           to_heads.call(k, kv).rope(theta:),
                           to_heads.call(v, kv),
                           causal: true)
-        folded = attended.transpose(axes: [0, 2, 1, 3])
-                         .reshape(shape: [-1, build.seq, heads * dim])
-        g.linear(folded, config.hidden_size, name: "self_attn.o_proj", bias: false)
-      end
+          folded = attended.transpose(axes: [0, 2, 1, 3])
+                           .reshape(shape: [-1, @build.seq, heads * dim])
+          linear(folded, @config.hidden_size, name: "self_attn.o_proj", bias: false)
+        end
 
-      # SwiGLU: one projection gated by another, through SiLU, then back
-      # down. SiLU is `x * sigmoid(x)`, which is two ops here rather than
-      # one; it is what the name means, and nothing is fused away.
-      def mlp(g, x, config)
-        gate = g.linear(x, config.intermediate_size, name: "mlp.gate_proj", bias: false)
-        up = g.linear(x, config.intermediate_size, name: "mlp.up_proj", bias: false)
-        g.linear((gate * gate.sigmoid) * up, config.hidden_size,
+        # SwiGLU: one projection gated by another, through SiLU, then back
+        # down. SiLU is `x * sigmoid(x)`, which is two ops here rather than
+        # one; it is what the name means, and nothing is fused away.
+        def mlp(x)
+          gate = linear(x, @config.intermediate_size, name: "mlp.gate_proj", bias: false)
+          up = linear(x, @config.intermediate_size, name: "mlp.up_proj", bias: false)
+          linear((gate * gate.sigmoid) * up, @config.hidden_size,
                  name: "mlp.down_proj", bias: false)
-      end
+        end
 
-      # Every norm here is an RMS norm with a gain and no bias.
-      def norm(g, x, config, name:)
-        g.rms_norm(x, name:, eps: config.rms_norm_eps)
+        # Every norm here is an RMS norm with a gain and no bias.
+        def norm(x, name:)
+          rms_norm(x, name:, eps: @config.rms_norm_eps)
+        end
       end
 
       # One batch, from token ids.

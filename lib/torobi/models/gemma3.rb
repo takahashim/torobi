@@ -118,95 +118,100 @@ module Torobi
       def causal_lm(config, seq:, rows: nil, adapter: nil, dtype: :f32)
         config.check!
         build = Build.new(seq:, rows:, dtype:)
-        Torobi.graph do |g|
-          hidden = g.adapting(adapter) do
-            g.name("hidden", g.scope("model") { encode(g, config, build) })
+        Torobi.graph { |g| Describe.new(g, config, build).causal_lm(adapter) }
+      end
+
+      # The description itself: the builder, the config and what it is
+      # built for are held once (`Models::Description`), so what a method
+      # takes is the value flowing through it.
+      class Describe < Description
+        def causal_lm(adapter)
+          hidden = adapting(adapter) { name("hidden", scope("model") { encode }) }
+          output :logits, head(hidden)
+        end
+
+        def head(hidden)
+          unless @config.tie_word_embeddings
+            return linear(hidden, @config.vocab_size, name: "lm_head", bias: false)
           end
-          g.output :logits, head(g, hidden, config)
-        end
-      end
 
-      def head(g, hidden, config)
-        unless config.tie_word_embeddings
-          return g.linear(hidden, config.vocab_size, name: "lm_head", bias: false)
+          matmul(hidden, parameter("model.embed_tokens.weight").transpose(axes: [1, 0]))
         end
 
-        g.matmul(hidden, g.parameter("model.embed_tokens.weight").transpose(axes: [1, 0]))
-      end
+        def encode
+          ids = input(@build.field(:input_ids), [@build.rows, @build.seq], dtype: :i32)
+          x = embedding(ids, vocab: @config.vocab_size, dim: @config.hidden_size,
+                        name: "embed_tokens", dtype: @build.dtype)
+          # Gemma scales its embeddings by the square root of the width.
+          # Part of the model rather than an initialization detail: leave
+          # it out and every layer sees something 25 times too small.
+          x *= Math.sqrt(@config.hidden_size)
+          # One mask for every local layer, and none for the global ones,
+          # which say what they need with `causal:`. It depends on nothing
+          # in the batch, so there is one of it however many rows there are.
+          window = if @config.any_sliding?
+                     cast(input(@build.field(:window),
+                                [1, 1, @build.seq, @build.seq]), @build.dtype)
+                   end
 
-      def encode(g, config, build)
-        ids = g.input(build.field(:input_ids), [build.rows, build.seq], dtype: :i32)
-        x = g.embedding(ids, vocab: config.vocab_size, dim: config.hidden_size,
-                        name: "embed_tokens", dtype: build.dtype)
-        # Gemma scales its embeddings by the square root of the width.
-        # Part of the model rather than an initialization detail: leave it
-        # out and every layer sees something 25 times too small.
-        x *= Math.sqrt(config.hidden_size)
-        # One mask for every local layer, and none for the global ones,
-        # which say what they need with `causal:`. It depends on nothing
-        # in the batch, so there is one of it however many rows there are.
-        window = if config.any_sliding?
-                   g.cast(g.input(build.field(:window),
-                                  [1, 1, build.seq, build.seq]), build.dtype)
-                 end
-
-        config.num_hidden_layers.times do |i|
-          x = g.scope("layers.#{i}") { layer(g, x, config, i, window, build) }
-        end
-        norm(g, x, config, name: "norm")
-      end
-
-      # One block, wrapped rather than preceded: normalized going in, and
-      # normalized again on the way out before the residual takes it.
-      def layer(g, x, config, index, window, build)
-        attended = attention(g, norm(g, x, config, name: "input_layernorm"),
-                             config, index, window, build)
-        x += norm(g, attended, config, name: "post_attention_layernorm")
-        fed = mlp(g, norm(g, x, config, name: "pre_feedforward_layernorm"), config)
-        x + norm(g, fed, config, name: "post_feedforward_layernorm")
-      end
-
-      # Attention over fewer keys than queries, normalized per head before
-      # it is rotated, and looking back no further than this layer may.
-      def attention(g, x, config, index, window, build)
-        heads = config.num_attention_heads
-        kv = config.num_key_value_heads
-        dim = config.head_dim
-        theta = config.theta(index)
-        to_heads = lambda do |h, count|
-          h.reshape(shape: [-1, build.seq, count, dim]).transpose(axes: [0, 2, 1, 3])
-        end
-        q = to_heads.call(g.linear(x, heads * dim, name: "self_attn.q_proj", bias: false), heads)
-        k = to_heads.call(g.linear(x, kv * dim, name: "self_attn.k_proj", bias: false), kv)
-        v = to_heads.call(g.linear(x, kv * dim, name: "self_attn.v_proj", bias: false), kv)
-        q = norm(g, q, config, name: "self_attn.q_norm").rope(theta:)
-        k = norm(g, k, config, name: "self_attn.k_norm").rope(theta:)
-
-        attended =
-          if config.sliding?(index)
-            # The window is already a triangle: what a position may see is
-            # the recent past, and the past is the causal part of it.
-            g.sdpa(q, k, v, mask: window, scale: config.scale)
-          else
-            g.sdpa(q, k, v, causal: true, scale: config.scale)
+          @config.num_hidden_layers.times do |i|
+            x = scope("layers.#{i}") { layer(x, i, window) }
           end
-        folded = attended.transpose(axes: [0, 2, 1, 3])
-                         .reshape(shape: [-1, build.seq, config.attention_size])
-        g.linear(folded, config.hidden_size, name: "self_attn.o_proj", bias: false)
-      end
+          norm(x, name: "norm")
+        end
 
-      # GeGLU with the tanh approximation, which is the function Gemma was
-      # trained with.
-      def mlp(g, x, config)
-        gate = g.linear(x, config.intermediate_size, name: "mlp.gate_proj", bias: false)
-        up = g.linear(x, config.intermediate_size, name: "mlp.up_proj", bias: false)
-        g.linear(gate.gelu_tanh * up, config.hidden_size, name: "mlp.down_proj", bias: false)
-      end
+        # One block, wrapped rather than preceded: normalized going in, and
+        # normalized again on the way out before the residual takes it.
+        def layer(x, index, window)
+          attended = attention(norm(x, name: "input_layernorm"), index, window)
+          x += norm(attended, name: "post_attention_layernorm")
+          fed = mlp(norm(x, name: "pre_feedforward_layernorm"))
+          x + norm(fed, name: "post_feedforward_layernorm")
+        end
 
-      # Every norm here scales by `1 + w`, which is Gemma's own convention
-      # and the reason its norm weights are stored around zero.
-      def norm(g, x, config, name:)
-        g.rms_norm(x, name:, eps: config.rms_norm_eps, offset: 1.0)
+        # Attention over fewer keys than queries, normalized per head
+        # before it is rotated, and looking back no further than this
+        # layer may.
+        def attention(x, index, window)
+          heads = @config.num_attention_heads
+          kv = @config.num_key_value_heads
+          dim = @config.head_dim
+          theta = @config.theta(index)
+          to_heads = lambda do |h, count|
+            h.reshape(shape: [-1, @build.seq, count, dim]).transpose(axes: [0, 2, 1, 3])
+          end
+          q = to_heads.call(linear(x, heads * dim, name: "self_attn.q_proj", bias: false), heads)
+          k = to_heads.call(linear(x, kv * dim, name: "self_attn.k_proj", bias: false), kv)
+          v = to_heads.call(linear(x, kv * dim, name: "self_attn.v_proj", bias: false), kv)
+          q = norm(q, name: "self_attn.q_norm").rope(theta:)
+          k = norm(k, name: "self_attn.k_norm").rope(theta:)
+
+          attended =
+            if @config.sliding?(index)
+              # The window is already a triangle: what a position may see
+              # is the recent past, and the past is the causal part of it.
+              sdpa(q, k, v, mask: window, scale: @config.scale)
+            else
+              sdpa(q, k, v, causal: true, scale: @config.scale)
+            end
+          folded = attended.transpose(axes: [0, 2, 1, 3])
+                           .reshape(shape: [-1, @build.seq, @config.attention_size])
+          linear(folded, @config.hidden_size, name: "self_attn.o_proj", bias: false)
+        end
+
+        # GeGLU with the tanh approximation, which is the function Gemma
+        # was trained with.
+        def mlp(x)
+          gate = linear(x, @config.intermediate_size, name: "mlp.gate_proj", bias: false)
+          up = linear(x, @config.intermediate_size, name: "mlp.up_proj", bias: false)
+          linear(gate.gelu_tanh * up, @config.hidden_size, name: "mlp.down_proj", bias: false)
+        end
+
+        # Every norm here scales by `1 + w`, which is Gemma's own
+        # convention and the reason its norm weights are stored around zero.
+        def norm(x, name:)
+          rms_norm(x, name:, eps: @config.rms_norm_eps, offset: 1.0)
+        end
       end
 
       # A large negative rather than -Infinity, for the reason
