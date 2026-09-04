@@ -151,6 +151,53 @@ module Torobi
       end
     end
 
+    # The rate over the run, which every fine-tune has an opinion about.
+    #
+    # Warmup, then decay. Both halves are there for a reason a run shows
+    # rather than argues: the first steps of a fine-tune move a model
+    # that is already good, and moving it at full rate before AdamW has
+    # any idea of the gradient's scale is how a good model is spent. The
+    # decay is what lets the last steps settle instead of bouncing.
+    #
+    #   s.use(Torobi::Policies::Schedule.new(peak: 1e-5, total: 3000), every: 10)
+    #
+    # `every:` is worth using and costs nothing in accuracy: over ten
+    # steps a cosine moves by a thousandth of its range, and the journal
+    # records a knob turn each time it is turned.
+    #
+    # It is not a scheduler in the framework's sense: it is an object
+    # that turns the same knob a caller could turn, which is what every
+    # policy here is (docs/plan.md section 8.4).
+    class Schedule
+      # `warmup` is a share of the run when it is below one, and a number
+      # of steps when it is not.
+      def initialize(peak:, total:, warmup: 0.05, floor: 0.0)
+        raise ArgumentError, "a schedule needs a positive peak" unless peak.positive?
+        raise ArgumentError, "a schedule needs a positive length" unless total.positive?
+
+        @peak = Float(peak)
+        @total = Integer(total)
+        @warmup = warmup < 1 ? (total * warmup).round : Integer(warmup)
+        @floor = Float(floor)
+      end
+
+      attr_reader :peak, :total, :warmup, :floor
+
+      # The rate at a step. Public so it can be looked at without a run:
+      # a schedule nobody can plot is a schedule nobody can check.
+      def at(step)
+        return @peak * (step + 1) / (@warmup + 1).to_f if step < @warmup
+
+        over = (step - @warmup).to_f / [@total - @warmup, 1].max
+        cosine = 0.5 * (1 + Math.cos(Math::PI * [over, 1.0].min))
+        @floor + ((@peak - @floor) * cosine)
+      end
+
+      def call(event)
+        event.session.adjust(lr: at(event.step))
+      end
+    end
+
     # Stops a run before the machine notices it.
     #
     # `Torobi::Memory.limit=` is not a refusal, which was measured rather

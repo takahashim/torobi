@@ -2830,6 +2830,54 @@ step     2  nDCG@10 0.7057  peak 1.6 GiB
 
 本番は 32GB 機で。auto-wiki-qa で学習し、NLPJournal で測る。
 
+### 15.57 1 本回して、モデルが悪くなった。それが収穫である(2026-09-04)
+
+32GB M1、ruri-v3-130m、auto-wiki-qa 10 万ペア、3125 step (PAIRS 32 / PART 8、
+lr 2e-5 一定):
+
+```
+step     0  nDCG@10 0.7313
+step  3000  nDCG@10 0.5984   loss 0.0012
+step  3125  nDCG@10 0.5610
+```
+
+**フレームワークは完走し、モデルは悪くなった。** これは失敗ではなく、この 1 本を
+回した目的そのものである。読み取れることが 3 つある。
+
+**1. loss が早々に 0.005 まで落ちている。** batch 内 32 個の negative は、
+Wikipedia からランダムに引いた無関係な文書である。既に強い retriever にとって、
+正解を 31 個の無関係から見分けるのは自明で、**loss がほぼ 0 とは勾配に情報が無い**
+ということである。そこから先はノイズで押しているだけになる。
+
+**2. 素のモデルの方が、このレシピより強い。** ruri-v3-130m は遥かに多いデータと
+hard negative と調整された schedule で学習されている。それを易しいタスクの上で
+一定 2e-5 で 3125 step 動かせば、**知っていたことから離れていく**。0.7313 → 0.5610 は
+その姿である。
+
+**3. 一番良かったのは step 0 で、保存したのは最後だった。**
+
+**この 1 本が明らかにした欠け** (dogfooding で見つけたかったもの):
+
+| | |
+| --- | --- |
+| **rate の schedule が無かった** | `adjust(lr:)` で書けるが誰も書いていない。fine-tune は warmup と減衰を要る。`Policies::Schedule` として足した (NaNGuard / MemoryGuard と同じ棚) |
+| **最良の checkpoint を残していなかった** | 走り終えた状態は、通り過ぎた中で一番良い状態ではない |
+| **hard negative が書けない** | 損失グラフが in-batch negative だけの形をしている。query ごとに追加の文書を持つ形に変える必要がある |
+| **余裕を使い切っていない** | peak 5.1 GiB / 上限 24。対照損失は negative の数で効くので、PAIRS はまだ 4 倍にできる |
+
+動いた側も記録しておく: pretrained の取り込み、GradCache 32 ペア、checkpoint、journal、
+`forward` による評価、sentence-transformers 形式の書き出し。**機構はどれも黙って
+正しく動いた**。
+
+`Policies::Schedule` は warmup してから cosine で下がる。`every: 10` を勧めるのは、
+10 step で cosine は範囲の 1000 分の 1 しか動かず、journal には knob を回すたびに
+1 行増えるからである。GradCache は `apply!` を通り、それが plain な step と同じ hook を
+撃つので、schedule は cache 越しでも全 step を見る。
+
+次に回すときの変更: schedule (peak 5e-6)、PAIRS を 128 に、best を残す。それでも
+上がらなければ、**上がらないことが答え**である — 強い公開モデルを易しい negative で
+fine-tune しても良くならない、という当たり前の事実に、この枠組みで到達したことになる。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

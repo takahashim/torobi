@@ -75,6 +75,10 @@ between two versions people have.
 - **`Torobi::Export`**: a run's weights written as a HuggingFace /
   sentence-transformers checkpoint, carrying the source model's
   tokenizer and configuration so the result loads as the model it is.
+- **`Policies::Schedule`**, a learning rate that warms up and decays,
+  because a fine-tune of a model that is already good spends it
+  otherwise. It turns the same knob a caller could turn, and a gradient
+  cache's `apply!` fires the hook a plain step does, so it sees them all.
 - **The window**: a journal of what a run did, hooks and knobs while it
   runs, two kinds of replay, and `Torobi::Runner` for a long run in a
   process of its own with a memory cap.

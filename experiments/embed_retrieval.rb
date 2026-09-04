@@ -43,7 +43,12 @@ PAIRS = Integer(ENV.fetch("PAIRS", 32))
 # How many rows are held at once. Memory is set by this; the loss is set
 # by PAIRS.
 PART = Integer(ENV.fetch("PART", 8))
-LEARNING_RATE = Float(ENV.fetch("LR", 2e-5))
+# The peak of the schedule rather than the rate: a fine-tune of a model
+# that is already good warms up and comes back down (`Policies::Schedule`).
+# 5e-6 rather than the 2e-5 a from-scratch run would take, because what
+# this is moving already knows how to retrieve.
+LEARNING_RATE = Float(ENV.fetch("LR", 5e-6))
+WARMUP = Float(ENV.fetch("WARMUP", 0.05))
 # sentence-transformers' default temperature of 0.05, as its reciprocal.
 SCALE = Float(ENV.fetch("SCALE", 20.0))
 EVALUATION_BATCH = Integer(ENV.fetch("EVALUATION_BATCH", 16))
@@ -163,7 +168,7 @@ def main
                 .tap { |io| io.sync = true }
   record = { started_at: Time.now.utc.iso8601, encoder:, train: train_path, eval: eval_path,
              seed: SEED, seq: SEQ, pairs: PAIRS, part: PART, lr: LEARNING_RATE,
-             scale: SCALE, steps:, measurements: [] }
+             warmup: WARMUP, scale: SCALE, steps:, measurements: [] }
 
   Torobi::Session.open(
     seeded(embedder(config)),
@@ -175,14 +180,26 @@ def main
     Torobi::Session.open(contrastive(width), weights: { params: {} }) do |loss|
       cache = Torobi::GradCache.new(session, loss:, tap: "m.embedding",
                                     into: :vectors, seed: :seed)
+      # A gradient cache steps through `apply!`, which fires the same
+      # hook a plain step does, so the schedule sees every step.
+      session.use(Torobi::Policies::Schedule.new(peak: LEARNING_RATE, total: steps,
+                                                 warmup: WARMUP), every: 10)
 
+      best = { step: nil, ndcg: -1.0 }
       measure = lambda do |step|
         score = ndcg(session, config, bundle, width)
-        record[:measurements] << { step:, ndcg: score.round(4),
+        record[:measurements] << { step:, ndcg: score.round(4), lr: session.lr,
                                    memory: Torobi::Memory.peak }
         session.observe(ndcg: score)
-        puts format("step %5d  nDCG@10 %.4f  peak %.1f GiB",
-                    step, score, Torobi::Memory.peak / (1024.0**3))
+        puts format("step %5d  nDCG@10 %.4f  lr %.2e  peak %.1f GiB",
+                    step, score, session.lr, Torobi::Memory.peak / (1024.0**3))
+        # Kept rather than only reported: the last state of a run is not
+        # the best one it passed through, and a run that ends worse than
+        # it started should still leave what it reached.
+        if score > best[:ndcg]
+          best = { step:, ndcg: score }
+          session.checkpoint!(File.join(dir, "best")) if step.positive?
+        end
         score
       end
 
@@ -204,6 +221,7 @@ def main
         session.checkpoint!(File.join(dir, "checkpoint"))
       end
       record[:after] = measure.call(steps)
+      record[:best] = best
     end
 
     session.export_model!(File.join(dir, "export"), from: encoder)
@@ -211,7 +229,9 @@ def main
 
   record[:finished_at] = Time.now.utc.iso8601
   File.write(File.join(dir, "record.json"), "#{JSON.pretty_generate(record)}\n")
-  puts "nDCG@10 #{record[:before]} -> #{record[:after]}, written to #{dir}"
+  puts format("nDCG@10 %.4f -> %.4f (best %.4f at step %s), written to %s",
+              record[:before], record[:after], record.dig(:best, :ndcg),
+              record.dig(:best, :step), dir)
 end
 
 main if $PROGRAM_NAME == __FILE__

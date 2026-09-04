@@ -280,4 +280,47 @@ class HooksTest < Minitest::Test
       assert_equal before, s.fetch("m.l.weight").to_a
     end
   end
+
+  # A rate that starts small, reaches what was asked for, and comes back
+  # down. Checked as arithmetic first, because a schedule nobody can plot
+  # is a schedule nobody can check.
+  def test_a_schedule_warms_up_and_decays
+    schedule = Torobi::Policies::Schedule.new(peak: 1e-5, total: 1000)
+
+    assert_equal 50, schedule.warmup, "five percent of the run, by default"
+    assert_operator schedule.at(0), :<, 1e-6, "the first step barely moves the model"
+    assert_in_delta 1e-5, schedule.at(schedule.warmup), 1e-12, "and the peak is what was asked"
+    assert_operator schedule.at(500), :<, schedule.at(100)
+    assert_in_delta 0.0, schedule.at(1000), 1e-12
+    assert_in_delta 0.0, schedule.at(5000), 1e-12, "past the end it stays at the floor"
+  end
+
+  def test_a_schedule_can_stop_short_of_zero
+    schedule = Torobi::Policies::Schedule.new(peak: 1e-4, total: 100, warmup: 10, floor: 1e-5)
+
+    assert_equal 10, schedule.warmup, "a warmup of one or more is a number of steps"
+    assert_in_delta 1e-5, schedule.at(100), 1e-12
+  end
+
+  def test_a_schedule_that_asks_for_nothing_is_refused
+    assert_raises(ArgumentError) { Torobi::Policies::Schedule.new(peak: 0, total: 10) }
+    assert_raises(ArgumentError) { Torobi::Policies::Schedule.new(peak: 1e-4, total: 0) }
+  end
+
+  # And that it turns the knob it is holding.
+  def test_a_schedule_moves_the_rate_of_a_run
+    skip "extension not compiled" unless defined?(Torobi::Session)
+
+    seen = []
+    Torobi::Session.open(config, weights:, optimizer: { kind: :sgd, lr: 0.5 }) do |s|
+      s.use(Torobi::Policies::Schedule.new(peak: 0.1, total: 20, warmup: 4))
+      6.times { s.step!(batch) }
+      seen << s.lr
+      14.times { s.step!(batch) }
+      seen << s.lr
+    end
+
+    assert_operator seen.first, :>, seen.last, "the rate came down as the run went on"
+    assert_operator seen.first, :<=, 0.1
+  end
 end
