@@ -14,6 +14,12 @@
 #   ruby experiments/embed_retrieval.rb <encoder-dir> <train.jsonl> \
 #     <eval.json> <run-dir> [steps]
 #
+# **It resumes.** Run it again against a directory that holds a
+# checkpoint and it carries on from there, with the same parameters, the
+# same optimizer state, the same randomness and the same place in the
+# file. A run that took hours is worth being able to lose the machine
+# for a minute.
+#
 # Both inputs are token ids and nothing else: `tools/retrieval_pairs.py`
 # made them, which is where the tokenizer lives (docs/plan.md 15.19).
 #
@@ -211,6 +217,7 @@ def main
                                                  warmup: WARMUP), every: 10)
 
       best = { step: nil, ndcg: -1.0 }
+      at = 0
       measure = lambda do |step|
         score = ndcg(session, config, bundle, width)
         record[:measurements] << { step:, ndcg: score.round(4), lr: session.lr,
@@ -223,14 +230,28 @@ def main
         # it started should still leave what it reached.
         if score > best[:ndcg]
           best = { step:, ndcg: score }
-          session.checkpoint!(File.join(dir, "best")) if step.positive?
+          session.checkpoint!(File.join(dir, "best"), at: { at: }) if step.positive?
         end
         score
       end
 
-      record[:before] = measure.call(0)
-      at = 0
-      steps.times do |i|
+      # Where a run that was interrupted got to.
+      #
+      # A checkpoint holds the parameters, the optimizer and the RNG, and
+      # `at:` holds the one thing the engine cannot know: how far into
+      # the file this had read (docs/plan.md section 11.2). Together they
+      # are the whole of the run, so a machine that slept or a connection
+      # that dropped costs the steps since the last one and nothing else.
+      checkpoint = File.join(dir, "checkpoint")
+      if File.directory?(checkpoint)
+        position = session.restore(checkpoint)
+        at = position ? position.fetch("at", 0).to_i : 0
+        record[:resumed] = { step: session.step, at: }
+        puts format("resumed at step %d, row %d of %d", session.step, at, pairs.size)
+      end
+
+      record[:before] = measure.call(session.step)
+      (session.step...steps).each do |i|
         batch = pairs[(at % pairs.size), PAIRS]
         at += PAIRS
         # The last rows of the file are fewer than a batch: start again
@@ -243,7 +264,7 @@ def main
         next unless ((i + 1) % EVERY).zero?
 
         measure.call(i + 1)
-        session.checkpoint!(File.join(dir, "checkpoint"))
+        session.checkpoint!(checkpoint, at: { at: })
       end
       record[:after] = measure.call(steps)
       record[:best] = best
