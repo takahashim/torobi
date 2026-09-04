@@ -264,12 +264,15 @@ class ModernBertTest < Minitest::Test
     assert_same first, second
   end
 
-  def test_a_row_longer_than_the_graph_is_refused_rather_than_cut
+  # The padding width is the batch's now rather than the graph's, since a
+  # graph can be built for no particular length at all (`towers`). What
+  # the row is too long for is the padding it was handed.
+  def test_a_row_longer_than_the_padding_is_refused_rather_than_cut
     e = assert_raises(Torobi::ConfigError) do
       Torobi::Models::ModernBERT.batch(config, [[1, 2, 3, 4]], seq: 2)
     end
 
-    assert_match(/4 tokens and this graph was built for 2/, e.message)
+    assert_match(/4 tokens and this batch pads to 2/, e.message)
     assert_match(/caller's to decide/, e.message)
   end
 

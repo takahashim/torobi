@@ -60,6 +60,60 @@ class DslTest < Minitest::Test
     assert_match(/dimension .* mismatch \(3 vs 4\)/, e.message)
   end
 
+  # A reshape may keep dimensions it does not know, which is the only way
+  # to split the last axis of something whose batch *and* sequence are
+  # both symbolic (docs/plan.md 15.63).
+  def test_a_reshape_can_keep_the_dimensions_it_does_not_know
+    shape = nil
+    Torobi.graph do |g|
+      x = g.input :x, [nil, nil, 8]
+      split = x.reshape(shape: [0, 0, 2, 4])
+      shape = split.shape
+      g.output :out, split
+    end
+
+    assert_equal [nil, nil, 2, 4], shape
+  end
+
+  def test_a_kept_dimension_the_input_does_not_have_is_refused
+    e = assert_raises(Torobi::ConfigError) do
+      Torobi.graph do |g|
+        x = g.input :x, [nil, 8]
+        g.output :out, x.reshape(shape: [0, 0, 0, 8])
+      end
+    end
+
+    assert_match(/keeps 3 dimensions/, e.message)
+    assert_match(/has 2/, e.message)
+  end
+
+  # Only the leading ones: what follows a kept dimension is being
+  # re-divided, and has no dimension of its own to stand for.
+  def test_a_kept_dimension_after_a_divided_one_is_refused
+    e = assert_raises(Torobi::ConfigError) do
+      Torobi.graph do |g|
+        x = g.input :x, [nil, 4, 8]
+        g.output :out, x.reshape(shape: [0, 2, 0])
+      end
+    end
+
+    assert_match(/only the leading ones can be kept/, e.message)
+  end
+
+  # The old rule still holds past what is kept: the concrete part has to
+  # be preserved exactly, and the message says where it was looking.
+  def test_what_is_left_after_the_kept_dimensions_still_has_to_fit
+    e = assert_raises(Torobi::ConfigError) do
+      Torobi.graph do |g|
+        x = g.input :x, [nil, nil, 8]
+        g.output :out, x.reshape(shape: [0, 0, 3, 4])
+      end
+    end
+
+    assert_match(/past the 2 it keeps/, e.message)
+    assert_match(/holds 8/, e.message)
+  end
+
   def test_values_cannot_cross_graphs
     stray = nil
     Torobi.graph do |g|

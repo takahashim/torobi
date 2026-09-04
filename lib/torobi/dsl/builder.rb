@@ -22,6 +22,8 @@ module Torobi
         @nodes = []
         @outputs = {}
         @scopes = []
+        @sharing = 0
+        @labels = []
       end
 
       # --- graph boundary ---
@@ -106,8 +108,47 @@ module Torobi
         emit("parameter", params: [spec.id])
       end
 
+      # The same weights, applied again.
+      #
+      # Inside this block a parameter that is already declared, in every
+      # respect, is **read** rather than declared a second time. So a
+      # component can be applied more than once and the applications are
+      # one set of weights: a query tower and a document tower that are
+      # the same tower, differentiated once and checkpointed once
+      # (docs/plan.md 15.63).
+      #
+      #   %i[queries documents].each do |side|
+      #     g.sharing(side) { ModernBERT.body(g, config, fields: "#{side}.", ...) }
+      #   end
+      #
+      # `label` names the values rather than the weights: the parameters
+      # are one set with one set of names, and the nodes are "queries.x"
+      # and "documents.x", because a value computed twice from different
+      # rows is two values and a tap has to be able to ask for either.
+      # Without one, the second application collides on the first's node
+      # names, which is the error it should be.
+      #
+      # It is a block rather than the default because two declarations of
+      # one path are otherwise the mistake they have always been: a
+      # component built twice by accident would silently become one and
+      # nothing would say so. Asking for the same path with a *different*
+      # shape, dtype, initializer or trainability is refused here too.
+      # Two things that are not the same cannot be the same weights.
+      def sharing(label = nil)
+        @sharing += 1
+        @labels.push(label.to_s) if label
+        yield
+      ensure
+        @labels.pop if label
+        @sharing -= 1
+      end
+
       def param(name, shape, init:, dtype: :f32, trainable: true)
         path = scoped(name)
+        if @sharing.positive? && (already = @parameters.find { |p| p.path == path })
+          return shared(already, shape:, dtype:, init:, trainable:)
+        end
+
         # Inside an adapting block, what is trained is the adapter and
         # nothing else. Said here rather than at each parameter, because
         # a base model left trainable by an oversight is not a LoRA
@@ -341,8 +382,29 @@ module Torobi
 
       private
 
+      # A parameter an earlier application already declared, read again.
+      #
+      # The candidate is built rather than compared field by field, so
+      # the two go through the same normalizing: what is compared is what
+      # would have been declared.
+      def shared(already, shape:, dtype:, init:, trainable:)
+        wanted = IR::ParameterSpec.new(id: already.id, path: already.path, shape:, dtype:,
+                                       initializer: init, trainable:)
+        unless wanted == already
+          differs = %i[shape dtype initializer trainable]
+                    .reject { |f| already.send(f) == wanted.send(f) }
+          said = differs.map { |f| "#{f} #{already.send(f).inspect} vs #{wanted.send(f).inspect}" }
+          raise ConfigError,
+                "#{already.path.inspect} is declared already and this asks for a " \
+                "different #{said.join(", ")}. Sharing is one parameter read twice, so " \
+                "the applications have to be the same model."
+        end
+
+        emit("parameter", params: [already.id])
+      end
+
       def unique_name(label)
-        candidate = scoped(label)
+        candidate = (@labels + [scoped(label)]).join(".")
         if @nodes.any? { |n| n.name == candidate }
           raise ConfigError, "two values are named #{candidate.inspect} in one graph"
         end

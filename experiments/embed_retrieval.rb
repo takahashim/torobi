@@ -39,8 +39,10 @@ require "json"
 # editing the description of it, and recorded so that it can be said
 # afterwards what was turned.
 SEED = Integer(ENV.fetch("SEED", 20_260_904))
-# What the pairs were tokenized to. A graph is built for one length, and
-# a row longer than it is refused rather than truncated here.
+# What the pairs were tokenized to. Nothing is padded to it: the graph
+# is built for no particular length and every part is padded to its own
+# longest row (docs/plan.md 15.63). It is recorded, and it is what the
+# exported model says it may be used at.
 SEQ = Integer(ENV.fetch("SEQ", 192))
 # How many pairs a step learns from. The contrastive signal is the other
 # rows, so this is the number that matters most for quality, and the
@@ -72,9 +74,25 @@ def rows_of(path)
 end
 
 # The encoder, as a graph that answers with one vector per row.
+#
+# Built for no particular sequence length, so the rows decide: a part of
+# queries costs what queries cost rather than what documents do.
 def embedder(config, rows: nil)
-  Torobi::Models::ModernBERT.embedder(config, seq: SEQ, pooling: :mean,
+  Torobi::Models::ModernBERT.embedder(config, seq: nil, pooling: :mean,
                                       encoder_prefix: "", rows:)
+end
+
+# One part of a step's rows, padded to its own longest row.
+#
+# **Padding is work**, and the three blocks are of very different
+# lengths: the queries of auto-wiki-qa are eighteen tokens where its
+# documents are 192, so padding them together makes the queries cost ten
+# times what they are (docs/plan.md 15.62). The blocks are laid out in
+# order, so a part is usually all queries or all documents, and each one
+# is padded to what it holds.
+def part_of(config, rows)
+  Torobi::Models::ModernBERT.batch(config, rows, seq: rows.map(&:size).max,
+                                   pooling: :mean)
 end
 
 # What a gradient cache asks of the model it back-propagates: a loss that
@@ -130,9 +148,7 @@ def parts_of(config, pairs)
       mined[i]
     end
   end
-  rows.each_slice(PART).map do |slice|
-    Torobi::Models::ModernBERT.batch(config, slice, seq: SEQ, pooling: :mean)
-  end
+  rows.each_slice(PART).map { |slice| part_of(config, slice) }
 end
 
 # Every row of `ids`, as vectors, through the model as it stands.
@@ -142,8 +158,8 @@ end
 # the seed the training objective wants is not in it.
 def embed(session, config, ids, width)
   ids.each_slice(EVALUATION_BATCH).flat_map do |slice|
-    batch = Torobi::Models::ModernBERT.batch(config, slice, seq: SEQ, pooling: :mean)
-    session.forward(batch).fetch("m.embedding").to_a.each_slice(width).to_a
+    session.forward(part_of(config, slice)).fetch("m.embedding")
+           .to_a.each_slice(width).to_a
   end
 end
 

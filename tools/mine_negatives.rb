@@ -29,15 +29,24 @@
 #
 # And **padding is work**: the queries were eighteen tokens long and
 # were being padded to 192, which is nine tenths of that half of the
-# embedding spent on nothing. Grouped by length it is 0.51 s instead of
-# 2.81 s, for embeddings that are identical (docs/plan.md 15.62).
+# embedding spent on nothing (docs/plan.md 15.62). The graph is now
+# built for no particular length at all, so each batch is padded to its
+# own longest row and nothing is padded to a number somebody chose
+# (docs/plan.md 15.63).
 #
-# Where that leaves it, on the same 510 pairs and the same machine:
+# Where that leaves it, on the same 510 pairs and the same machine
+# (3.5 s of wall clock, against about nine before any of this):
 #
-#   embedding  3.34 s   (0.51 queries + 2.83 documents)
+#   embedding  3.0 s    (0.30 queries + 2.70 documents)
 #   scoring    0.039 s
-#   -> ten thousand pairs: about 80 seconds, most of it the documents
+#   -> ten thousand pairs: about 75 seconds, most of it the documents
 #   -> a hundred thousand: about half an hour, most of it the scoring
+#
+# The queries cost 2.81 s when they were padded to 192 and cost 0.30 s
+# now, which is 9.4x for taking the padding out. Thirteen batch shapes
+# rather than one costs about 0.04 s, measured cold: a new shape is
+# cheap enough that sorting by length and padding to the batch is worth
+# it even for a tool that runs once.
 #
 # So ten thousand is a coffee and a hundred thousand is not. Past that
 # the quadratic half is the expensive half again and wants the picking
@@ -48,15 +57,10 @@ $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
 require "torobi"
 require "json"
 
-# The longest a row is allowed to be. Nothing is padded to it unless
-# something is that long: it is a ceiling, not a width.
-SEQ = Integer(ENV.fetch("SEQ", 192))
-# How rows are grouped by length. Smaller means less padding and more
-# graphs; a group costs one session, which is one read of the weights.
-STEP = Integer(ENV.fetch("STEP", 32))
 # Measured at 16, 32, 64 and 128 on ruri-v3-30m: 2.72 s to 2.81 s for the
 # same 510 documents, which is no difference at all. The sequence is what
-# costs, so this is only about memory.
+# costs, so this is only about memory. There is no SEQ: the rows arrive
+# tokenized and the batch is as long as its longest row.
 BATCH = Integer(ENV.fetch("BATCH", 32))
 # How many of the nearest are skipped before taking negatives. The very
 # nearest documents to a query are often other correct answers that the
@@ -76,38 +80,30 @@ end
 
 # The encoder, read-only: nothing is trained here, so the run needs no
 # loss and asks for no seed (docs/plan.md section 15.47).
-def reading(config, seq)
-  model = Torobi::Models::ModernBERT.embedder(config, seq:, pooling: :mean,
+def reading(config)
+  model = Torobi::Models::ModernBERT.embedder(config, seq: nil, pooling: :mean,
                                               encoder_prefix: "")
   Torobi::GraphConfig.new(models: { m: model }, train: [])
 end
 
-# What a row is padded to: its own length, rounded up to a multiple of
-# `STEP` and never past `SEQ`.
-def ceiling(length) = [(((length - 1) / STEP) + 1) * STEP, SEQ].min
-
 # Every text, embedded, in the order it arrived.
 #
-# **Padding is work.** A query of eighteen tokens in a graph built for
-# 192 costs what 192 tokens cost, and mean pooling then throws the
-# padding away: measured on 510 queries, the same embeddings to the last
-# bit came out 4.2x faster from a graph built for 48 (docs/plan.md
-# 15.62). So the rows are grouped by length and each group gets the
-# graph it needs. A session per group, because the sequence a graph is
-# built for is part of the graph.
-def embed(encoder, config, ids, width)
+# **Padding is work.** A query of eighteen tokens costs what 192 tokens
+# cost if it is padded to 192, and mean pooling then throws the padding
+# away. So the rows are sorted by length before they are cut into
+# batches, and each batch is padded to its own longest row: rows of a
+# like length end up together, which is what makes that number small.
+#
+# One graph and one session, because the graph is built for no
+# particular length (`seq: nil`).
+def embed(session, config, ids, width)
   found = Array.new(ids.size)
-  ids.each_with_index.group_by { |row, _| ceiling(row.size) }.sort.each do |seq, group|
-    Torobi::Session.open(
-      reading(config, seq), pretrained: { m: File.join(encoder, "model.safetensors") }
-    ) do |session|
-      group.each_slice(BATCH) do |slice|
-        batch = Torobi::Models::ModernBERT.batch(config, slice.map(&:first), seq:,
-                                                 pooling: :mean)
-        vectors = session.forward(batch).fetch("m.embedding").to_a.each_slice(width).to_a
-        slice.each_with_index { |(_, at), i| found[at] = vectors[i] }
-      end
-    end
+  ids.each_with_index.sort_by { |row, _| row.size }.each_slice(BATCH) do |slice|
+    seq = slice.map { |row, _| row.size }.max
+    batch = Torobi::Models::ModernBERT.batch(config, slice.map(&:first), seq:,
+                                             pooling: :mean)
+    vectors = session.forward(batch).fetch("m.embedding").to_a.each_slice(width).to_a
+    slice.each_with_index { |(_, at), i| found[at] = vectors[i] }
   end
   found
 end
@@ -161,8 +157,13 @@ def main
   pairs = rows_of(source)
   puts "#{pairs.size} pairs, mining #{count} negative(s) each"
 
-  documents = embed(encoder, config, pairs.map { |row| row.fetch("text_ids") }, width)
-  queries = embed(encoder, config, pairs.map { |row| row.fetch("query_ids") }, width)
+  documents, queries = Torobi::Session.open(
+    reading(config), pretrained: { m: File.join(encoder, "model.safetensors") }
+  ) do |session|
+    %w[text_ids query_ids].map do |key|
+      embed(session, config, pairs.map { |row| row.fetch(key) }, width)
+    end
+  end
   puts "embedded #{queries.size} queries and #{documents.size} passages"
 
   # The nearest passages that are not this query's own answer, taken

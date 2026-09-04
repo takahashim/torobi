@@ -199,7 +199,7 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
         Op::Rope { theta } => rope(&ins[0], *theta)?,
 
         Op::Transpose(axes) => ins[0].transpose_axes(axes)?,
-        Op::Reshape(shape) => ins[0].reshape(shape)?,
+        Op::Reshape(shape) => ins[0].reshape(&kept(shape, ins[0].shape())?)?,
         Op::Slice {
             axis,
             start,
@@ -274,6 +274,31 @@ fn rms_norm(x: &Array, weight: &Array, eps: f32) -> Result<Array> {
         .add(Array::from_f32(eps))?
         .rsqrt()?;
     x.multiply(scale)?.multiply(weight)
+}
+
+/// A reshape target with its 0s filled in from the array in hand.
+///
+/// A 0 says "the dimension this already has", which is how a graph that
+/// does not know its batch *or* its sequence still splits the last axis
+/// into heads. The Ruby side settles this when the graph is built; the
+/// engine resolves it again here because it is handed a shape, not a
+/// promise about one.
+fn kept(target: &[i32], from: &[i32]) -> Result<Vec<i32>> {
+    target
+        .iter()
+        .enumerate()
+        .map(|(axis, &dim)| {
+            if dim != 0 {
+                return Ok(dim);
+            }
+            from.get(axis).copied().ok_or_else(|| {
+                Exception::custom(format!(
+                    "a reshape to {target:?} keeps axis {axis} of a shape with {} of them",
+                    from.len()
+                ))
+            })
+        })
+        .collect()
 }
 
 /// Rotary position embedding over the last axis, at the given base.
@@ -398,6 +423,30 @@ mod tests {
         assert_eq!(got.len(), want.len(), "{got:?} against {want:?}");
         for (g, w) in got.iter().zip(want) {
             assert!((g - w).abs() < 1e-5, "{got:?} against {want:?}");
+        }
+    }
+
+    /// A graph built knowing neither its batch nor its sequence still
+    /// splits the last axis: the 0s take whatever the array turns out to
+    /// have (docs/plan.md 15.63).
+    #[test]
+    fn a_reshape_keeps_the_dimensions_the_graph_never_knew() {
+        let (config, weights) = fixtures::one_op(
+            "reshape",
+            serde_json::json!([null, null, 4]),
+            serde_json::json!({"shape": [0, 0, 2, 2]}),
+            0,
+        );
+        let mut session = Session::open(&config, Weights::Inline(&weights)).unwrap();
+        session.tap("m.seen", "full").unwrap();
+
+        for rows in [3, 7] {
+            let batch: Batch = [fixtures::field("x", &[rows, 5, 4], &vec![1.0f32; (rows * 20) as usize])]
+                .into_iter()
+                .collect();
+            session.evaluate(&batch).unwrap();
+            let seen = session.tapped().unwrap();
+            assert_eq!(seen[0].1.shape, vec![rows, 5, 2, 2]);
         }
     }
 

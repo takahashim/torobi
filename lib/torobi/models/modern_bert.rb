@@ -145,13 +145,59 @@ module Torobi
         end
       end
 
+      # The same embedder, applied to several named sets of rows.
+      #
+      # One model and one set of weights, in a graph that embeds each side
+      # at the length that side actually is. A contrastive run wants that:
+      # its queries are eighteen tokens and its documents are 192, and
+      # padding the queries out to the documents' length is nine tenths of
+      # that work spent on padding (docs/plan.md 15.62).
+      #
+      # Two things make it possible, and both are new: `g.sharing` makes
+      # the second application read the first's parameters rather than
+      # declare its own, and the graph is built for no particular
+      # sequence at all (`seq: nil`), so each side's batch says how long
+      # it is (docs/plan.md 15.63).
+      #
+      #   graph = ModernBERT.towers(config, queries: 8, documents: 24)
+      #   batch = ModernBERT.batch(config, qs, seq: 48, pooling: :mean,
+      #                            fields: "queries.")
+      #           .merge(ModernBERT.batch(config, ds, seq: 192, pooling: :mean,
+      #                                   fields: "documents."))
+      #
+      # It answers one embedding per side, "queries.embedding" and
+      # "documents.embedding", which is what the objective reads.
+      #
+      # `sides` is name => how many rows that side has, nil where the
+      # count does not matter. It is named because an objective that reads
+      # across the batch cannot be written against a dimension nothing
+      # knows.
+      def towers(config, sides, pooling: :mean, encoder_prefix: "", normalize: true,
+                 dtype: :f32)
+        config.check!
+        raise ConfigError, "towers needs at least one side" if sides.empty?
+
+        Torobi.graph do |g|
+          sides.each do |side, rows|
+            g.sharing(side) do
+              x = g.name("hidden", body(g, config, seq: nil, rows:, encoder_prefix:,
+                                        dtype:, fields: "#{side}."))
+              pooled = pool(g, x, config, seq: nil, rows:, mode: pooling,
+                            fields: "#{side}.")
+              pooled = normalized(g, pooled) if normalize
+              g.output :"#{side}.embedding", g.name("embedding", pooled)
+            end
+          end
+        end
+      end
+
       # The encoder under wherever its parameters sit. Published
       # classifiers keep them under `model.` and bare encoders at the root,
       # and that is the only difference between the two graphs above.
-      def body(g, config, seq:, rows:, encoder_prefix:, dtype: :f32)
-        return encode(g, config, seq:, rows:, dtype:) if encoder_prefix.to_s.empty?
+      def body(g, config, seq:, rows:, encoder_prefix:, dtype: :f32, fields: "")
+        return encode(g, config, seq:, rows:, dtype:, fields:) if encoder_prefix.to_s.empty?
 
-        g.scope(encoder_prefix) { encode(g, config, seq:, rows:, dtype:) }
+        g.scope(encoder_prefix) { encode(g, config, seq:, rows:, dtype:, fields:) }
       end
 
       # A vector of length one, so a dot product is a cosine.
@@ -172,14 +218,14 @@ module Torobi
       # derived from the attention mask: what a mask holds is whatever the
       # caller built it from, and a weight that must be exactly one or
       # exactly zero should not be read out of a large negative number.
-      def pool(g, x, config, seq:, rows: nil, mode: config.classifier_pooling)
+      def pool(g, x, config, seq:, rows: nil, mode: config.classifier_pooling, fields: "")
         case mode
         when :cls
           x.slice(axis: 1, start: 0, length: 1).reshape(shape: [-1, config.hidden_size])
         when :mean
           # Cast to what it is weighing: a batch carries f32, and the
           # model may be held in something narrower.
-          weights = g.cast(g.input(:tokens, [rows, seq, 1]), x.dtype)
+          weights = g.cast(g.input(:"#{fields}tokens", [rows, seq, 1]), x.dtype)
           g.sum(x * weights, axes: [1]) / g.sum(weights, axes: [1])
         else
           raise ConfigError, "unknown pooling #{mode.inspect}"
@@ -220,17 +266,17 @@ module Torobi
       # objective that reads across the batch rather than down it, which
       # a contrastive loss does (its negatives are the other rows), and
       # which cannot be written against a dimension nothing knows.
-      def encode(g, config, seq:, rows: nil, dtype: :f32)
-        ids = g.input(:input_ids, [rows, seq], dtype: :i32)
+      def encode(g, config, seq:, rows: nil, dtype: :f32, fields: "")
+        ids = g.input(:"#{fields}input_ids", [rows, seq], dtype: :i32)
         # The masks arrive as f32, which is what a batch carries, and are
         # cast to what the model is held in. Nothing is cast when there is
         # nothing to cast to (`g.cast`).
-        padding = g.cast(g.input(:mask, [rows, 1, 1, seq]), dtype)
+        padding = g.cast(g.input(:"#{fields}mask", [rows, 1, 1, seq]), dtype)
         # Summed once, not in each of the local layers: both are the same
         # for every one of them. Only when there is a local layer to read
         # it, so a configuration with none asks for no window.
         local = if config.any_local?
-                  padding + g.cast(g.input(:window, [1, 1, seq, seq]), dtype)
+                  padding + g.cast(g.input(:"#{fields}window", [1, 1, seq, seq]), dtype)
                 else
                   padding
                 end
@@ -241,7 +287,7 @@ module Torobi
 
         config.num_hidden_layers.times do |i|
           mask = config.global?(i) ? padding : local
-          x = g.scope("layers.#{i}") { layer(g, x, config, i, mask, seq:) }
+          x = g.scope("layers.#{i}") { layer(g, x, config, i, mask) }
         end
         norm(g, x, config, name: "final_norm")
       end
@@ -249,13 +295,13 @@ module Torobi
       # One encoder block: attention with a residual, then the MLP with
       # another. Layer 0 has no attention norm, which is the reference's
       # own asymmetry and not a mistake here.
-      def layer(g, x, config, index, mask, seq:)
+      def layer(g, x, config, index, mask)
         normed = index.zero? ? x : norm(g, x, config, name: "attn_norm")
-        x += attention(g, normed, config, index, mask, seq:)
+        x += attention(g, normed, config, index, mask)
         x + mlp(g, norm(g, x, config, name: "mlp_norm"), config)
       end
 
-      def attention(g, x, config, index, mask, seq:)
+      def attention(g, x, config, index, mask)
         heads = config.num_attention_heads
         dim = config.head_dim
         theta = config.theta(index)
@@ -263,16 +309,19 @@ module Torobi
           g.linear(x, config.hidden_size * 3, name: "Wqkv", bias: false).split(3, axis: -1)
         end
         # [batch, seq, hidden] -> [batch, heads, seq, head_dim], so
-        # attention runs per head and the batch stays symbolic.
+        # attention runs per head. The two leading dimensions are kept as
+        # they are (`0`), which is what lets both of them be symbolic:
+        # only the hidden size is being divided up here, and it is the
+        # one this knows (docs/plan.md 15.63).
         to_heads = lambda do |h|
-          h.reshape(shape: [-1, seq, heads, dim]).transpose(axes: [0, 2, 1, 3])
+          h.reshape(shape: [0, 0, heads, dim]).transpose(axes: [0, 2, 1, 3])
         end
         attended = g.sdpa(to_heads.call(q).rope(theta:),
                           to_heads.call(k).rope(theta:),
                           to_heads.call(v),
                           mask:)
         folded = attended.transpose(axes: [0, 2, 1, 3])
-                         .reshape(shape: [-1, seq, config.hidden_size])
+                         .reshape(shape: [0, 0, config.hidden_size])
         g.scope("attn") { g.linear(folded, config.hidden_size, name: "Wo", bias: false) }
       end
 
@@ -315,23 +364,23 @@ module Torobi
       # `pooling:` is what the graph this feeds pools like, and adds the
       # per-token weights a mean over real tokens needs (`tokens`). It is
       # the same word `embedder` and `pool` take.
-      def batch(config, rows, seq:, pooling: nil)
+      def batch(config, rows, seq:, pooling: nil, fields: "")
         lengths = rows.map(&:size)
         too_long = lengths.each_with_index.select { |length, _| length > seq }
         unless too_long.empty?
           raise ConfigError,
                 "row #{too_long.first.last} has #{too_long.first.first} tokens and this " \
-                "graph was built for #{seq}. Tokenize to at most #{seq}, or build the " \
-                "graph for a longer sequence; where to cut a long text is the " \
-                "caller's to decide."
+                "batch pads to #{seq}. Tokenize to at most #{seq}, or pad to more; " \
+                "where to cut a long text is the caller's to decide."
         end
 
         ids = rows.flat_map { |row| row + Array.new(seq - row.size, config.pad_token_id) }
-        fields = { input_ids: TensorData.from_a([rows.size, seq], ids, dtype: :i32) }
-                 .merge(masks(config, seq:, lengths:))
-        return fields unless pooling.to_s == "mean"
+        carried = { input_ids: TensorData.from_a([rows.size, seq], ids, dtype: :i32) }
+                  .merge(masks(config, seq:, lengths:))
+        carried = carried.merge(tokens: tokens(seq:, lengths:)) if pooling.to_s == "mean"
+        return carried if fields.to_s.empty?
 
-        fields.merge(tokens: tokens(seq:, lengths:))
+        carried.to_h { |name, value| [:"#{fields}#{name}", value] }
       end
 
       # Which positions are tokens and which are padding, [rows, seq, 1]:

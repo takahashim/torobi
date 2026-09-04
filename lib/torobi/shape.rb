@@ -73,53 +73,81 @@ module Torobi
       [inputs.first.shape, same_dtype(inputs, where:)]
     end
 
-    # One dimension may be -1 and takes whatever is left over.
+    # One dimension may be -1 and takes whatever is left over, and any
+    # number of leading 0s keep the dimensions the input already has.
     #
-    # A symbolic dimension can only go there: nothing else can stand for
-    # "however many rows this batch has". So a reshape of a symbolic input
-    # must name a -1, and the concrete part has to be preserved exactly,
-    # which is a check worth having rather than a formality.
+    # A symbolic dimension can only go into one of those two: nothing
+    # else can stand for "however many rows this batch has". A -1 takes
+    # one of them, which is enough while the batch is the only thing that
+    # varies. A 0 is for when it is not: splitting the last dimension
+    # into heads under a batch *and* a sequence that are both unknown
+    # needs two dimensions carried through untouched, and "keep what is
+    # there" is the only way to say that (docs/plan.md 15.63).
     def reshape(inputs, attrs, where:)
       from = inputs.first.shape
       target = attrs.fetch("shape")
+      if target.any? { |d| !d.is_a?(Integer) || d < -1 }
+        raise ConfigError,
+              "#{where}: a shape is positive integers, at most one -1, and leading 0s " \
+              "for the dimensions kept as they are, got #{target.inspect}"
+      end
+
+      keep = target.take_while(&:zero?).size
+      if target.drop(keep).include?(0)
+        raise ConfigError,
+              "#{where}: a 0 keeps the dimension the input has there, so only the " \
+              "leading ones can be kept (got #{target.inspect})"
+      end
+      if keep > from.size
+        raise ConfigError,
+              "#{where}: #{target.inspect} keeps #{keep} dimensions and " \
+              "#{from.inspect} has #{from.size}"
+      end
+
+      shape, dtype = divide(inputs.first, from.drop(keep), target.drop(keep), where:, kept: keep)
+      [from.take(keep) + shape, dtype]
+    end
+
+    # What is left of a reshape once the kept dimensions are set aside:
+    # no 0s, so this is the whole of the old rule. The concrete part has
+    # to be preserved exactly, which is a check worth having rather than
+    # a formality.
+    def divide(input, from, target, where:, kept: 0)
+      after = kept.zero? ? "" : " (past the #{kept} it keeps)"
       inferred = target.count(-1)
       if inferred > 1
         raise ConfigError, "#{where}: only one dimension may be -1, got #{target.inspect}"
-      end
-      if target.any? { |d| !d.is_a?(Integer) || (d < 1 && d != -1) }
-        raise ConfigError, "#{where}: a shape is positive integers and at most one -1, " \
-                           "got #{target.inspect}"
       end
 
       known = target.reject { |d| d == -1 }.reduce(1, :*)
       if from.include?(nil)
         unless inferred == 1
           raise ConfigError,
-                "#{where}: #{from.inspect} has a symbolic dimension, so the target " \
-                "must name a -1 for it to go into (got #{target.inspect})"
+                "#{where}: #{from.inspect}#{after} has a symbolic dimension, so the " \
+                "target must name a -1 or a 0 for it to go into (got #{target.inspect})"
         end
         concrete = from.compact.reduce(1, :*)
         unless concrete == known
           raise ConfigError,
-                "#{where}: #{from.inspect} holds #{concrete} per symbolic step and " \
-                "#{target.inspect} wants #{known}"
+                "#{where}: #{from.inspect}#{after} holds #{concrete} per symbolic step " \
+                "and #{target.inspect} wants #{known}"
         end
-        return [target.map { |d| d == -1 ? nil : d }, inputs.first.dtype]
+        return [target.map { |d| d == -1 ? nil : d }, input.dtype]
       end
 
       total = from.reduce(1, :*)
       if inferred.zero?
         unless total == known
-          raise ConfigError, "#{where}: #{from.inspect} holds #{total}, " \
+          raise ConfigError, "#{where}: #{from.inspect}#{after} holds #{total}, " \
                              "#{target.inspect} wants #{known}"
         end
-        return [target, inputs.first.dtype]
+        return [target, input.dtype]
       end
       unless known.positive? && (total % known).zero?
-        raise ConfigError, "#{where}: #{from.inspect} holds #{total}, which does not " \
-                           "divide into #{target.inspect}"
+        raise ConfigError, "#{where}: #{from.inspect}#{after} holds #{total}, which does " \
+                           "not divide into #{target.inspect}"
       end
-      [target.map { |d| d == -1 ? total / known : d }, inputs.first.dtype]
+      [target.map { |d| d == -1 ? total / known : d }, input.dtype]
     end
 
     def binary(inputs, where:)

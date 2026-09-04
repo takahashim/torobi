@@ -142,8 +142,18 @@ impl Op {
                     "reshape: only one dimension may be -1, got {shape:?}"
                 );
                 anyhow::ensure!(
-                    shape.iter().all(|d| *d > 0 || *d == -1),
-                    "reshape: a shape is positive integers and at most one -1, got {shape:?}"
+                    shape.iter().all(|d| *d >= -1),
+                    "reshape: a shape is positive integers, at most one -1, and leading \
+                     0s for the dimensions kept as they are, got {shape:?}"
+                );
+                // A 0 is "the dimension the input already has there", so
+                // only the leading ones can be kept: what follows is
+                // being re-divided and has no dimension to keep.
+                let keeps = shape.iter().take_while(|d| **d == 0).count();
+                anyhow::ensure!(
+                    !shape[keeps..].contains(&0),
+                    "reshape: a 0 keeps the dimension the input has there, so only the \
+                     leading ones can be kept, got {shape:?}"
                 );
                 Op::Reshape(shape)
             }
@@ -501,6 +511,19 @@ mod tests {
             0,
         );
         assert!(e.contains("only one dimension may be -1"), "{e}");
+    }
+
+    // A 0 keeps the dimension the array already has, and only the
+    // leading ones can be kept: what follows is being re-divided and has
+    // nothing of its own to stand for.
+    #[test]
+    fn a_kept_dimension_after_a_divided_one_is_refused() {
+        let e = refusal(
+            vec![node(0, "reshape", &["input:0"], json!({"shape": [0, 2, 0]}))],
+            &[("loss", "node:0")],
+            0,
+        );
+        assert!(e.contains("only the leading ones can be kept"), "{e}");
     }
 
     #[test]
