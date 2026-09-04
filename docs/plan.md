@@ -2982,6 +2982,43 @@ auto-wiki-qa の 1 ファイル 226 MB のうち、要る 2 列は 198 MB、**�
 pyarrow の出力と全値照合し、`tools/retrieval_pairs.rb` が Python 版と**同一の eval
 バンドル**を作ることも確かめた。
 
+### 15.60 hard negative。損失は 1 つのまま(2026-09-04)
+
+§15.57 が示したのは「batch 内の negative が易しすぎて勾配に情報が無い」だった。
+その答えが mined negative である。**engine は 1 行も変えていない。**
+
+**損失は分岐させなかった。** 行を「query P 個 / positive P 個 / negative P×N 個」の
+3 ブロックに並べ、query は**batch 内の全文書**に対して採点する。N=0 なら文書は
+positive だけになり、in-batch 損失そのものになる。だから式は 1 つで済む:
+
+```ruby
+q         = v.slice(0, PAIRS)
+documents = v.slice(PAIRS, PAIRS * (1 + NEGATIVES))
+positives = documents.slice(0, PAIRS)
+loss = mean(log(sum(exp(q @ documents.T * SCALE))) - sum(q * positives) * SCALE)
+```
+
+reshape を slice に変えたのは、2 ブロック固定をやめるためである。
+
+テストは 2 つ主張する。
+
+| | |
+| --- | --- |
+| **cached step = 一括 step** | 3 ブロックでも厳密一致 (§15.45 と同じ主張を、新しい配置で) |
+| **負例ありの損失 > 負例なしの損失** | log の中の和に項が増える以上、数学的に必ずそうなる。**配置を間違えて負例が分母から落ちれば同じ値が返る**ので、これがその検査になる |
+
+**採掘は Torobi 自身で行う** (`tools/mine_negatives.rb`)。`Session#forward` で全 query と
+全 passage を埋め込み、自分の正解以外で最も近いものを取る。**その run が始めるモデルに
+とって難しい**負例が要るのだから、採掘するのはそのモデルであるべきである。
+sentence-transformers を呼ぶ必要はもう無い。
+
+2 つ細かい判断。**最近傍を SKIP 個飛ばす**: 一番近い文書はラベルされていない別の正解で
+あることが多く、正解を「違う」と教えるのは何も教えないより悪い。そして**負例が足りない
+行は拒否する**: 黙って詰めると、それ以降のブロックが全部ずれる。
+
+採掘は query × passage の総当たりで、それがこの仕事の正直な形である。10 万 × 10 万は
+Ruby の仕事ではない。1 万規模なら数分。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

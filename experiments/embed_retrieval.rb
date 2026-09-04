@@ -43,6 +43,12 @@ PAIRS = Integer(ENV.fetch("PAIRS", 32))
 # How many rows are held at once. Memory is set by this; the loss is set
 # by PAIRS.
 PART = Integer(ENV.fetch("PART", 8))
+# How many mined negatives each pair brings. Zero is the in-batch loss,
+# where what a query is told apart from is the other queries' documents;
+# with a strong encoder those are too easy to say anything, which is
+# what the first run of this showed (docs/plan.md section 15.57).
+# `tools/mine_negatives.rb` is what puts them in the file.
+NEGATIVES = Integer(ENV.fetch("NEGATIVES", 0))
 # The peak of the schedule rather than the rate: a fine-tune of a model
 # that is already good warms up and comes back down (`Policies::Schedule`).
 # 5e-6 rather than the 2e-5 a from-scratch run would take, because what
@@ -78,28 +84,46 @@ def seeded(model)
 end
 
 # Multiple negatives ranking, over representations computed elsewhere.
-# Queries first, then the document each one matches, which is the order
-# the parts arrive in.
+#
+# The rows arrive as queries, then the document each one matches, then
+# whatever negatives were mined for them: a query is scored against every
+# document in the batch, and the only supervision is which pairs were put
+# in together. At NEGATIVES=0 that is the in-batch loss and the two are
+# one expression, which is why there is one.
 def contrastive(width)
-  rows = 2 * PAIRS
+  held = PAIRS * (2 + NEGATIVES)
   graph = Torobi.graph do |g|
-    v = g.input :vectors, [rows, width]
-    pair = v.reshape(shape: [2, -1, width])
-    half = ->(i) { pair.slice(axis: 0, start: i, length: 1).reshape(shape: [-1, width]) }
-    q = half.call(0)
-    d = half.call(1)
-    matched = g.sum(q * d, axes: [-1]) * SCALE
-    all = g.matmul(q, d.transpose(axes: [1, 0])) * SCALE
+    v = g.input :vectors, [held, width]
+    q = v.slice(axis: 0, start: 0, length: PAIRS)
+    documents = v.slice(axis: 0, start: PAIRS, length: PAIRS * (1 + NEGATIVES))
+    positives = documents.slice(axis: 0, start: 0, length: PAIRS)
+    matched = g.sum(q * positives, axes: [-1]) * SCALE
+    all = g.matmul(q, documents.transpose(axes: [1, 0])) * SCALE
     g.output :loss, g.mean(g.sum(all.exp, axes: [-1]).log - matched)
   end
   Torobi::GraphConfig.new(models: { m: graph }, train: [])
 end
 
-# One step's rows, queries first and then their documents, cut into parts
-# small enough to hold.
+# One step's rows, in the three blocks the loss slices out, cut into
+# parts small enough to hold.
+#
+# A row that was mined for fewer negatives than the run asks for would
+# quietly shift every block after it, so it is refused rather than
+# padded: what to do about it is the dataset's to answer.
 def parts_of(config, pairs)
   rows = pairs.map { |row| row.fetch("query_ids") } +
          pairs.map { |row| row.fetch("text_ids") }
+  NEGATIVES.times do |i|
+    rows += pairs.map do |row|
+      mined = row["negative_ids"] || []
+      unless mined.size >= NEGATIVES
+        raise "a pair has #{mined.size} negatives and this run wants #{NEGATIVES} " \
+              "(tools/mine_negatives.rb writes them)"
+      end
+
+      mined[i]
+    end
+  end
   rows.each_slice(PART).map do |slice|
     Torobi::Models::ModernBERT.batch(config, slice, seq: SEQ, pooling: :mean)
   end
@@ -168,7 +192,8 @@ def main
                 .tap { |io| io.sync = true }
   record = { started_at: Time.now.utc.iso8601, encoder:, train: train_path, eval: eval_path,
              seed: SEED, seq: SEQ, pairs: PAIRS, part: PART, lr: LEARNING_RATE,
-             warmup: WARMUP, scale: SCALE, steps:, measurements: [] }
+             warmup: WARMUP, scale: SCALE, negatives: NEGATIVES, steps:,
+             measurements: [] }
 
   Torobi::Session.open(
     seeded(embedder(config)),

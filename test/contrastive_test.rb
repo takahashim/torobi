@@ -42,34 +42,50 @@ class ContrastiveTest < Minitest::Test
   # lengths, so the pooling is doing something.
   def queries = [[1, 5, 2], [1, 7, 9, 4, 2], [1, 3, 2]]
   def documents = [[1, 5, 8, 2], [1, 7, 9, 2], [1, 3, 6, 10, 11, 2]]
-  def rows = queries + documents
+  # One mined negative per pair: a document that looks like an answer to
+  # this query and is not one, which is what makes the loss say anything
+  # once the easy negatives are exhausted.
+  def negatives = [[1, 5, 9, 2], [1, 7, 3, 2], [1, 3, 8, 2]]
+
+  # The order the loss reads them in, and the order the parts arrive in.
+  def rows(with_negatives: false)
+    with_negatives ? queries + documents + negatives : queries + documents
+  end
 
   def embedder(rows: nil)
     Torobi::Models::ModernBERT.embedder(config, seq: SEQ, pooling: :mean, rows:)
   end
 
-  # Multiple negatives ranking loss: every other document in the batch is
-  # a negative for this query, and the only supervision is which pairs
-  # were put in together.
-  def mnrl(g, e)
-    pair = e.reshape(shape: [2, -1, width])
-    half = ->(i) { pair.slice(axis: 0, start: i, length: 1).reshape(shape: [-1, width]) }
-    q = half.call(0)
-    d = half.call(1)
-    matched = g.sum(q * d, axes: [-1]) * SCALE
-    all = g.matmul(q, d.transpose(axes: [1, 0])) * SCALE
+  # Multiple negatives ranking loss.
+  #
+  # The rows arrive as queries, then the document each one matches, then
+  # whatever hard negatives came with them: what a query is scored
+  # against is every document in the batch, and the only supervision is
+  # which pairs were put in together.
+  #
+  # `negatives` is how many came with each pair. At zero this is the
+  # in-batch loss and the negatives are the other queries' documents; a
+  # dataset that has mined some says so here and they join the same
+  # denominator. That is the whole of the difference, which is why the
+  # loss is one expression rather than two.
+  def mnrl(g, e, pairs: PAIRS, negatives: 0)
+    q = e.slice(axis: 0, start: 0, length: pairs)
+    documents = e.slice(axis: 0, start: pairs, length: pairs * (1 + negatives))
+    positives = documents.slice(axis: 0, start: 0, length: pairs)
+    matched = g.sum(q * positives, axes: [-1]) * SCALE
+    all = g.matmul(q, documents.transpose(axes: [1, 0])) * SCALE
     g.sum(all.exp, axes: [-1]).log - matched
   end
 
   # What a machine that could hold the whole batch would run: one graph,
   # one step, no cache.
-  def whole
-    @whole ||= begin
-      model = embedder(rows: ROWS)
+  def whole(negatives: 0)
+    (@whole ||= {})[negatives] ||= begin
+      model = embedder(rows: PAIRS * (2 + negatives))
       Torobi::GraphConfig.new(
         models: { m: model },
         objective: Torobi.objective(m: model) do |g|
-          g.output :loss, g.mean(mnrl(g, g.from_model(:m, :embedding)))
+          g.output :loss, g.mean(mnrl(g, g.from_model(:m, :embedding), negatives:))
         end
       )
     end
@@ -93,10 +109,11 @@ class ContrastiveTest < Minitest::Test
   # The loss over representations computed elsewhere. It holds no
   # parameters and never steps: it is opened to be differentiated by its
   # input.
-  def over_vectors
-    @over_vectors ||= begin
+  def over_vectors(negatives: 0)
+    (@over_vectors ||= {})[negatives] ||= begin
       graph = Torobi.graph do |g|
-        g.output :loss, g.mean(mnrl(g, g.input(:vectors, [ROWS, width])))
+        held = PAIRS * (2 + negatives)
+        g.output :loss, g.mean(mnrl(g, g.input(:vectors, [held, width]), negatives:))
       end
       Torobi::GraphConfig.new(models: { m: graph }, train: [])
     end
@@ -116,8 +133,8 @@ class ContrastiveTest < Minitest::Test
     end
   end
 
-  def parts(per_part)
-    rows.each_slice(per_part).map do |slice|
+  def parts(per_part, with_negatives: false)
+    rows(with_negatives:).each_slice(per_part).map do |slice|
       Torobi::Models::ModernBERT.batch(config, slice, seq: SEQ, pooling: :mean)
     end
   end
@@ -132,12 +149,13 @@ class ContrastiveTest < Minitest::Test
   end
 
   # One cached step, and what the parameters were left at.
-  def cached_step(per_part)
+  def cached_step(per_part, negatives: 0)
     open_encoder(seeded) do |session|
-      Torobi::Session.open(over_vectors, weights: { params: {} }) do |loss|
+      Torobi::Session.open(over_vectors(negatives:), weights: { params: {} }) do |loss|
         cache = Torobi::GradCache.new(session, loss:, tap: "m.embedding",
                                       into: :vectors, seed: :seed)
-        [cache.step(parts(per_part)), parameters_of(session), cache]
+        [cache.step(parts(per_part, with_negatives: negatives.positive?)),
+         parameters_of(session), cache]
       end
     end
   end
@@ -190,5 +208,46 @@ class ContrastiveTest < Minitest::Test
                     "five steps of a contrastive loss should separate the pairs"
     assert(losses.all? { |loss| loss.finite? && loss >= 0.0 },
            "a cross-entropy over the batch is finite and not negative")
+  end
+  # --- and with negatives that were mined rather than met by accident ---
+
+  # The same claim as above, with a document per pair that was put there
+  # to be hard: the cached step is the step the whole batch would take.
+  # What is new is the layout, three blocks rather than two, and the
+  # cache has to keep them in the order the loss slices them out in.
+  def test_a_cached_step_with_hard_negatives_lands_where_the_whole_batch_would
+    with = { negatives: 1 }
+    held = PAIRS * 3
+    direct, direct_parameters = open_encoder(whole(**with)) do |s|
+      batch = Torobi::Models::ModernBERT.batch(config, rows(with_negatives: true),
+                                               seq: SEQ, pooling: :mean)
+      [s.step!(batch), parameters_of(s)]
+    end
+
+    loss, cached_parameters, cache = cached_step(3, **with)
+
+    assert_equal held, cache.rows, "queries, their documents, and their negatives"
+    assert_in_delta direct, loss, 1e-5
+    apart = direct_parameters.zip(cached_parameters).map { |want, got| (want - got).abs }.max
+
+    assert_operator apart, :<, 1e-5
+  end
+
+  # That the negatives are in the denominator rather than along for the
+  # ride. Adding a document to the sum inside the log can only raise it,
+  # so the same model on the same pairs answers a larger loss when there
+  # is more to tell them apart from; a layout that dropped them would
+  # answer the same number twice.
+  def test_a_mined_negative_makes_the_loss_harder
+    without = open_encoder(whole) do |s|
+      s.evaluate(Torobi::Models::ModernBERT.batch(config, rows, seq: SEQ, pooling: :mean))
+    end
+    with = open_encoder(whole(negatives: 1)) do |s|
+      s.evaluate(Torobi::Models::ModernBERT.batch(config, rows(with_negatives: true),
+                                                  seq: SEQ, pooling: :mean))
+    end
+
+    assert_operator with, :>, without,
+                    "the mined documents are not being scored against"
   end
 end
