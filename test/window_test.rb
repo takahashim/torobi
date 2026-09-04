@@ -181,4 +181,34 @@ class WindowTest < Minitest::Test
       assert_equal "closed", entries.last.fetch("event")
     end
   end
+
+  # What a shape's window is kept in is bounded, because the shapes are
+  # no longer few: since a batch is padded to its own longest row
+  # (docs/plan.md 15.63) a run meets a different length most steps, and a
+  # window is seq*seq*4 bytes.
+  def test_the_cache_holds_a_bounded_number_of_shapes
+    cache = Torobi::Models::Windows.new(limit: 2)
+    built = []
+    3.times { |i| cache.fetch(i) { built << i } }
+
+    assert_equal [0, 1, 2], built
+    assert_equal 2, cache.size, "the oldest fell out"
+    # And what fell out is rebuilt rather than lost.
+    cache.fetch(0) { built << 0 }
+
+    assert_equal [0, 1, 2, 0], built
+  end
+
+  # Least recently used: a shape that keeps being asked for stays.
+  def test_asking_again_keeps_a_shape
+    cache = Torobi::Models::Windows.new(limit: 2)
+    built = []
+    cache.fetch(:a) { built << :a }
+    cache.fetch(:b) { built << :b }
+    cache.fetch(:a) { built << :a }
+    cache.fetch(:c) { built << :c }
+    cache.fetch(:a) { built << :a }
+
+    assert_equal %i[a b c], built, "a was still held"
+  end
 end

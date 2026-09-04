@@ -438,22 +438,26 @@ module Torobi
         { mask: padding, window: window(config, seq:) }
       end
 
+      # What a shape's window is kept in, bounded (`Models::Windows`).
+      WINDOWS = Windows.new
+
       # The sliding window the local layers see, [1, 1, seq, seq].
       #
       # It depends on the sequence length and the configured width and on
-      # nothing in the batch, so there is one of it however many rows there
-      # are, and it is built once per shape and handed out again. A run
-      # does thousands of steps and this is the same bytes every time.
+      # nothing in the batch, so there is one of it however many rows
+      # there are, and it is built once per shape and handed out again.
       def window(config, seq:)
         half = config.local_attention / 2
-        (@windows ||= {})[[seq, half]] ||= TensorData.runs(
-          [1, 1, seq, seq],
-          (0...seq).flat_map do |i|
-            first = [i - half, 0].max
-            last = [i + half, seq - 1].min
-            [[first, NEGATIVE], [last - first + 1, 0.0], [seq - 1 - last, NEGATIVE]]
-          end
-        )
+        WINDOWS.fetch([seq, half]) do
+          TensorData.runs(
+            [1, 1, seq, seq],
+            (0...seq).flat_map do |i|
+              first = [i - half, 0].max
+              last = [i + half, seq - 1].min
+              [[first, NEGATIVE], [last - first + 1, 0.0], [seq - 1 - last, NEGATIVE]]
+            end
+          )
+        end
       end
     end
   end

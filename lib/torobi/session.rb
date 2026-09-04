@@ -106,34 +106,9 @@ module Torobi
     def self.open(config, weights: nil, weights_file: nil, pretrained: nil, fresh: [],
                   optimizer: DEFAULT_OPTIMIZER, seed: DEFAULT_SEED,
                   journal: nil, io: nil, dataset: nil)
-      if !fresh.empty? && pretrained.nil?
-        raise ArgumentError, "fresh: names what no file holds, so it goes with pretrained:"
-      end
-
-      sources = { weights:, weights_file:, pretrained: }.compact
-      unless sources.size == 1
-        raise ArgumentError,
-              "a session needs its parameters, from exactly one place: " \
-              "weights: {params: {path => {shape:, data:}}}, " \
-              "weights_file: a safetensors path, or " \
-              "pretrained: {model => path}" \
-              "#{" (given #{sources.keys.join(", ")})" unless sources.empty?}"
-      end
-
+      source = Weights.of(weights:, weights_file:, pretrained:, fresh:)
       Preflight.check!
-      native =
-        if weights_file
-          Native::Session.open_from_file(config.canonical_json, weights_file.to_s,
-                                         JSON.generate(optimizer), seed)
-        elsif pretrained
-          files = pretrained.to_h { |model, path| [model.to_s, path.to_s] }
-          Native::Session.open_pretrained(config.canonical_json, JSON.generate(files),
-                                          JSON.generate(Array(fresh).map(&:to_s)),
-                                          JSON.generate(optimizer), seed)
-        else
-          Native::Session.open(config.canonical_json, JSON.generate(inline(weights)),
-                               JSON.generate(optimizer), seed)
-        end
+      native = source.open(config, optimizer, seed)
       # Gathered whether or not anything is journalling: a checkpoint
       # records it too, so that what it holds can be identified later
       # (docs/plan.md section 11.2).
@@ -344,9 +319,7 @@ module Torobi
       end
 
       wanted = Array(outputs).map(&:to_s)
-      @native.forward(Batch.pack(batch), wanted).to_h do |name, dtype, shape, bytes|
-        [name, TensorData.new(shape, bytes, dtype: dtype.to_sym)]
-      end
+      values_of(@native.forward(Batch.pack(batch), wanted))
     end
 
     # The same batch for `steps` steps. For fixed-data spikes and tests;
@@ -569,16 +542,15 @@ module Torobi
     # the names.
     def output_names = @native.output_names
 
-    # What the last step's taps saw, by name. Read-only, so it needs no
-    # journal entry of its own; `observe` is how a decision made on one
-    # gets recorded.
     # What the last step's taps saw, by tap name. A scalar tap (a loss,
     # say) comes back as a Float, since a caller compares it or writes it
     # down; anything with a shape comes back as a TensorData.
+    #
+    # Read-only, so it needs no journal entry of its own; `observe` is
+    # how a decision made on one gets recorded.
     def tapped
-      @native.tapped.to_h do |name, dtype, shape, bytes|
-        data = TensorData.new(shape, bytes, dtype: dtype.to_sym)
-        [name, shape.empty? ? data.to_a.first : data]
+      values_of(@native.tapped).transform_values do |data|
+        data.shape.empty? ? data.to_a.first : data
       end
     end
 
@@ -619,20 +591,27 @@ module Torobi
     def field_gradients(batch, of:)
       needs_loss!("a gradient")
       names = Array(of).map(&:to_s)
-      @native.field_gradients(Batch.pack(batch), names).to_h do |name, dtype, shape, bytes|
-        [name, TensorData.new(shape, bytes, dtype: dtype.to_sym)]
-      end
+      values_of(@native.field_gradients(Batch.pack(batch), names))
     end
 
     # The gradients for `batch`, by parameter path. Does not update anything.
     def gradients(batch)
       needs_loss!("a gradient")
-      @native.gradients(Batch.pack(batch)).to_h do |path, dtype, shape, bytes|
-        [path, TensorData.new(shape, bytes, dtype: dtype.to_sym)]
-      end
+      values_of(@native.gradients(Batch.pack(batch)))
     end
 
     private
+
+    # What the engine answers with, as values by name.
+    #
+    # Four calls come back the same way, because the boundary carries
+    # one shape of answer: the name, the dtype and shape readable, the
+    # payload packed. How to read that is one fact and lives once.
+    def values_of(answered)
+      answered.to_h do |name, dtype, shape, bytes|
+        [name, TensorData.new(shape, bytes, dtype: dtype.to_sym)]
+      end
+    end
 
     # What a run without a loss cannot do.
     #
@@ -648,17 +627,6 @@ module Torobi
             "no model output is an f32 scalar. That is what a config opened for " \
             "inference looks like, and `forward` is what it can do."
     end
-
-    # Inline weights as JSON: a TensorData spells its numbers out here.
-    #
-    # That is what this path is, and part of why it is the small one. A
-    # parameter worth keeping as bytes arrives as `weights_file:` or
-    # `pretrained:`, which never becomes numbers in Ruby at all.
-    def self.inline(weights)
-      params = weights.fetch(:params) { weights.fetch("params") }
-      { params: params.to_h { |path, t| [path, t.is_a?(TensorData) ? t.to_h : t] } }
-    end
-    private_class_method :inline
 
     # Which model to export when the run holds only one.
     #

@@ -21,20 +21,76 @@ module Torobi
     # Where a hook may fire. Closed on purpose: a name here is a promise.
     EVENTS = %i[step span_end plateau nan checkpoint_written].freeze
 
+    # The losses a run has seen, kept the way anything asks about them.
+    #
+    # `plateaued?` asks two things: the last few readings, and the best of
+    # everything before them. An Array answers both and grows for the
+    # length of the run, which was fine until you notice that every window
+    # carried a copy of it: measured at 40,000 windows that was 10 us a
+    # step and rising. Nothing beside a training step, and unbounded all
+    # the same.
+    #
+    # So the recent readings are kept and the rest are folded into their
+    # minimum as they fall out, which is all anything asked of them.
+    class History
+      # How many readings are kept whole. Far past any patience anybody
+      # sets, so what falls out is only ever read as "the best before".
+      KEEP = 10_000
+
+      def initialize(keep: KEEP)
+        @keep = keep
+        @recent = []
+        @dropped = nil
+        @size = 0
+      end
+
+      # How many readings there have been, not how many are kept.
+      attr_reader :size
+
+      def <<(loss)
+        @size += 1
+        @recent << loss
+        return self if @recent.size <= @keep
+
+        gone = @recent.shift
+        @dropped = gone if number?(gone) && (@dropped.nil? || gone < @dropped)
+        self
+      end
+
+      # The last `count` readings, oldest first.
+      def last(count) = @recent.last(count)
+
+      # The best reading before the last `count`, or nil if there is none.
+      def best_before(count)
+        kept = @recent[0..-(count + 1)] || []
+        [@dropped, *kept.select { |loss| number?(loss) }].compact.min
+      end
+
+      def to_a = @recent.dup
+
+      private
+
+      def number?(loss) = loss.is_a?(Numeric) && loss.finite?
+    end
+
     # What a hook is handed. A reading of the run, plus the session, whose
     # window capabilities are the hook's capabilities.
-    Event = Data.define(:name, :session, :step, :loss, :history) do
+    Event = Data.define(:name, :session, :step, :loss, :readings) do
+      # The losses so far, as an Array. Built when something asks, which
+      # most events never are.
+      def history = readings.to_a
+
       # Whether the loss has stopped falling: nothing in the last
       # `patience` readings improved on the best before them, by more than
       # `by`. Readings that are not numbers do not count as improvement.
       def plateaued?(patience: 3, by: 1e-4)
-        return false if history.size <= patience
+        return false if readings.size <= patience
 
-        recent = history.last(patience)
-        best_before = history[0..-(patience + 1)].select { |l| l.is_a?(Numeric) && l.finite? }.min
+        best_before = readings.best_before(patience)
         return false unless best_before
 
-        recent.none? { |loss| loss.is_a?(Numeric) && loss.finite? && loss < best_before - by }
+        readings.last(patience)
+                .none? { |loss| loss.is_a?(Numeric) && loss.finite? && loss < best_before - by }
       end
 
       def finite? = loss&.finite?
@@ -43,7 +99,7 @@ module Torobi
     def initialize(session)
       @session = session
       @registered = []
-      @history = []
+      @history = History.new
       @firing = false
     end
 
@@ -80,7 +136,7 @@ module Torobi
       return if @registered.empty? || @firing
 
       @history << loss if name == :step && loss
-      event = Event.new(name:, session: @session, step:, loss:, history: @history.dup)
+      event = Event.new(name:, session: @session, step:, loss:, readings: @history)
       @firing = true
       @registered.each do |hook|
         next unless hook[:event] == name

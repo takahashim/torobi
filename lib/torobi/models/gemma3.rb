@@ -243,15 +243,20 @@ module Torobi
       #
       # Built once per shape and handed out again: it is the same bytes at
       # every step, and at sequence 512 it is a megabyte.
+      # What a shape's window is kept in, bounded (`Models::Windows`).
+      WINDOWS = Windows.new
+
       def window(config, seq:)
         width = config.sliding_window
-        (@windows ||= {})[[seq, width]] ||= TensorData.runs(
-          [1, 1, seq, seq],
-          (0...seq).flat_map do |i|
-            first = [i - width + 1, 0].max
-            [[first, NEGATIVE], [i - first + 1, 0.0], [seq - 1 - i, NEGATIVE]]
-          end
-        )
+        WINDOWS.fetch([seq, width]) do
+          TensorData.runs(
+            [1, 1, seq, seq],
+            (0...seq).flat_map do |i|
+              first = [i - width + 1, 0].max
+              [[first, NEGATIVE], [i - first + 1, 0.0], [seq - 1 - i, NEGATIVE]]
+            end
+          )
+        end
       end
     end
   end

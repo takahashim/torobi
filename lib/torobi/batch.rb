@@ -22,7 +22,13 @@ module Torobi
   # already hold packed data can pass the String and skip even this.
   module Batch
     # dtype => the pack directive for a flat Array of that type.
-    FORMATS = { "f32" => "f*", "i32" => "l<*" }.freeze
+    #
+    # Derived rather than written again: which dtypes cross the boundary
+    # and how each one packs is one fact, and it is `TensorData`'s. Two
+    # tables meant a dtype could be added to one of them.
+    FORMATS = TensorData::FORMATS
+              .to_h { |dtype, (directive, _)| [dtype.to_s, "#{directive}*"] }
+              .freeze
     DEFAULT_DTYPE = "f32"
 
     module_function

@@ -130,9 +130,6 @@ module Torobi
 
     private
 
-    # Which models are trained. Default: all of them, which is right for a
-    # single model and wrong for nothing, since a teacher is named
-    # explicitly the moment there is one.
     # Which models a run differentiates. Omitted means all of them, which
     # is what training is; `train: []` means none, which is a graph opened
     # to be read rather than trained (a loss over representations computed
@@ -183,14 +180,11 @@ module Torobi
       end
       # Read as an f32 at the boundary, which is the whole of why this is
       # checked here rather than found out on the first step.
-      unless dtype == :f32
-        raise ConfigError,
-              "the loss must be f32, and this one is #{dtype}; a model held in " \
-              "another precision says where it comes back (g.cast(x, :f32))"
-      end
       return if dtype == :f32
 
-      raise ConfigError, "the loss must be f32, not #{dtype}"
+      raise ConfigError,
+            "the loss must be f32, and this one is #{dtype}; a model held in " \
+            "another precision says where it comes back (g.cast(x, :f32))"
     end
 
     # Without an objective, the single model's own single output is the
@@ -240,13 +234,11 @@ module Torobi
                 "named #{model_name.inspect} (#{models.keys.map(&:inspect).join(", ")})"
 
         shape, dtype = graph.output_signature(output)
-        unless shape == input.shape && dtype == input.dtype
-          raise ConfigError,
-                "#{where} expects #{dtype}#{input.shape.inspect} from " \
-                "#{model_name}.#{output}, which is #{dtype}#{shape.inspect}"
-        end
-      rescue ConfigError => e
-        raise ConfigError, e.message
+        next if shape == input.shape && dtype == input.dtype
+
+        raise ConfigError,
+              "#{where} expects #{input.dtype}#{input.shape.inspect} from " \
+              "#{model_name}.#{output}, which is #{dtype}#{shape.inspect}"
       end
     end
   end

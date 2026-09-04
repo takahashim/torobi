@@ -42,6 +42,22 @@ class WiringTest < Minitest::Test
     assert_equal({ "loss" => "node:3" }, config.objective.outputs)
   end
 
+  # The two halves are written separately, so a config that arrives from
+  # somewhere else (`from_h`, an older writer) can disagree about what an
+  # output is. The message is the only thing a reader has then, so it has
+  # to name both sides rather than the same side twice.
+  def test_an_objective_that_expects_another_dtype_is_told_both
+    raw = distillation.to_h
+    input = raw.fetch("objective").fetch("inputs").first
+
+    assert_equal "f32", input.fetch("dtype"), "the model declares f32"
+    input["dtype"] = "i32"
+    e = assert_raises(Torobi::ConfigError) { Torobi::GraphConfig.from_h(raw) }
+
+    assert_match(/expects i32/, e.message, "what the objective asked for")
+    assert_match(/which is f32/, e.message, "and what the model declares")
+  end
+
   def test_parameters_are_namespaced_and_only_the_trained_are_differentiated
     config = distillation
 
