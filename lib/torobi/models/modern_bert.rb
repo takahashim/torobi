@@ -246,10 +246,10 @@ module Torobi
             x = body
             pooled = pool(x)
             # ModernBERT's head: a dense, gelu, a norm, then the classifier.
-            pooled = norm(
-              linear(pooled, @config.hidden_size, name: "head.dense", bias: false).gelu,
-              name: "head.norm"
-            )
+            pooled = scope("head") do
+              norm(linear(pooled, @config.hidden_size, name: "dense", bias: false).gelu,
+                   name: "norm")
+            end
             # `linear` names the node after the parameter scope, so this is
             # already called "classifier"; the output name is separate.
             output :logits, linear(pooled, @config.num_labels, name: "classifier",
@@ -326,9 +326,11 @@ module Torobi
                     padding
                   end
 
-          x = embedding(ids, vocab: @config.vocab_size, dim: @config.hidden_size,
-                          name: "embeddings.tok_embeddings", dtype: @build.dtype)
-          x = norm(x, name: "embeddings.norm")
+          x = scope("embeddings") do
+            table = embedding(ids, vocab: @config.vocab_size, dim: @config.hidden_size,
+                              name: "tok_embeddings", dtype: @build.dtype)
+            norm(table, name: "norm")
+          end
 
           @config.num_hidden_layers.times do |i|
             mask = @config.global?(i) ? padding : local
@@ -351,14 +353,13 @@ module Torobi
           theta = @config.theta(index)
           # One projection to three times the width, cut into q, k and v:
           # ModernBERT fuses them where the decoders keep three.
-          q, k, v = scope("attn") do
-            linear(x, @config.hidden_size * 3, name: "Wqkv", bias: false).split(3, axis: -1)
-          end
-          attended = sdpa(q.split_heads(heads).rope(theta:),
-                          k.split_heads(heads).rope(theta:),
-                          v.split_heads(heads),
-                          mask:)
           scope("attn") do
+            q, k, v = linear(x, @config.hidden_size * 3, name: "Wqkv",
+                                bias: false).split(3, axis: -1)
+            attended = sdpa(q.split_heads(heads).rope(theta:),
+                            k.split_heads(heads).rope(theta:),
+                            v.split_heads(heads),
+                            mask:)
             linear(attended.merge_heads, @config.hidden_size, name: "Wo", bias: false)
           end
         end

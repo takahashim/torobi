@@ -217,27 +217,30 @@ module Torobi
           dim = @config.head_dim
           theta = @config.rope_theta
           bias = @config.attention_bias
-          q = linear(x, heads * dim, name: "self_attn.q_proj", bias:)
-          k = linear(x, kv * dim, name: "self_attn.k_proj", bias:)
-          v = linear(x, kv * dim, name: "self_attn.v_proj", bias:)
-          # The key heads are fewer and stay that way: the backend takes
-          # them untiled, which is the whole saving.
-          attended = sdpa(q.split_heads(heads).rope(theta:),
-                          k.split_heads(kv).rope(theta:),
-                          v.split_heads(kv),
-                          causal: true)
-          linear(attended.merge_heads, @config.hidden_size,
-                 name: "self_attn.o_proj", bias: false)
+          scope("self_attn") do
+            q = linear(x, heads * dim, name: "q_proj", bias:)
+            k = linear(x, kv * dim, name: "k_proj", bias:)
+            v = linear(x, kv * dim, name: "v_proj", bias:)
+            # The key heads are fewer and stay that way: the backend takes
+            # them untiled, which is the whole saving.
+            attended = sdpa(q.split_heads(heads).rope(theta:),
+                            k.split_heads(kv).rope(theta:),
+                            v.split_heads(kv),
+                            causal: true)
+            linear(attended.merge_heads, @config.hidden_size, name: "o_proj", bias: false)
+          end
         end
 
         # SwiGLU: one projection gated by another, through SiLU, then back
         # down. SiLU is `x * sigmoid(x)`, which is two ops here rather than
         # one; it is what the name means, and nothing is fused away.
         def mlp(x)
-          gate = linear(x, @config.intermediate_size, name: "mlp.gate_proj", bias: false)
-          up = linear(x, @config.intermediate_size, name: "mlp.up_proj", bias: false)
-          linear((gate * gate.sigmoid) * up, @config.hidden_size,
-                 name: "mlp.down_proj", bias: false)
+          scope("mlp") do
+            gate = linear(x, @config.intermediate_size, name: "gate_proj", bias: false)
+            up = linear(x, @config.intermediate_size, name: "up_proj", bias: false)
+            linear((gate * gate.sigmoid) * up, @config.hidden_size,
+                   name: "down_proj", bias: false)
+          end
         end
 
         # Every norm here is an RMS norm with a gain and no bias.

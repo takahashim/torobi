@@ -177,35 +177,38 @@ module Torobi
           kv = @config.num_key_value_heads
           dim = @config.head_dim
           theta = @config.theta(index)
-          q = linear(x, heads * dim, name: "self_attn.q_proj", bias: false).split_heads(heads)
-          k = linear(x, kv * dim, name: "self_attn.k_proj", bias: false).split_heads(kv)
-          v = linear(x, kv * dim, name: "self_attn.v_proj", bias: false).split_heads(kv)
-          # Normalized per head, which is why it happens after the split
-          # and before the rotation.
-          q = norm(q, name: "self_attn.q_norm").rope(theta:)
-          k = norm(k, name: "self_attn.k_norm").rope(theta:)
+          scope("self_attn") do
+            q = linear(x, heads * dim, name: "q_proj", bias: false).split_heads(heads)
+            k = linear(x, kv * dim, name: "k_proj", bias: false).split_heads(kv)
+            v = linear(x, kv * dim, name: "v_proj", bias: false).split_heads(kv)
+            # Normalized per head, which is why it happens after the split
+            # and before the rotation.
+            q = norm(q, name: "q_norm").rope(theta:)
+            k = norm(k, name: "k_norm").rope(theta:)
 
-          attended =
-            if @config.sliding?(index)
-              # The window is already a triangle: what a position may see
-              # is the recent past, and the past is the causal part of it.
-              sdpa(q, k, v, mask: window, scale: @config.scale)
-            else
-              sdpa(q, k, v, causal: true, scale: @config.scale)
-            end
-          # `merge_heads` lands on the heads times their width, which for
-          # Gemma is not the hidden size: 270m is four heads of 256 over a
-          # hidden state of 640. The projection that follows says the rest.
-          linear(attended.merge_heads, @config.hidden_size,
-                 name: "self_attn.o_proj", bias: false)
+            attended =
+              if @config.sliding?(index)
+                # The window is already a triangle: what a position may see
+                # is the recent past, and the past is the causal part of it.
+                sdpa(q, k, v, mask: window, scale: @config.scale)
+              else
+                sdpa(q, k, v, causal: true, scale: @config.scale)
+              end
+            # `merge_heads` lands on the heads times their width, which for
+            # Gemma is not the hidden size: 270m is four heads of 256 over a
+            # hidden state of 640. The projection that follows says the rest.
+            linear(attended.merge_heads, @config.hidden_size, name: "o_proj", bias: false)
+          end
         end
 
         # GeGLU with the tanh approximation, which is the function Gemma
         # was trained with.
         def mlp(x)
-          gate = linear(x, @config.intermediate_size, name: "mlp.gate_proj", bias: false)
-          up = linear(x, @config.intermediate_size, name: "mlp.up_proj", bias: false)
-          linear(gate.gelu_tanh * up, @config.hidden_size, name: "mlp.down_proj", bias: false)
+          scope("mlp") do
+            gate = linear(x, @config.intermediate_size, name: "gate_proj", bias: false)
+            up = linear(x, @config.intermediate_size, name: "up_proj", bias: false)
+            linear(gate.gelu_tanh * up, @config.hidden_size, name: "down_proj", bias: false)
+          end
         end
 
         # Every norm here scales by `1 + w`, which is Gemma's own

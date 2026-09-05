@@ -75,6 +75,30 @@ class DslTest < Minitest::Test
     assert_equal [nil, nil, 2, 4], shape
   end
 
+  # A component names its parameters under a scope, and a caller may
+  # write the same path with a dot instead. The two are the same graph,
+  # down to the node names a tap reaches for and the paths an adapter
+  # matches against, so a description may say which of them it means
+  # (`Models::Llama` says it with scopes) without saying anything else.
+  def test_a_scope_and_a_dotted_name_are_the_same_path
+    dotted = Torobi.graph do |g|
+      x = g.input :x, [nil, 8]
+      g.scope("layers.0") { g.output :out, g.linear(x, 8, name: "mlp.gate_proj", bias: false) }
+    end
+    scoped = Torobi.graph do |g|
+      x = g.input :x, [nil, 8]
+      g.scope("layers.0") do
+        g.scope("mlp") { g.output :out, g.linear(x, 8, name: "gate_proj", bias: false) }
+      end
+    end
+
+    assert_equal %w[layers.0.mlp.gate_proj.weight], scoped.parameters.map(&:path)
+    assert_equal dotted.parameters.map(&:path), scoped.parameters.map(&:path)
+    assert_equal dotted.nodes.filter_map(&:name), scoped.nodes.filter_map(&:name)
+    assert_equal Torobi::GraphConfig.new(models: { m: dotted }, train: []).digest,
+                 Torobi::GraphConfig.new(models: { m: scoped }, train: []).digest
+  end
+
   # --- reading a wide row as heads ---
 
   # The pair is a `reshape` and a `transpose` and nothing else, so a
