@@ -171,7 +171,7 @@ module Torobi
         Torobi.graph do |g|
           # One description per side, because each reads its own fields at
           # its own length; one builder, because they are one graph.
-          g.adapting(adapter) do
+          g.adapting adapter do
             sides.each do |side, rows|
               build = Build.new(seq: nil, rows:, dtype:, fields: "#{side}.")
               Describe.new(g, config, build, encoder_prefix:)
@@ -227,12 +227,16 @@ module Torobi
         # One vector per row, named so a tap reads it without a second
         # graph, and declared as this side's output.
         def embed(adapter, pooling:, normalize:)
-          adapting(adapter) { emit_embedding(:embedding, pooling:, normalize:) }
+          adapting adapter do
+            emit_embedding(:embedding, pooling:, normalize:)
+          end
         end
 
         # The same, as one of several sides sharing one set of weights.
         def tower(side, pooling:, normalize:)
-          sharing(side) { emit_embedding(:"#{side}.embedding", pooling:, normalize:) }
+          sharing side do
+            emit_embedding(:"#{side}.embedding", pooling:, normalize:)
+          end
         end
 
         # The bare encoder, with its hidden state named and declared.
@@ -242,11 +246,11 @@ module Torobi
 
         # The classifier's body, so that `adapting` has something to wrap.
         def classify(adapter)
-          adapting(adapter) do
+          adapting adapter do
             x = body
             pooled = pool(x)
             # ModernBERT's head: a dense, gelu, a norm, then the classifier.
-            pooled = scope("head") do
+            pooled = scope "head" do
               norm(linear(pooled, @config.hidden_size, name: "dense", bias: false).gelu,
                    name: "norm")
             end
@@ -263,7 +267,9 @@ module Torobi
         def body
           return encode if @encoder_prefix.to_s.empty?
 
-          scope(@encoder_prefix) { encode }
+          scope @encoder_prefix do
+            encode
+          end
         end
 
         # A vector of length one, so a dot product is a cosine.
@@ -326,7 +332,7 @@ module Torobi
                     padding
                   end
 
-          x = scope("embeddings") do
+          x = scope "embeddings" do
             table = embedding(ids, vocab: @config.vocab_size, dim: @config.hidden_size,
                               name: "tok_embeddings", dtype: @build.dtype)
             norm(table, name: "norm")
@@ -334,7 +340,9 @@ module Torobi
 
           @config.num_hidden_layers.times do |i|
             mask = @config.global?(i) ? padding : local
-            x = scope("layers.#{i}") { layer(x, i, mask) }
+            x = scope "layers.#{i}" do
+              layer(x, i, mask)
+            end
           end
           norm(x, name: "final_norm")
         end
@@ -353,7 +361,7 @@ module Torobi
           theta = @config.theta(index)
           # One projection to three times the width, cut into q, k and v:
           # ModernBERT fuses them where the decoders keep three.
-          scope("attn") do
+          scope "attn" do
             q, k, v = linear(x, @config.hidden_size * 3, name: "Wqkv",
                                 bias: false).split(3, axis: -1)
             attended = sdpa(q.split_heads(heads).rope(theta:),
@@ -367,7 +375,7 @@ module Torobi
         # GeGLU: one projection to twice the width, gelu on the first half,
         # gated by the second, then back down.
         def mlp(x)
-          scope("mlp") do
+          scope "mlp" do
             wide = linear(x, @config.intermediate_size * 2, name: "Wi", bias: false)
             gate, up = wide.split(2, axis: -1)
             linear(gate.gelu * up, @config.hidden_size, name: "Wo", bias: false)

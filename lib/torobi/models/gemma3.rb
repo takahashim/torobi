@@ -126,7 +126,12 @@ module Torobi
       # takes is the value flowing through it.
       class Describe < Description
         def causal_lm(adapter)
-          hidden = adapting(adapter) { name("hidden", scope("model") { encode }) }
+          hidden = adapting adapter do
+            encoded = scope "model" do
+              encode
+            end
+            name "hidden", encoded
+          end
           output :logits, head(hidden)
         end
 
@@ -155,7 +160,9 @@ module Torobi
                    end
 
           @config.num_hidden_layers.times do |i|
-            x = scope("layers.#{i}") { layer(x, i, window) }
+            x = scope "layers.#{i}" do
+              layer(x, i, window)
+            end
           end
           norm(x, name: "norm")
         end
@@ -177,7 +184,7 @@ module Torobi
           kv = @config.num_key_value_heads
           dim = @config.head_dim
           theta = @config.theta(index)
-          scope("self_attn") do
+          scope "self_attn" do
             q = linear(x, heads * dim, name: "q_proj", bias: false).split_heads(heads)
             k = linear(x, kv * dim, name: "k_proj", bias: false).split_heads(kv)
             v = linear(x, kv * dim, name: "v_proj", bias: false).split_heads(kv)
@@ -204,7 +211,7 @@ module Torobi
         # GeGLU with the tanh approximation, which is the function Gemma
         # was trained with.
         def mlp(x)
-          scope("mlp") do
+          scope "mlp" do
             gate = linear(x, @config.intermediate_size, name: "gate_proj", bias: false)
             up = linear(x, @config.intermediate_size, name: "up_proj", bias: false)
             linear(gate.gelu_tanh * up, @config.hidden_size, name: "down_proj", bias: false)

@@ -325,7 +325,7 @@ module Torobi
       # gelu on the act half, a projection back down.
       def geglu(x, d_hidden, name:)
         d_in = concrete_last_dim!(x, "geglu #{scoped(name).inspect}")
-        scope(name) do
+        scope name do
           a, gate = linear(x, d_hidden * 2, name: "wi", bias: false).split(2, axis: -1)
           linear(a.gelu * gate, d_in, name: "wo", bias: false)
         end

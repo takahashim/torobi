@@ -152,7 +152,12 @@ module Torobi
       # takes is the value flowing through it.
       class Describe < Description
         def causal_lm(adapter)
-          hidden = adapting(adapter) { name("hidden", scope("model") { encode }) }
+          hidden = adapting adapter do
+            encoded = scope "model" do
+              encode
+            end
+            name "hidden", encoded
+          end
           # Not named: an untied head is a `linear`, which names its own
           # node after its parameters, and `forward` reaches an output by
           # the name the output has.
@@ -184,7 +189,9 @@ module Torobi
           x = embedding(ids, vocab: @config.vocab_size, dim: @config.hidden_size,
                         name: "embed_tokens", dtype: @build.dtype)
           @config.num_hidden_layers.times do |i|
-            x = scope("layers.#{i}") { layer(x) }
+            x = scope "layers.#{i}" do
+              layer(x)
+            end
           end
           norm(x, name: "norm")
         end
@@ -217,7 +224,7 @@ module Torobi
           dim = @config.head_dim
           theta = @config.rope_theta
           bias = @config.attention_bias
-          scope("self_attn") do
+          scope "self_attn" do
             q = linear(x, heads * dim, name: "q_proj", bias:)
             k = linear(x, kv * dim, name: "k_proj", bias:)
             v = linear(x, kv * dim, name: "v_proj", bias:)
@@ -235,7 +242,7 @@ module Torobi
         # down. SiLU is `x * sigmoid(x)`, which is two ops here rather than
         # one; it is what the name means, and nothing is fused away.
         def mlp(x)
-          scope("mlp") do
+          scope "mlp" do
             gate = linear(x, @config.intermediate_size, name: "gate_proj", bias: false)
             up = linear(x, @config.intermediate_size, name: "up_proj", bias: false)
             linear((gate * gate.sigmoid) * up, @config.hidden_size,

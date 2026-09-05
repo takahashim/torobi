@@ -71,6 +71,15 @@ Layout/FirstHashElementIndentation:
 Gemspec/DevelopmentDependencies:
   Enabled: false
 
+# `scope`, `adapting` and `sharing` are the Graph DSL's block-scoped
+# declarations (`DSL::Builder`): what they say is that everything inside
+# is named under a prefix, adapted, or one set of weights read again.
+# That is a fact about the call and not about how many lines it happens
+# to wrap, so they read `scope "mlp" do ... end` whether the body is one
+# line or ten. `lambda`, `proc` and `it` are the cop's own defaults.
+Style/BlockDelimiters:
+  AllowedMethods: ['lambda', 'proc', 'it', 'scope', 'adapting', 'sharing']
+
 # A `Data.define` with a block is the shape the constant assignment
 # already has. Turning it into a superclass reads as a bigger claim than
 # is being made.
