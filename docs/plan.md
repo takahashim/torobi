@@ -3502,6 +3502,66 @@ IR は 1 ノードも変わっていない。
 意味を変える変更は逆に digest が動くので、コミットを分ける。adapter の修正でも digest は動き、
 動いた先が移動前の値と一致することが確認になった。
 
+### 15.72 名前どおりの Llama。rope の周波数を engine に渡す(2026-09-06)
+
+§15.53 で `Models::Llama` は一族の記述になったが、**その一族の当人が入れなかった**。
+Llama 3.1 / 3.2 / 3.3 はどれも `rope_scaling` を持ち、`from_hash` はそれを断っていた。
+Qwen2 と sarashina2.2 が通って Llama が通らない記述を `Llama` と呼んでいたことになる。
+
+**scaling は「長くなってから効くもの」ではない。** llama3 scaling は inv_freq そのものを
+帯ごとに割り戻すので、位置 0 から全部変わる。seq 192 でも別のモデルであり、だから
+「短いうちは同じ」という逃げ道は無い。断っていたのは正しく、実装するしかない。
+
+**engine には式ではなく数を渡した。** `rope` の属性に `freqs` を足し、`angle[p, i]` を
+`p * freqs[i]` にする。どの周波数にするかはモデルの側の算術であり、engine が llama3 と
+yarn を知る理由は無い。Ruby 側は `Models::Llama::RopeScaling` が config を読んで 32 個
+(head_dim 64 の場合) の数にする。
+
+| 帯 | 波長 | どうなるか |
+| --- | --- | --- |
+| 速い | < `original_context / high_freq_factor` | そのまま |
+| 中間 | その間 | 2 つの間を補間する |
+| 遅い | > `original_context / low_freq_factor` | `factor` で割る |
+
+**`llama3` 以外は断ったままにした。** `linear` と `dynamic` は別の算術で、`yarn` は
+attention を読む scale も変える。「近いから同じ式で」は、まさにこの節が直している種類の
+誤りである。
+
+**digest は 1 つも動いていない。** `freqs` は scaling がある場合にしか emit しないので、
+属性そのものが存在しない。確かめ方は §15.71 と同じで、Qwen2.5-0.5B / sarashina2.2-0.5b /
+gemma-3-270m の 3 つのグラフを変更の前後で書き出し、バイトで比較した
+(`180330a1…`、完全一致)。
+
+**小さいモデルでは scaling が恒等写像になる。** 最初、既存の小モデル (hidden 8 / 4 head =
+head_dim 2) で「scaled と unscaled は違う」を書いたら通らなかった。pair が 1 つだけで
+波長は 2π、つまり全部「速い」帯に入るので、llama3 は何もしない。**テストが主張の逆を
+証明しかけていた。** head_dim 8 まで広げると波長 6300 が中間帯に入り、logits が実際に動く。
+
+参照実装との照合は、まず式の水準で行った。transformers の `_compute_llama3_parameters` を
+標準ライブラリだけの Python に書き写し、Ruby の 32 個と比べた。**相対差の最大は 0.0**。
+帯の分かれ方も見えている (1.0 が 21 個、0.7067 / 0.457 / 0.2698 / 0.1294 と落ちて、
+残り 7 個が 0.03125 = 1/32)。
+
+**まだやっていないのは、公開チェックポイントに対する数値の照合である。** これまでの
+モデルと同じ基準 (transformers の forward と 1e-6 台で一致) を満たすには、Llama-3.2-1B の
+重みと Python 環境が要る。**この節は「建てられるようになった」までであり、「合っている」は
+まだ言えない。**
+
+ライセンスは申請したが、`meta-llama` の gate は `manual` であり、2026-09-06 時点で
+"awaiting a review from the repo authors" のままである (トークンは正常で、同じもので
+`google/gemma-3-270m` は 200 を返す)。承認が下りたら `rake oracle:llama3` と
+`rake oracle:llama3_forward` を走らせる。
+
+**待つ間に、構造だけは確かめた。** 同じモデルの再アップロード (`unsloth/Llama-3.2-1B`) の
+safetensors ヘッダに対して、この記述は **146 個のテンソルに過不足なく一致する**
+(欠けも余りも形の食い違いも無し、rope ノード 32 個がそれぞれ 32 個の周波数を持つ)。
+`rope_scaling` が唯一の障害だったという見込みは当たっていた。**これを oracle として記録は
+しない。** 再アップロードは公式のファイルではなく (`unsloth_fixed: true` と `pad_token_id`
+の追加がある)、artifact が名指すのは公開されたモデルでなければならない。
+
+sliding window は断ったままである。こちらは seq が window を超えない限り causal と厳密に
+同じなので、性質が違う (別の節にする)。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

@@ -27,18 +27,79 @@ module Torobi
     # fine-tuned, and what serves the result is llama.cpp or vLLM
     # (docs/plan.md section 14). One forward is `Session#forward`.
     module Llama
+      # How Llama 3.1 and 3.2 scale their rotary embedding.
+      #
+      # A rope turns position `p` in dimension pair `i` by `p * inv[i]`,
+      # where `inv[i] = 1 / theta^(2i/head_dim)`. This divides the slow
+      # turns by `factor`, leaves the fast ones alone, and interpolates
+      # across the band between. Which is which is said in wavelengths:
+      # `original_context / low_freq_factor` and the same over
+      # `high_freq_factor`.
+      #
+      # **It is not something that happens once a sequence gets long.**
+      # The frequencies themselves move, so position 1 of a scaled model
+      # is not position 1 of an unscaled one. That is why a file saying
+      # this cannot be read as though it did not: what would be built runs
+      # and trains and is a different model (docs/plan.md section 15.53).
+      RopeScaling = Data.define(:factor, :low_freq_factor, :high_freq_factor,
+                                :original_context) do
+        # What `rope_scaling` holds, when it holds this. The reference
+        # names the type twice over its versions (`rope_type`, `type`),
+        # and the rest of the keys have no defaults worth guessing.
+        def self.read(scaling)
+          new(factor: Float(scaling.fetch("factor")),
+              low_freq_factor: Float(scaling.fetch("low_freq_factor")),
+              high_freq_factor: Float(scaling.fetch("high_freq_factor")),
+              original_context: Float(scaling.fetch("original_max_position_embeddings")))
+        end
+
+        # One angular frequency per pair of dimensions, which is what the
+        # `rope` op turns by.
+        def frequencies(theta:, dim:)
+          (0...(dim / 2)).map do |i|
+            scale(1.0 / (theta**(2.0 * i / dim)))
+          end
+        end
+
+        private
+
+        # The three bands, by the wavelength a frequency turns at.
+        def scale(inv)
+          wavelength = 2 * Math::PI / inv
+          return inv if wavelength < original_context / high_freq_factor
+          return inv / factor if wavelength > original_context / low_freq_factor
+
+          share = ((original_context / wavelength) - low_freq_factor) /
+                  (high_freq_factor - low_freq_factor)
+          ((1 - share) * (inv / factor)) + (share * inv)
+        end
+      end
+
       # What one of these configs says, with the defaults the reference
       # uses when a file leaves one out.
       Config = Data.define(
         :vocab_size, :hidden_size, :intermediate_size, :num_hidden_layers,
         :num_attention_heads, :num_key_value_heads, :head_dim, :rms_norm_eps,
-        :rope_theta, :tie_word_embeddings, :attention_bias, :pad_token_id
+        :rope_theta, :rope_scaling, :tie_word_embeddings, :attention_bias, :pad_token_id
       ) do
         # How many query heads share one key head. Grouped-query
         # attention: 14 heads over 2 in Qwen2.5-0.5B, so seven of them
         # read the same keys and the checkpoint carries a seventh of the
         # keys it otherwise would.
         def group = num_attention_heads / num_key_value_heads
+
+        # What the rotary embedding is told: the base, and the
+        # frequencies only where the file scales them.
+        #
+        # **Absent rather than null** when it does not. An attribute that
+        # is emitted is part of the graph's digest, and a description
+        # nobody changed should go on producing the digest it always did.
+        def rope
+          return { theta: rope_theta } unless rope_scaling
+
+          { theta: rope_theta,
+            freqs: rope_scaling.frequencies(theta: rope_theta, dim: head_dim) }
+        end
 
         def check!
           unless head_dim * num_attention_heads == hidden_size
@@ -86,6 +147,7 @@ module Torobi
           head_dim: raw["head_dim"] || (raw.fetch("hidden_size") / heads),
           rms_norm_eps: raw.fetch("rms_norm_eps", 1e-6),
           rope_theta: raw.fetch("rope_theta", 10_000.0),
+          rope_scaling: rope_scaling(raw, family),
           tie_word_embeddings: raw.fetch("tie_word_embeddings", false),
           attention_bias: raw.fetch("attention_bias", family == "qwen2"),
           # A decoder is trained on what it should say next, and the
@@ -96,19 +158,33 @@ module Torobi
         ).check!
       end
 
+      # How this file scales its rotary embedding, if it does.
+      #
+      # `llama3` is what Llama 3.1, 3.2 and 3.3 say, and it is the one
+      # built here (`RopeScaling`). The others are refused rather than
+      # approximated by it: `linear` and `dynamic` are different
+      # arithmetic, and `yarn` also changes the scale attention is read
+      # at, so building any of them as this one would be a model that runs
+      # and is not the file's.
+      def rope_scaling(raw, family)
+        scaling = raw["rope_scaling"]
+        return nil unless scaling
+
+        type = scaling["rope_type"] || scaling["type"]
+        return RopeScaling.read(scaling) if type == "llama3"
+
+        raise ConfigError,
+              "#{family}: rope_scaling #{type.inspect} is not implemented here " \
+              "(llama3 is), and a rotary embedding scaled by the wrong " \
+              "arithmetic is a different model"
+      end
+
       # What this family does that this description does not.
       #
-      # Refused rather than ignored. A rope that should have been scaled
-      # and was not, or a window that should have been slid and was not,
-      # is a model that runs, trains, and is not the model the file names;
-      # nothing downstream would notice.
+      # Refused rather than ignored. A window that should have been slid
+      # and was not is a model that runs, trains, and is not the model the
+      # file names; nothing downstream would notice.
       def refuse_what_is_not_built(raw, family)
-        if raw["rope_scaling"]
-          raise ConfigError,
-                "#{family}: rope_scaling #{raw["rope_scaling"].inspect} is not " \
-                "implemented here, and a rotary embedding that should have been " \
-                "scaled and was not is a different model"
-        end
         return unless raw["use_sliding_window"] || (family == "mistral" && raw["sliding_window"])
 
         raise ConfigError,
@@ -222,7 +298,7 @@ module Torobi
           heads = @config.num_attention_heads
           kv = @config.num_key_value_heads
           dim = @config.head_dim
-          theta = @config.rope_theta
+          rope = @config.rope
           bias = @config.attention_bias
           scope "self_attn" do
             q = linear(x, heads * dim, name: "q_proj", bias:)
@@ -230,8 +306,8 @@ module Torobi
             v = linear(x, kv * dim, name: "v_proj", bias:)
             # The key heads are fewer and stay that way: the backend takes
             # them untiled, which is the whole saving.
-            attended = sdpa(q.split_heads(heads).rope(theta:),
-                            k.split_heads(kv).rope(theta:),
+            attended = sdpa(q.split_heads(heads).rope(**rope),
+                            k.split_heads(kv).rope(**rope),
                             v.split_heads(kv),
                             causal: true)
             linear(attended.merge_heads, @config.hidden_size, name: "o_proj", bias: false)

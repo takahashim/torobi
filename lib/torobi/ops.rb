@@ -16,7 +16,8 @@ module Torobi
       # A dtype by name, from the IR's own small vocabulary.
       "dtype" => ->(v) { IR::Dtype::ALL.include?(v.to_s.to_sym) },
       "int_list" => ->(v) { v.is_a?(Array) && v.all?(Integer) },
-      "int_list_or_null" => ->(v) { v.nil? || (v.is_a?(Array) && v.all?(Integer)) }
+      "int_list_or_null" => ->(v) { v.nil? || (v.is_a?(Array) && v.all?(Integer)) },
+      "number_list_or_null" => ->(v) { v.nil? || (v.is_a?(Array) && v.all?(Numeric)) }
     }.freeze
 
     # One manifest entry.
