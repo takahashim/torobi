@@ -9,7 +9,7 @@ A Rust engine (via MLX) owns the execution, and the boundary between them is abo
 
 ## Requirements
 
-- An Apple Silicon Mac
+- Apple Silicon Mac
 - Ruby 3.2 or newer
 - Rust toolchain
 - MLX and mlx-c
@@ -194,10 +194,6 @@ reader cannot be relied on to catch.
 
 ## Status
 
-The milestones in [docs/plan.md](docs/plan.md) section 9.1 are met
-through M4: a distillation of a published ModernBERT runs to the end and
-leaves a record.
-
 `Models::Llama` is the Llama-shaped decoder, which is most of them: it
 declares exactly what Qwen2.5-0.5B holds and exactly what
 sarashina2.2-0.5b holds, its gradients agree with its forward, and both
@@ -210,16 +206,11 @@ only a window of the recent past. It declares exactly what gemma-3-270m
 holds, and its numbers agree with transformers as closely as the family
 above does.
 
-What is deliberately absent is generation: no KV cache, no sampling
-loop. What Torobi does with a decoder is fine-tune it, in bf16 or behind
-a LoRA adapter, and something else serves the result. Quantized ops and
-variable length attention are not implemented.
-
 The version is 0.0.1 and the API still moves.
 
 ## License
 
-MIT.
+[MIT](./LICENSE).
 
 The engine builds against MLX (MIT, ml-explore) through OminiX-MLX's
 mlx-rs (MIT or Apache-2.0), which is a different repository from the

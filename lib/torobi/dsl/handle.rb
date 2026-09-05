@@ -85,6 +85,65 @@ module Torobi
         end
       end
 
+      # The same numbers, read as `count` heads instead of one wide row:
+      # [batch, seq, width] -> [batch, count, seq, width / count].
+      #
+      #   q = g.linear(x, heads * dim, name: "q_proj").split_heads(heads)
+      #
+      # Two nodes, and both of them are already here: the width is
+      # divided up (`reshape`) and the heads are moved in front of the
+      # sequence, which is the layout attention runs in (`transpose`).
+      # Named because `[0, 2, 1, 3]` says where the axes went and not what
+      # was meant, and every description that wrote it by hand wrote a
+      # comment underneath saying this sentence.
+      #
+      # The leading two dimensions are kept as they are, so a graph built
+      # for no particular batch or sequence splits heads the same way one
+      # built for both does (docs/plan.md 15.63).
+      def split_heads(count)
+        count = Integer(count)
+        raise ConfigError, "split_heads: #{count} heads is not a count" unless count.positive?
+        unless shape.size == 3
+          raise ConfigError,
+                "split_heads: expected [batch, seq, width], got #{dtype}#{shape.inspect}"
+        end
+
+        width = shape.last or
+          raise ConfigError, "split_heads: the width being divided must be concrete"
+        unless (width % count).zero?
+          raise ConfigError, "split_heads: #{width} does not divide into #{count} heads"
+        end
+
+        builder.emit("reshape", inputs: [self], attrs: { shape: [0, 0, count, width / count] })
+               .transpose(axes: [0, 2, 1, 3])
+      end
+
+      # The inverse: [batch, count, seq, dim] -> [batch, seq, count * dim].
+      #
+      #   linear(attended.merge_heads, hidden, name: "o_proj")
+      #
+      # The width it lands on is the heads times what each of them holds,
+      # which this reads off its own shape. A model whose attention is
+      # wider or narrower than its hidden state (Gemma 3 is: four heads of
+      # 256 over a hidden state of 640) therefore needs to say nothing
+      # here, and the projection that follows says the rest.
+      def merge_heads
+        unless shape.size == 4
+          raise ConfigError,
+                "merge_heads: expected [batch, heads, seq, dim], got #{dtype}#{shape.inspect}"
+        end
+
+        heads, dim = shape.values_at(1, 3)
+        unless heads && dim
+          raise ConfigError,
+                "merge_heads: the heads and their width must both be concrete, " \
+                "and this is #{shape.inspect}"
+        end
+
+        transpose(axes: [0, 2, 1, 3])
+          .then { |h| builder.emit("reshape", inputs: [h], attrs: { shape: [0, 0, heads * dim] }) }
+      end
+
       # Splits into `count` equal parts along `axis`, as slice nodes.
       def split(count, axis: -1)
         normalized = Shape.axis!(axis, shape.size, where: "split")

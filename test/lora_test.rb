@@ -202,6 +202,49 @@ class LoRATest < Minitest::Test
     assert_raises(Torobi::ConfigError) { Torobi::LoRA.new(rank: 0, on: "q_proj") }
   end
 
+  # --- every description that takes an adapter applies it ---
+
+  # A description that takes `adapter:` and forgets to put it in scope
+  # builds a graph that runs, trains, and is a full fine-tune: no adapter
+  # is declared, and every base parameter stays trainable because nothing
+  # narrowed it (`DSL::Builder#param`). That is not a smaller failure than
+  # a wrong shape, and nothing else here would notice it, so every entry
+  # point that takes one is asked rather than the one that happened to be
+  # written first.
+  def test_every_description_that_takes_an_adapter_puts_it_in_scope
+    bert = Torobi::Models::ModernBERT.from_hash(
+      "vocab_size" => 32, "hidden_size" => 8, "intermediate_size" => 16,
+      "num_hidden_layers" => 2, "num_attention_heads" => 2
+    )
+    on = Torobi::LoRA.new(rank: 2, alpha: 4, on: %w[Wqkv q_proj])
+    described = {
+      "ModernBERT.classifier" => Torobi::Models::ModernBERT.classifier(bert, seq: 4, adapter: on),
+      "ModernBERT.embedder" => Torobi::Models::ModernBERT.embedder(bert, seq: 4, adapter: on),
+      "ModernBERT.towers" => Torobi::Models::ModernBERT.towers(
+        bert, { queries: 2, documents: 4 }, adapter: on
+      ),
+      "Llama.causal_lm" => Torobi::Models::Llama.causal_lm(config, seq: SEQ, adapter: on),
+      "Gemma3.causal_lm" => Torobi::Models::Gemma3.causal_lm(gemma, seq: SEQ, adapter: on)
+    }
+
+    described.each do |what, graph|
+      declared = graph.parameters
+      adapted = declared.select { |spec| spec.path.include?("lora_") }
+
+      refute_empty adapted, "#{what}: adapter: named linears and none was adapted"
+      assert_equal adapted.map(&:path).sort, declared.select(&:trainable).map(&:path).sort,
+                   "#{what}: something other than the adapter is trainable"
+    end
+  end
+
+  def gemma
+    Torobi::Models::Gemma3.from_hash(
+      "vocab_size" => 32, "hidden_size" => 8, "intermediate_size" => 16,
+      "num_hidden_layers" => 2, "num_attention_heads" => 2, "num_key_value_heads" => 1,
+      "head_dim" => 4, "layer_types" => %w[full_attention full_attention]
+    )
+  end
+
   private
 
   def safetensors(tensors)

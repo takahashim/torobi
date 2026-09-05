@@ -102,22 +102,8 @@ module Torobi
         config.check!
         build = Build.new(seq:, rows:, dtype:)
         Torobi.graph do |g|
-          g.adapting(adapter) { classify(g, config, build, encoder_prefix) }
+          Describe.new(g, config, build, encoder_prefix:).classify(adapter)
         end
-      end
-
-      # The classifier's body, so that `adapting` has something to wrap.
-      def classify(g, config, build, encoder_prefix)
-        x = body(g, config, build, encoder_prefix)
-        pooled = pool(g, x, config, build)
-        # ModernBERT's head: a dense, gelu, a norm, then the classifier.
-        pooled = norm(g, g.linear(pooled, config.hidden_size, name: "head.dense",
-                                  bias: false).gelu,
-                      config, name: "head.norm")
-        # `linear` names the node after the parameter scope, so this is
-        # already called "classifier"; the output name is separate.
-        g.output :logits, g.linear(pooled, config.num_labels, name: "classifier",
-                                   bias: config.classifier_bias)
       end
 
       # A sentence embedder: token ids in, one vector per row out.
@@ -145,12 +131,8 @@ module Torobi
         config.check!
         build = Build.new(seq:, rows:, dtype:)
         Torobi.graph do |g|
-          g.adapting(adapter) do
-            x = g.name("hidden", body(g, config, build, encoder_prefix))
-            pooled = pool(g, x, config, build, mode: pooling)
-            pooled = normalized(g, pooled) if normalize
-            g.output :embedding, g.name("embedding", pooled)
-          end
+          Describe.new(g, config, build, encoder_prefix:)
+                  .embed(adapter, pooling:, normalize:)
         end
       end
 
@@ -187,58 +169,15 @@ module Torobi
         raise ConfigError, "towers needs at least one side" if sides.empty?
 
         Torobi.graph do |g|
-          g.adapting(adapter) do
+          # One description per side, because each reads its own fields at
+          # its own length; one builder, because they are one graph.
+          g.adapting adapter do
             sides.each do |side, rows|
               build = Build.new(seq: nil, rows:, dtype:, fields: "#{side}.")
-              g.sharing(side) do
-                x = g.name("hidden", body(g, config, build, encoder_prefix))
-                pooled = pool(g, x, config, build, mode: pooling)
-                pooled = normalized(g, pooled) if normalize
-                g.output :"#{side}.embedding", g.name("embedding", pooled)
-              end
+              Describe.new(g, config, build, encoder_prefix:)
+                      .tower(side, pooling:, normalize:)
             end
           end
-        end
-      end
-
-      # The encoder under wherever its parameters sit. Published
-      # classifiers keep them under `model.` and bare encoders at the root,
-      # and that is the only difference between the two graphs above.
-      def body(g, config, build, encoder_prefix)
-        return encode(g, config, build) if encoder_prefix.to_s.empty?
-
-        g.scope(encoder_prefix) { encode(g, config, build) }
-      end
-
-      # A vector of length one, so a dot product is a cosine.
-      def normalized(g, x)
-        x / g.sum(x.square, axes: [-1], keepdims: true).sqrt
-      end
-
-      # One vector per row, the way `mode` asks for.
-      #
-      # `cls` is the first position, which for these tokenizers is the
-      # sentence-start token: [batch, seq, hidden] keeping only seq 0.
-      #
-      # `mean` is over the tokens a row actually has. Padding is weighed
-      # out of both the sum and the count, so a row's vector does not
-      # depend on how much padding followed it, and two batches that
-      # differ only in their longest row give the same answer for every
-      # other row. The weights arrive as `:tokens` rather than being
-      # derived from the attention mask: what a mask holds is whatever the
-      # caller built it from, and a weight that must be exactly one or
-      # exactly zero should not be read out of a large negative number.
-      def pool(g, x, config, build, mode: config.classifier_pooling)
-        case mode
-        when :cls
-          x.slice(axis: 1, start: 0, length: 1).reshape(shape: [-1, config.hidden_size])
-        when :mean
-          # Cast to what it is weighing: a batch carries f32, and the
-          # model may be held in something narrower.
-          weights = g.cast(g.input(build.field(:tokens), [build.rows, build.seq, 1]), x.dtype)
-          g.sum(x * weights, axes: [1]) / g.sum(weights, axes: [1])
-        else
-          raise ConfigError, "unknown pooling #{mode.inspect}"
         end
       end
 
@@ -249,14 +188,19 @@ module Torobi
       # not know (docs/plan.md 15.63), nothing here needs a concrete one,
       # and each batch says how long it is.
       #
-      # Two additive attention masks arrive from the batch, each
-      # [batch, 1, seq, seq]: zero where a position may be attended to and
-      # a large negative where it may not. Global layers read `mask`, local
-      # ones read `local_mask`, which is the same padding with the sliding
-      # window added. Two rather than one because they genuinely differ
-      # (`Config#local_attention`), and building them is the caller's:
-      # the graph says attention, not which positions this batch has.
-      # `ModernBERT.masks` builds both.
+      # Two additive fields arrive from the batch, zero where a position
+      # may be attended to and a large negative where it may not:
+      #
+      #   mask    [batch, 1, 1, seq]     which positions are padding
+      #   window  [1, 1, seq, seq]       how far back a local layer sees
+      #
+      # Global layers read the padding alone and local ones read the sum,
+      # which the graph adds once rather than each layer (`Describe#encode`).
+      # They are separate inputs because they vary over different things:
+      # the padding is this batch's and the window is the configuration's
+      # (`Config#local_attention`), so there is one window however many
+      # rows there are. A configuration with no local layer asks for no
+      # window at all. `ModernBERT.masks` builds what a batch must carry.
       def graph(config, seq:, rows: nil, dtype: :f32)
         config.check!
         build = Build.new(seq:, rows:, dtype:)
@@ -264,96 +208,194 @@ module Torobi
           # Named as well as declared an output, so a tap can read it: an
           # output is what the objective consumes, and a tap is how a
           # caller sees a value without a second graph to see it with.
-          g.output :hidden, g.name("hidden", encode(g, config, build))
+          Describe.new(g, config, build, encoder_prefix: "").hidden
         end
       end
 
-      # The encoder body, so the bare model and the classifier are one
-      # description rather than two that must be kept in step.
+      # The description itself: the builder, the config and what it is
+      # built for are held once (`Models::Description`), so what a method
+      # takes is the value flowing through it.
       #
-      # What it is being built for arrives as one value (`Models::Build`):
-      # the sequence, the rows, the precision, and which batch fields to
-      # read. `build.rows` is normally nil, because the batch is the
-      # dimension that varies between steps and everything here works
-      # without knowing it; naming it is for an objective that reads
-      # across the batch rather than down it, which a contrastive loss
-      # does (its negatives are the other rows), and which cannot be
-      # written against a dimension nothing knows.
-      def encode(g, config, build)
-        ids = g.input(build.field(:input_ids), [build.rows, build.seq], dtype: :i32)
-        # The masks arrive as f32, which is what a batch carries, and are
-        # cast to what the model is held in. Nothing is cast when there is
-        # nothing to cast to (`g.cast`).
-        padding = g.cast(g.input(build.field(:mask), [build.rows, 1, 1, build.seq]),
-                         build.dtype)
-        # Summed once, not in each of the local layers: both are the same
-        # for every one of them. Only when there is a local layer to read
-        # it, so a configuration with none asks for no window.
-        local = if config.any_local?
-                  padding + g.cast(g.input(build.field(:window),
-                                           [1, 1, build.seq, build.seq]), build.dtype)
-                else
-                  padding
-                end
-
-        x = g.embedding(ids, vocab: config.vocab_size, dim: config.hidden_size,
-                        name: "embeddings.tok_embeddings", dtype: build.dtype)
-        x = norm(g, x, config, name: "embeddings.norm")
-
-        config.num_hidden_layers.times do |i|
-          mask = config.global?(i) ? padding : local
-          x = g.scope("layers.#{i}") { layer(g, x, config, i, mask) }
+      # `encoder_prefix` is where the encoder's parameters sit, which is
+      # the only thing that differs between the graphs above.
+      class Describe < Description
+        def initialize(g, config, build, encoder_prefix:)
+          super(g, config, build)
+          @encoder_prefix = encoder_prefix
         end
-        norm(g, x, config, name: "final_norm")
-      end
 
-      # One encoder block: attention with a residual, then the MLP with
-      # another. Layer 0 has no attention norm, which is the reference's
-      # own asymmetry and not a mistake here.
-      def layer(g, x, config, index, mask)
-        normed = index.zero? ? x : norm(g, x, config, name: "attn_norm")
-        x += attention(g, normed, config, index, mask)
-        x + mlp(g, norm(g, x, config, name: "mlp_norm"), config)
-      end
-
-      def attention(g, x, config, index, mask)
-        heads = config.num_attention_heads
-        dim = config.head_dim
-        theta = config.theta(index)
-        q, k, v = g.scope("attn") do
-          g.linear(x, config.hidden_size * 3, name: "Wqkv", bias: false).split(3, axis: -1)
+        # One vector per row, named so a tap reads it without a second
+        # graph, and declared as this side's output.
+        def embed(adapter, pooling:, normalize:)
+          adapting adapter do
+            emit_embedding(:embedding, pooling:, normalize:)
+          end
         end
-        # [batch, seq, hidden] -> [batch, heads, seq, head_dim], so
-        # attention runs per head. The two leading dimensions are kept as
-        # they are (`0`), which is what lets both of them be symbolic:
-        # only the hidden size is being divided up here, and it is the
-        # one this knows (docs/plan.md 15.63).
-        to_heads = lambda do |h|
-          h.reshape(shape: [0, 0, heads, dim]).transpose(axes: [0, 2, 1, 3])
-        end
-        attended = g.sdpa(to_heads.call(q).rope(theta:),
-                          to_heads.call(k).rope(theta:),
-                          to_heads.call(v),
-                          mask:)
-        folded = attended.transpose(axes: [0, 2, 1, 3])
-                         .reshape(shape: [0, 0, config.hidden_size])
-        g.scope("attn") { g.linear(folded, config.hidden_size, name: "Wo", bias: false) }
-      end
 
-      # GeGLU: one projection to twice the width, gelu on the first half,
-      # gated by the second, then back down.
-      def mlp(g, x, config)
-        g.scope("mlp") do
-          wide = g.linear(x, config.intermediate_size * 2, name: "Wi", bias: false)
-          gate, up = wide.split(2, axis: -1)
-          g.linear(gate.gelu * up, config.hidden_size, name: "Wo", bias: false)
+        # The same, as one of several sides sharing one set of weights.
+        def tower(side, pooling:, normalize:)
+          sharing side do
+            emit_embedding(:"#{side}.embedding", pooling:, normalize:)
+          end
         end
-      end
 
-      # Every norm here is a LayerNorm with a gain and no bias, which is
-      # what `norm_bias: false` in the published configs means.
-      def norm(g, x, config, name:)
-        g.layer_norm(x, name:, bias: false, eps: config.norm_eps)
+        # The bare encoder, with its hidden state named and declared.
+        def hidden
+          output :hidden, name("hidden", encode)
+        end
+
+        # The classifier's body, so that `adapting` has something to wrap.
+        def classify(adapter)
+          adapting adapter do
+            x = body
+            pooled = pool(x)
+            # ModernBERT's head: a dense, gelu, a norm, then the classifier.
+            pooled = scope "head" do
+              norm(linear(pooled, @config.hidden_size, name: "dense", bias: false).gelu,
+                   name: "norm")
+            end
+            # `linear` names the node after the parameter scope, so this is
+            # already called "classifier"; the output name is separate.
+            output :logits, linear(pooled, @config.num_labels, name: "classifier",
+                                           bias: @config.classifier_bias)
+          end
+        end
+
+        # The encoder under wherever its parameters sit. Published
+        # classifiers keep them under `model.` and bare encoders at the root,
+        # and that is the only difference between the two graphs above.
+        def body
+          return encode if @encoder_prefix.to_s.empty?
+
+          scope @encoder_prefix do
+            encode
+          end
+        end
+
+        # A vector of length one, so a dot product is a cosine.
+        def normalized(x)
+          x / sum(x.square, axes: [-1], keepdims: true).sqrt
+        end
+
+        # One vector per row, the way `mode` asks for.
+        #
+        # `cls` is the first position, which for these tokenizers is the
+        # sentence-start token: [batch, seq, hidden] keeping only seq 0.
+        #
+        # `mean` is over the tokens a row actually has. Padding is weighed
+        # out of both the sum and the count, so a row's vector does not
+        # depend on how much padding followed it, and two batches that
+        # differ only in their longest row give the same answer for every
+        # other row. The weights arrive as `:tokens` rather than being
+        # derived from the attention mask: what a mask holds is whatever the
+        # caller built it from, and a weight that must be exactly one or
+        # exactly zero should not be read out of a large negative number.
+        def pool(x, mode: @config.classifier_pooling)
+          case mode
+          when :cls
+            x.slice(axis: 1, start: 0, length: 1).reshape(shape: [-1, @config.hidden_size])
+          when :mean
+            # Cast to what it is weighing: a batch carries f32, and the
+            # model may be held in something narrower.
+            weights = cast(input(@build.field(:tokens), [@build.rows, @build.seq, 1]), x.dtype)
+            sum(x * weights, axes: [1]) / sum(weights, axes: [1])
+          else
+            raise ConfigError, "unknown pooling #{mode.inspect}"
+          end
+        end
+
+        # The encoder body, so the bare model and the classifier are one
+        # description rather than two that must be kept in step.
+        #
+        # What it is being built for arrives as one value (`Models::Build`):
+        # the sequence, the rows, the precision, and which batch fields to
+        # read. `@build.rows` is normally nil, because the batch is the
+        # dimension that varies between steps and everything here works
+        # without knowing it; naming it is for an objective that reads
+        # across the batch rather than down it, which a contrastive loss
+        # does (its negatives are the other rows), and which cannot be
+        # written against a dimension nothing knows.
+        def encode
+          ids = input(@build.field(:input_ids), [@build.rows, @build.seq], dtype: :i32)
+          # The masks arrive as f32, which is what a batch carries, and are
+          # cast to what the model is held in. Nothing is cast when there is
+          # nothing to cast to (`cast`).
+          padding = cast(input(@build.field(:mask), [@build.rows, 1, 1, @build.seq]),
+                         @build.dtype)
+          # Summed once, not in each of the local layers: both are the same
+          # for every one of them. Only when there is a local layer to read
+          # it, so a configuration with none asks for no window.
+          local = if @config.any_local?
+                    padding + cast(input(@build.field(:window),
+                                         [1, 1, @build.seq, @build.seq]), @build.dtype)
+                  else
+                    padding
+                  end
+
+          x = scope "embeddings" do
+            table = embedding(ids, vocab: @config.vocab_size, dim: @config.hidden_size,
+                              name: "tok_embeddings", dtype: @build.dtype)
+            norm(table, name: "norm")
+          end
+
+          @config.num_hidden_layers.times do |i|
+            mask = @config.global?(i) ? padding : local
+            x = scope "layers.#{i}" do
+              layer(x, i, mask)
+            end
+          end
+          norm(x, name: "final_norm")
+        end
+
+        # One encoder block: attention with a residual, then the MLP with
+        # another. Layer 0 has no attention norm, which is the reference's
+        # own asymmetry and not a mistake here.
+        def layer(x, index, mask)
+          normed = index.zero? ? x : norm(x, name: "attn_norm")
+          x += attention(normed, index, mask)
+          x + mlp(norm(x, name: "mlp_norm"))
+        end
+
+        def attention(x, index, mask)
+          heads = @config.num_attention_heads
+          theta = @config.theta(index)
+          # One projection to three times the width, cut into q, k and v:
+          # ModernBERT fuses them where the decoders keep three.
+          scope "attn" do
+            q, k, v = linear(x, @config.hidden_size * 3, name: "Wqkv",
+                                bias: false).split(3, axis: -1)
+            attended = sdpa(q.split_heads(heads).rope(theta:),
+                            k.split_heads(heads).rope(theta:),
+                            v.split_heads(heads),
+                            mask:)
+            linear(attended.merge_heads, @config.hidden_size, name: "Wo", bias: false)
+          end
+        end
+
+        # GeGLU: one projection to twice the width, gelu on the first half,
+        # gated by the second, then back down.
+        def mlp(x)
+          scope "mlp" do
+            wide = linear(x, @config.intermediate_size * 2, name: "Wi", bias: false)
+            gate, up = wide.split(2, axis: -1)
+            linear(gate.gelu * up, @config.hidden_size, name: "Wo", bias: false)
+          end
+        end
+
+        # Every norm here is a LayerNorm with a gain and no bias, which is
+        # what `norm_bias: false` in the published configs means.
+        def norm(x, name:)
+          layer_norm(x, name:, bias: false, eps: @config.norm_eps)
+        end
+
+        private
+
+        def emit_embedding(as, pooling:, normalize:)
+          x = name("hidden", body)
+          pooled = pool(x, mode: pooling)
+          pooled = normalized(pooled) if normalize
+          output as, name("embedding", pooled)
+        end
       end
 
       # One batch, from token ids.
@@ -372,10 +414,15 @@ module Torobi
       #   batch = ModernBERT.batch(config, ids, seq: 128)  # this
       #   session.step!(batch)
       #
-      # Rows are padded to `seq`, which is the length the graph was built
-      # for; there is no other length it could be. A row longer than that
-      # is refused rather than truncated, because which end to drop is a
-      # decision about the data and not about the model.
+      # Rows are padded to `seq`, and a row longer than that is refused
+      # rather than truncated, because which end to drop is a decision
+      # about the data and not about the model.
+      #
+      # `seq` is the graph's own length where it was built for one. A
+      # graph built for no particular sequence (`towers`, `seq: nil`) is
+      # told by each batch how long that batch is, which is the point of
+      # it: a side whose rows are eighteen tokens is not padded out to the
+      # length of a side whose rows are 192 (docs/plan.md 15.62).
       # `pooling:` is what the graph this feeds pools like, and adds the
       # per-token weights a mean over real tokens needs (`tokens`). It is
       # the same word `embedder` and `pool` take.
@@ -419,9 +466,10 @@ module Torobi
                         lengths.flat_map { |length| [[length, 1.0], [seq - length, 0.0]] })
       end
 
-      # The two masks a batch must carry, as {mask:, local_mask:} ready to
-      # go in. `batch` calls this; it is public for a caller who has
-      # already padded its own ids.
+      # What a batch must carry for the attention, ready to go in:
+      # `{mask:}`, and `{mask:, window:}` where the configuration has a
+      # local layer to read one. `batch` calls this; it is public for a
+      # caller who has already padded its own ids.
       #
       # `lengths` is how many real tokens each row has; the rest is
       # padding, which nothing may attend to.
