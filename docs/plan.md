@@ -3411,6 +3411,97 @@ wrote eval.json: 510 queries over 637 documents,
 教訓は §15.61 のものと同じ形をしている。**黙って落とすものは、いつか測定値として返って
 くる。**
 
+### 15.71 モデル記述のレビュー。持ち回る引数、頭の分割、そして適用されなかった adapter(2026-09-05)
+
+`lib/torobi/models/` の 3 つは、どれも同じ骨格を module_function で書いていた。
+`encode` / `layer` / `attention` / `mlp` / `norm` が `(g, x, config, build)` を取り、同じ 3 つを
+6 段下まで手で運ぶ。Ruby のメソッドはブロックのローカル変数を閉じ込められないので、`g` は
+引数で渡すしかなかった。
+
+builder はグラフ全体で 1 つであり、config も変わらない。つまり状態であって、Ruby には状態を
+置く場所がある。`Models::Description` がその 3 つを持ち、シグネチャに残るのは実際に変わる値
+だけになった。
+
+```ruby
+def layer(x)
+  x += attention(norm(x, name: "input_layernorm"))
+  x + mlp(norm(x, name: "post_attention_layernorm"))
+end
+```
+
+`DSL::Builder` を継承せず、使ってよいメソッドを `VOCABULARY` に書き出した。op の一覧が
+config/ops.yml という 1 つのファイルであるのと同じ理由による。`emit` は入れていないので、
+記述が語彙を迂回して任意のノードを作ることはできない。
+
+**その移動で adapter が落ちた。** `g.adapting(adapter) { classify(...) }` は呼び出し側にあり、
+`Describe#classify` へ移すときに包みだけが残された。rubocop の autocorrect が未使用になった
+引数を `_adapter` に改名し、痕跡も消した。
+
+被害は「LoRA が付かない」では済まない。`adapting` がスコープに無いと `param` が trainable を
+絞らないので、**LoRA を頼んだ結果が full fine-tune になる**。
+
+| classifier(adapter:) | パラメータ | LoRA | trainable |
+| --- | --- | --- | --- |
+| 移動の前 | 21 | 4 | 4 |
+| 移動の後 | 17 | 0 | **17** |
+
+`DSL::Builder#param` のコメントが、まさにこれを防ぐために書かれている。「a base model left
+trainable by an oversight is not a LoRA fine-tune」。機構は正しく、それを呼ぶ側が消えていた。
+
+テストは `Llama.causal_lm` だけを聞いていた。`adapter:` を取る入口は 5 つあり、落ちたのは誰も
+聞いていない 1 つだった。いまは 5 つすべてに、アダプタが宣言されていることと、trainable が
+それだけであることを聞く。
+
+**3 つの記述はどれも、attention の冒頭で同じ 2 ノードを書き、その上に散文のコメントを置いて
+いた。** `[0, 2, 1, 3]` は軸がどこへ行ったかを言うが、何をしたかは言わない。コメントがその
+証拠である。
+
+einops 風のパターン文字列は採らなかった。HF の実装が `.view(hidden_shape).transpose(1, 2)` と
+書いている以上、写した結果を並べて見比べられることに価値がある。`Models` の共有ヘルパーにも
+上げなかった。attention が何をするかを読むのに別のファイルを開くことになる。
+
+`Handle#split_heads` と `#merge_heads` は、そのどちらでもない。1 つの値を 1 つの値にする操作
+なので DSL が既に引いている線の内側にあり、`rope` や `transpose` を探す場所に置かれる。展開先
+は元と同じ reshape と transpose で、ノードの順序も同じで、digest は動かない。
+
+`merge_heads` は幅を自分の形から読む。ヘッドの数とそれぞれが持つ幅の積であり、Gemma 3 は
+それが hidden size と違う (270m は 640 に対して 4 ヘッド × 256)。記述が `attention_size` を
+継ぎ目で書き直す必要はなくなった。
+
+パラメータの名前も 2 通りに綴られていた。`linear(name: "mlp.gate_proj")` と
+`scope("mlp") { linear(name: "gate_proj") }` は同じパスに着く。デコーダは前者を、ModernBERT は
+おおむね後者を使い、しかも `scope("attn")` を 2 回開いていた。いまは部品が自分の scope を
+1 度開き、中では局所的な名前を書く。文字列そのものは手書きのまま残した。チェックポイントが
+何と呼んでいるかはチェックポイントのものであり、Ruby のメソッド名から導けば、メソッドを
+改名したときに重みが動く。
+
+`reshape` の綴りも 2 通りあった。`[0, 0, count, dim]` は先頭 2 次元をそのまま保ち、
+`[-1, seq, count, dim]` はそれを書き直す。前者は後者ができることを全部でき、系列長が未定の
+ときに書けるのは前者だけである。デコーダが後者だったのは `causal_lm` が必ず具体的な `seq:` を
+取るからで、必要だったからではない。
+
+**これだけは digest が動く。** reshape は形を属性として持つので、`[0, 0, 14, 64]` と
+`[-1, 16, 14, 64]` は同じ計算をする別のノードになる。チェックポイントからの再開が実際に
+拒否されることを確かめた。
+
+```
+this checkpoint belongs to another graph (digest e2b5eaa8a40e, not b9871573ac40)
+```
+
+学習中のものが無い時点で払った。この代償は、チェックポイントが 1 つ書かれるたびに増える
+種類のものである。
+
+**記法だけの変更は、digest で確かめられる。** 3 系統 10 通りのグラフ (Qwen2.5、sarashina、
+bf16 + LoRA、Gemma3、ModernBERT の 6 種) を組み、変更の前後で digest を比べた。一致すれば
+IR は 1 ノードも変わっていない。
+
+一度これに助けられた。`linear(...).split_heads(...)` と連結したとき、Llama だけ digest が
+動いた。計算は同じで、linear を 3 つ並べてから分割するという元の順序が変わり、ノード番号が
+ずれていた。数値のテストは通っていた。
+
+意味を変える変更は逆に digest が動くので、コミットを分ける。adapter の修正でも digest は動き、
+動いた先が移動前の値と一致することが確認になった。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。
