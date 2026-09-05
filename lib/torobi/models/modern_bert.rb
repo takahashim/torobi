@@ -236,16 +236,20 @@ module Torobi
         end
 
         # The classifier's body, so that `adapting` has something to wrap.
-        def classify(_adapter)
-          x = body
-          pooled = pool(x)
-          # ModernBERT's head: a dense, gelu, a norm, then the classifier.
-          pooled = norm(linear(pooled, @config.hidden_size, name: "head.dense", bias: false).gelu,
-                        name: "head.norm")
-          # `linear` names the node after the parameter scope, so this is
-          # already called "classifier"; the output name is separate.
-          output :logits, linear(pooled, @config.num_labels, name: "classifier",
-                                     bias: @config.classifier_bias)
+        def classify(adapter)
+          adapting(adapter) do
+            x = body
+            pooled = pool(x)
+            # ModernBERT's head: a dense, gelu, a norm, then the classifier.
+            pooled = norm(
+              linear(pooled, @config.hidden_size, name: "head.dense", bias: false).gelu,
+              name: "head.norm"
+            )
+            # `linear` names the node after the parameter scope, so this is
+            # already called "classifier"; the output name is separate.
+            output :logits, linear(pooled, @config.num_labels, name: "classifier",
+                                           bias: @config.classifier_bias)
+          end
         end
 
         # The encoder under wherever its parameters sit. Published
