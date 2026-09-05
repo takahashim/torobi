@@ -177,12 +177,11 @@ module Torobi
           kv = @config.num_key_value_heads
           dim = @config.head_dim
           theta = @config.theta(index)
-          to_heads = lambda do |h, count|
-            h.reshape(shape: [0, 0, count, dim]).transpose(axes: [0, 2, 1, 3])
-          end
-          q = to_heads.call(linear(x, heads * dim, name: "self_attn.q_proj", bias: false), heads)
-          k = to_heads.call(linear(x, kv * dim, name: "self_attn.k_proj", bias: false), kv)
-          v = to_heads.call(linear(x, kv * dim, name: "self_attn.v_proj", bias: false), kv)
+          q = linear(x, heads * dim, name: "self_attn.q_proj", bias: false).split_heads(heads)
+          k = linear(x, kv * dim, name: "self_attn.k_proj", bias: false).split_heads(kv)
+          v = linear(x, kv * dim, name: "self_attn.v_proj", bias: false).split_heads(kv)
+          # Normalized per head, which is why it happens after the split
+          # and before the rotation.
           q = norm(q, name: "self_attn.q_norm").rope(theta:)
           k = norm(k, name: "self_attn.k_norm").rope(theta:)
 
@@ -194,9 +193,11 @@ module Torobi
             else
               sdpa(q, k, v, causal: true, scale: @config.scale)
             end
-          folded = attended.transpose(axes: [0, 2, 1, 3])
-                           .reshape(shape: [0, 0, @config.attention_size])
-          linear(folded, @config.hidden_size, name: "self_attn.o_proj", bias: false)
+          # `merge_heads` lands on the heads times their width, which for
+          # Gemma is not the hidden size: 270m is four heads of 256 over a
+          # hidden state of 640. The projection that follows says the rest.
+          linear(attended.merge_heads, @config.hidden_size,
+                 name: "self_attn.o_proj", bias: false)
         end
 
         # GeGLU with the tanh approximation, which is the function Gemma

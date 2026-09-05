@@ -75,6 +75,89 @@ class DslTest < Minitest::Test
     assert_equal [nil, nil, 2, 4], shape
   end
 
+  # --- reading a wide row as heads ---
+
+  # The pair is a `reshape` and a `transpose` and nothing else, so a
+  # description that says what it means gets the graph it would have got
+  # by writing `[0, 2, 1, 3]` out.
+  def test_splitting_and_merging_heads_is_the_reshape_and_transpose_by_hand
+    def_by_hand = Torobi.graph do |g|
+      x = g.input :x, [nil, nil, 896]
+      h = x.reshape(shape: [0, 0, 14, 64]).transpose(axes: [0, 2, 1, 3])
+      g.output :out, h.transpose(axes: [0, 2, 1, 3]).reshape(shape: [0, 0, 896])
+    end
+    by_name = Torobi.graph do |g|
+      x = g.input :x, [nil, nil, 896]
+      g.output :out, x.split_heads(14).merge_heads
+    end
+
+    assert_equal Torobi::GraphConfig.new(models: { m: def_by_hand }, train: []).digest,
+                 Torobi::GraphConfig.new(models: { m: by_name }, train: []).digest
+  end
+
+  # Both leading dimensions stay unknown, which is what lets a graph be
+  # built for no particular sequence (docs/plan.md 15.63). And the query
+  # heads may outnumber the key heads, which is what grouped-query
+  # attention is; each side is told its own count.
+  def test_heads_split_over_a_symbolic_batch_and_sequence
+    shapes = []
+    Torobi.graph do |g|
+      q = g.input(:q, [nil, nil, 896]).split_heads(14)
+      k = g.input(:k, [nil, nil, 128]).split_heads(2)
+      back = q.merge_heads
+      shapes = [q.shape, k.shape, back.shape]
+      g.output :q, back
+      g.output :k, k
+    end
+
+    assert_equal [[nil, 14, nil, 64], [nil, 2, nil, 64], [nil, nil, 896]], shapes
+  end
+
+  # The width it lands on is the heads times what each holds, which is
+  # not the model's hidden size: Gemma 3 270m projects a hidden state of
+  # 640 into four heads of 256, and comes back through `o_proj`.
+  def test_merging_heads_lands_on_what_the_heads_hold
+    shape = nil
+    Torobi.graph do |g|
+      attended = g.input :attended, [nil, nil, 1024]
+      merged = attended.split_heads(4).merge_heads
+      shape = merged.shape
+      g.output :out, merged
+    end
+
+    assert_equal [nil, nil, 1024], shape
+  end
+
+  def test_a_width_that_does_not_divide_into_heads_is_refused
+    e = assert_raises(Torobi::ConfigError) do
+      Torobi.graph do |g|
+        g.output :out, g.input(:x, [nil, nil, 896]).split_heads(5)
+      end
+    end
+
+    assert_match(/896 does not divide into 5 heads/, e.message)
+  end
+
+  def test_heads_are_split_out_of_a_row_and_merged_out_of_a_head_layout
+    split = assert_raises(Torobi::ConfigError) do
+      Torobi.graph { |g| g.output :out, g.input(:x, [nil, 896]).split_heads(14) }
+    end
+    merge = assert_raises(Torobi::ConfigError) do
+      Torobi.graph { |g| g.output :out, g.input(:x, [nil, nil, 8]).merge_heads }
+    end
+
+    assert_match(/expected \[batch, seq, width\]/, split.message)
+    assert_match(/expected \[batch, heads, seq, dim\]/, merge.message)
+  end
+
+  def test_a_width_nothing_knows_cannot_be_divided_into_heads
+    e = assert_raises(Torobi::ConfigError) do
+      Torobi.graph { |g| g.output :out, g.input(:x, [nil, nil, nil]).split_heads(14) }
+    end
+
+    assert_match(/must be concrete/, e.message)
+  end
+
   def test_a_kept_dimension_the_input_does_not_have_is_refused
     e = assert_raises(Torobi::ConfigError) do
       Torobi.graph do |g|

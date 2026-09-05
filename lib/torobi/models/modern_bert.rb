@@ -348,26 +348,19 @@ module Torobi
 
         def attention(x, index, mask)
           heads = @config.num_attention_heads
-          dim = @config.head_dim
           theta = @config.theta(index)
+          # One projection to three times the width, cut into q, k and v:
+          # ModernBERT fuses them where the decoders keep three.
           q, k, v = scope("attn") do
             linear(x, @config.hidden_size * 3, name: "Wqkv", bias: false).split(3, axis: -1)
           end
-          # [batch, seq, hidden] -> [batch, heads, seq, head_dim], so
-          # attention runs per head. The two leading dimensions are kept as
-          # they are (`0`), which is what lets both of them be symbolic:
-          # only the hidden size is being divided up here, and it is the
-          # one this knows (docs/plan.md 15.63).
-          to_heads = lambda do |h|
-            h.reshape(shape: [0, 0, heads, dim]).transpose(axes: [0, 2, 1, 3])
-          end
-          attended = sdpa(to_heads.call(q).rope(theta:),
-                          to_heads.call(k).rope(theta:),
-                          to_heads.call(v),
+          attended = sdpa(q.split_heads(heads).rope(theta:),
+                          k.split_heads(heads).rope(theta:),
+                          v.split_heads(heads),
                           mask:)
-          folded = attended.transpose(axes: [0, 2, 1, 3])
-                           .reshape(shape: [0, 0, @config.hidden_size])
-          scope("attn") { linear(folded, @config.hidden_size, name: "Wo", bias: false) }
+          scope("attn") do
+            linear(attended.merge_heads, @config.hidden_size, name: "Wo", bias: false)
+          end
         end
 
         # GeGLU: one projection to twice the width, gelu on the first half,
