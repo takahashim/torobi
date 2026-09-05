@@ -4,21 +4,19 @@ module Torobi
   module Models
     # What an architecture is described against: the builder it writes
     # into, the configuration it is built from, and what it is being built
-    # for, held once rather than passed to every call.
-    #
-    # A description used to be module functions threading `(g, x, config,
-    # build)` down six levels. The builder is the same one for the whole
-    # graph and the config never changes either, so they are state, and
-    # Ruby has a place for state. What is left in a signature is what
-    # actually varies: the value flowing through.
+    # for. One builder serves the whole graph and the config never
+    # changes, so they are held here and a signature carries what actually
+    # varies -- the value flowing through.
     #
     #   def layer(x)
     #     x += attention(norm(x, name: "input_layernorm"))
     #     x + mlp(norm(x, name: "post_attention_layernorm"))
     #   end
     #
-    # The graph is identical either way; this is how it is written, not
-    # what it builds.
+    # A subclass is one architecture. It reaches the graph through
+    # VOCABULARY below and the rest of what it needs through `@config` and
+    # `@build`; `Torobi.graph` still owns the builder and the frozen IR
+    # that comes out of it.
     class Description
       # What a description may say to the graph, and nothing else.
       #

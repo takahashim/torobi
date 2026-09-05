@@ -118,7 +118,9 @@ module Torobi
       # (docs/plan.md 15.63).
       #
       #   %i[queries documents].each do |side|
-      #     g.sharing(side) { ModernBERT.body(g, config, fields: "#{side}.", ...) }
+      #     build = Build.new(seq: nil, dtype:, fields: "#{side}.")
+      #     ModernBERT::Describe.new(g, config, build, encoder_prefix:)
+      #                         .tower(side, pooling:, normalize:)
       #   end
       #
       # `label` names the values rather than the weights: the parameters

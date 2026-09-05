@@ -188,14 +188,19 @@ module Torobi
       # not know (docs/plan.md 15.63), nothing here needs a concrete one,
       # and each batch says how long it is.
       #
-      # Two additive attention masks arrive from the batch, each
-      # [batch, 1, seq, seq]: zero where a position may be attended to and
-      # a large negative where it may not. Global layers read `mask`, local
-      # ones read `local_mask`, which is the same padding with the sliding
-      # window added. Two rather than one because they genuinely differ
-      # (`Config#local_attention`), and building them is the caller's:
-      # the graph says attention, not which positions this batch has.
-      # `ModernBERT.masks` builds both.
+      # Two additive fields arrive from the batch, zero where a position
+      # may be attended to and a large negative where it may not:
+      #
+      #   mask    [batch, 1, 1, seq]     which positions are padding
+      #   window  [1, 1, seq, seq]       how far back a local layer sees
+      #
+      # Global layers read the padding alone and local ones read the sum,
+      # which the graph adds once rather than each layer (`Describe#encode`).
+      # They are separate inputs because they vary over different things:
+      # the padding is this batch's and the window is the configuration's
+      # (`Config#local_attention`), so there is one window however many
+      # rows there are. A configuration with no local layer asks for no
+      # window at all. `ModernBERT.masks` builds what a batch must carry.
       def graph(config, seq:, rows: nil, dtype: :f32)
         config.check!
         build = Build.new(seq:, rows:, dtype:)
@@ -407,10 +412,15 @@ module Torobi
       #   batch = ModernBERT.batch(config, ids, seq: 128)  # this
       #   session.step!(batch)
       #
-      # Rows are padded to `seq`, which is the length the graph was built
-      # for; there is no other length it could be. A row longer than that
-      # is refused rather than truncated, because which end to drop is a
-      # decision about the data and not about the model.
+      # Rows are padded to `seq`, and a row longer than that is refused
+      # rather than truncated, because which end to drop is a decision
+      # about the data and not about the model.
+      #
+      # `seq` is the graph's own length where it was built for one. A
+      # graph built for no particular sequence (`towers`, `seq: nil`) is
+      # told by each batch how long that batch is, which is the point of
+      # it: a side whose rows are eighteen tokens is not padded out to the
+      # length of a side whose rows are 192 (docs/plan.md 15.62).
       # `pooling:` is what the graph this feeds pools like, and adds the
       # per-token weights a mean over real tokens needs (`tokens`). It is
       # the same word `embedder` and `pool` take.
@@ -454,9 +464,10 @@ module Torobi
                         lengths.flat_map { |length| [[length, 1.0], [seq - length, 0.0]] })
       end
 
-      # The two masks a batch must carry, as {mask:, local_mask:} ready to
-      # go in. `batch` calls this; it is public for a caller who has
-      # already padded its own ids.
+      # What a batch must carry for the attention, ready to go in:
+      # `{mask:}`, and `{mask:, window:}` where the configuration has a
+      # local layer to read one. `batch` calls this; it is public for a
+      # caller who has already padded its own ids.
       #
       # `lengths` is how many real tokens each row has; the rest is
       # padding, which nothing may attend to.
