@@ -92,3 +92,33 @@ fn get(f: unsafe extern "C" fn(*mut usize) -> std::os::raw::c_int) -> Result<usi
     }
     Ok(value)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures;
+    use crate::plan::Weights;
+    use crate::session::Session;
+
+    /// Clearing gives back everything the allocator was holding.
+    ///
+    /// The claim belongs here rather than above, because the reading that
+    /// shows the cache empty has to be taken inside the same gated call as
+    /// the clear. Anything dropped puts its buffers back into the cache,
+    /// and in Ruby it is the GC that decides when a session that was never
+    /// closed is dropped: a reading taken from there is about when a
+    /// collection happened to run (test/lifecycle_test.rb).
+    #[test]
+    fn clearing_empties_the_cache() {
+        let (config, weights) = fixtures::scaled_mean();
+        let mut session = Session::open(&config, Weights::Inline(&weights)).unwrap();
+        session.run_step(&fixtures::batch_x(&[1.0, 2.0, 3.0, 4.0])).unwrap();
+        // A step's working buffers, and then the session's own.
+        drop(session);
+
+        let (before, after) = Memory::clear_cache().unwrap();
+
+        assert!(before > 0, "a step and a drop leave the allocator holding buffers");
+        assert_eq!(after, 0, "and clearing gives all of them back");
+    }
+}

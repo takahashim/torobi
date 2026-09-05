@@ -218,10 +218,21 @@ class LifecycleTest < Minitest::Test
       assert_operator during.fetch(:peak), :>=, during.fetch(:active)
     end
 
+    # What the allocator was holding, clearing gives back. Reading the
+    # cache afterwards would not say so: a session dropped without closing
+    # frees its buffers into the cache when the GC reaches it, and Ruby
+    # decides when that is, so the reading would be about the collector.
+    # A collection landing between these two calls can only add to what is
+    # held, never take from it, so this comparison holds whenever it runs.
+    # That the clear leaves nothing behind is asserted where both readings
+    # come from one call: engine/src/memory.rs.
+    held = Torobi::Memory.cache
+
+    assert_operator held, :>, 0, "closing the session left buffers in the cache"
+
     freed = Torobi::Memory.clear_cache!
 
-    assert_operator freed, :>=, 0
-    assert_equal 0, Torobi::Memory.cache, "the cache is empty after clearing it"
+    assert_operator freed, :>=, held, "clearing gives back everything it held"
   end
 
   def test_the_peak_can_be_forgotten_and_the_limit_set
