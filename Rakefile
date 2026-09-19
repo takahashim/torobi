@@ -154,6 +154,22 @@ namespace :oracle do
     reference "google/gemma-3-270m", "test/oracle/gemma-3-270m.forward.json"
   end
 
+  # The third member of the family the one description claims, and the
+  # one that carries a scaled rope (§15.72). Behind Meta's licence, which
+  # is reviewed by a person rather than granted on acceptance: until that
+  # comes back the inventory answers 403, and there is no artifact to
+  # record.
+  desc "record what meta-llama/Llama-3.2-1B holds, for test/oracle"
+  task :llama3 do
+    sh RbConfig.ruby, "tools/inventory.rb", "meta-llama/Llama-3.2-1B",
+       "test/oracle/llama-3.2-1b.json"
+  end
+
+  desc "record what transformers answers for Llama-3.2-1B, for test/oracle"
+  task :llama3_forward do
+    reference "meta-llama/Llama-3.2-1B", "test/oracle/llama-3.2-1b.forward.json"
+  end
+
   desc "record what cl-nagoya/ruri-v3-reranker-310m holds, for test/oracle"
   task :reranker do
     dir = ENV["RURI_V3_RERANKER_310M"] ||

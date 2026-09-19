@@ -197,8 +197,11 @@ reader cannot be relied on to catch.
 `Models::Llama` is the Llama-shaped decoder, which is most of them: it
 declares exactly what Qwen2.5-0.5B holds and exactly what
 sarashina2.2-0.5b holds, its gradients agree with its forward, and both
-of their numbers agree with transformers to about a millionth. What it does not implement it refuses
-to build (scaled rotary embeddings, sliding window attention).
+of their numbers agree with transformers to about a millionth. It also
+builds the scaled rotary embedding Llama 3.1, 3.2 and 3.3 carry, whose
+frequencies are held to the reference arithmetic but not yet to a
+published checkpoint's numbers. What it does not implement it refuses to
+build (the other rope scalings, sliding window attention).
 
 `Models::Gemma3` is the other shape: four norms a layer, head-wise
 norms on q and k, `1 + w` scaling, a tanh GELU, and most layers seeing

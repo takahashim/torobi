@@ -55,7 +55,10 @@ pub enum Op {
     StopGradient,
 
     Softmax { axis: i32 },
-    Rope { theta: f32 },
+    /// The rotary embedding, by its base or by the frequencies a scaled
+    /// one was given: `freqs` names one per pair of dimensions, and
+    /// replaces what `theta` would have produced.
+    Rope { theta: f32, freqs: Option<Vec<f32>> },
 
     Transpose(Vec<i32>),
     Reshape(Vec<i32>),
@@ -132,6 +135,7 @@ impl Op {
             },
             "rope" => Op::Rope {
                 theta: number(attributes, "theta")?,
+                freqs: optional_numbers(attributes, "freqs")?,
             },
             "transpose" => Op::Transpose(integers(attributes, "axes")?),
             "reshape" => {
@@ -370,6 +374,27 @@ fn integers(attributes: &Map<String, Value>, key: &str) -> Result<Vec<i32>> {
                 .with_context(|| format!("attribute {key:?} must be a list of integers"))
         })
         .collect()
+}
+
+fn numbers(attributes: &Map<String, Value>, key: &str) -> Result<Vec<f32>> {
+    let list = attributes
+        .get(key)
+        .and_then(Value::as_array)
+        .with_context(|| format!("attribute {key:?} must be a list of numbers"))?;
+    list.iter()
+        .map(|v| {
+            v.as_f64()
+                .map(|f| f as f32)
+                .with_context(|| format!("attribute {key:?} must be a list of numbers"))
+        })
+        .collect()
+}
+
+fn optional_numbers(attributes: &Map<String, Value>, key: &str) -> Result<Option<Vec<f32>>> {
+    match attributes.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => numbers(attributes, key).map(Some),
+    }
 }
 
 fn optional_integers(attributes: &Map<String, Value>, key: &str) -> Result<Option<Vec<i32>>> {

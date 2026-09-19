@@ -115,20 +115,124 @@ class LlamaTest < Minitest::Test
   end
 
   # What the family does that this does not do. Refused rather than
-  # ignored: a rope that should have been scaled and was not is a model
+  # ignored: a window that should have been slid and was not is a model
   # that runs, trains, and is not the one the file names.
   def test_what_is_not_implemented_is_refused_rather_than_ignored
-    scaled = oracle.fetch("config").merge(
-      "rope_scaling" => { "rope_type" => "llama3", "factor" => 8.0 }
-    )
-    e = assert_raises(Torobi::ConfigError) { Torobi::Models::Llama.from_hash(scaled) }
+    # The other rope scalings are different arithmetic, and yarn changes
+    # the scale attention is read at as well, so none of them is this one
+    # with different numbers in it.
+    %w[linear dynamic yarn longrope].each do |type|
+      scaled = oracle.fetch("config").merge("rope_scaling" => { "rope_type" => type,
+                                                                "factor" => 8.0 })
+      e = assert_raises(Torobi::ConfigError) { Torobi::Models::Llama.from_hash(scaled) }
 
-    assert_match(/rope_scaling/, e.message)
+      assert_match(/rope_scaling #{type.inspect} is not implemented/, e.message)
+    end
 
     windowed = oracle.fetch("config").merge("use_sliding_window" => true)
     e = assert_raises(Torobi::ConfigError) { Torobi::Models::Llama.from_hash(windowed) }
 
     assert_match(/sliding window/, e.message)
+  end
+
+  # --- the scaled rope Llama 3.1 and 3.2 carry ---
+
+  # What Llama-3.2-1B's config says, on the model this file already
+  # builds: the scaling is the only thing about it that is new, so it is
+  # the only thing invented here.
+  LLAMA3_SCALING = { "rope_type" => "llama3", "factor" => 32.0,
+                     "low_freq_factor" => 1.0, "high_freq_factor" => 4.0,
+                     "original_max_position_embeddings" => 8192 }.freeze
+
+  def scaled
+    Torobi::Models::Llama.from_hash(oracle.fetch("config").merge("rope_scaling" => LLAMA3_SCALING))
+  end
+
+  # The three bands, at the two ends and in the middle.
+  #
+  # A rope turns position p in pair i by p * inv[i], and llama3 divides
+  # the slow turns by `factor`, leaves the fast ones alone, and
+  # interpolates between. Written here as the wavelengths it is defined
+  # over rather than as numbers copied from a run.
+  def test_the_scaled_rope_stretches_the_slow_turns_and_leaves_the_fast_ones
+    config = scaled
+    dim = config.head_dim
+    freqs = config.rope_scaling.frequencies(theta: config.rope_theta, dim:)
+    plain = (0...(dim / 2)).map { |i| 1.0 / (config.rope_theta**(2.0 * i / dim)) }
+
+    assert_equal 32, freqs.size, "one per pair of the 64 a head is wide"
+    # 2pi / inv is the wavelength; the band ends are 8192/4 and 8192/1.
+    fast, slow = [0, 31].map { |i| 2 * Math::PI / plain[i] }
+
+    assert_operator fast, :<, 8192 / 4.0, "the first pair turns fast"
+    assert_operator slow, :>, 8192 / 1.0, "and the last one slowly"
+    assert_in_delta plain[0], freqs[0], 1e-12, "a fast turn is untouched"
+    assert_in_delta plain[31] / 32.0, freqs[31], 1e-12, "a slow one is stretched by the factor"
+
+    middle = (0...32).select do |i|
+      wavelength = 2 * Math::PI / plain[i]
+      wavelength.between?(8192 / 4.0, 8192 / 1.0)
+    end
+
+    refute_empty middle, "the band between the two is what the interpolation is for"
+    middle.each do |i|
+      assert_operator freqs[i], :>, plain[i] / 32.0, "#{i} is not stretched all the way"
+      assert_operator freqs[i], :<, plain[i], "and not left alone either"
+    end
+  end
+
+  # The scaling reaches the graph as numbers, one per pair, on every rope
+  # in the model.
+  def test_a_scaled_model_carries_its_frequencies_on_every_rope
+    ropes = Torobi::Models::Llama.causal_lm(scaled, seq: 4)
+                                 .nodes.select { |node| node.op == "rope" }
+
+    assert_equal 48, ropes.size, "q and k, in each of the 24 layers"
+    ropes.each do |node|
+      assert_equal 32, node.attributes.fetch("freqs").size
+      assert_in_delta 1.0, node.attributes.fetch("freqs").first, 1e-12
+    end
+  end
+
+  # A description nobody changed goes on producing the digest it always
+  # did: the attribute is absent rather than null where there is no
+  # scaling, which is what keeps the graphs above identical to the ones
+  # built before any of this existed.
+  def test_an_unscaled_model_says_nothing_about_frequencies
+    ropes = Torobi::Models::Llama.causal_lm(published, seq: 4)
+                                 .nodes.select { |node| node.op == "rope" }
+
+    refute_empty ropes
+    ropes.each do |node|
+      assert_equal({ "theta" => published.rope_theta }, node.attributes)
+    end
+  end
+
+  # And the reason all of this is refused rather than ignored: the two
+  # models are not the same model, at any length. Five positions, not
+  # five thousand.
+  #
+  # A head wide enough to show it. The model above has two dimensions to
+  # a head, so its one pair turns at a wavelength of 2pi and llama3
+  # leaves every fast turn alone: on that model the scaling really is the
+  # identity, and a test on it would have proved the opposite of what it
+  # said. Eight dimensions reach a wavelength of about 6300, which is
+  # inside the band the scaling interpolates over.
+  def test_scaling_the_rope_changes_what_the_model_answers
+    wide = small_config.merge("hidden_size" => 32)
+    built = [wide, wide.merge("rope_scaling" => LLAMA3_SCALING)].map do |raw|
+      config = Torobi::Models::Llama.from_hash(raw)
+
+      assert_equal 8, config.head_dim
+      config_for(Torobi::Models::Llama.causal_lm(config, seq: SEQ))
+    end
+    held = random_weights(built.first)
+
+    plain, scaled_logits = built.map do |config|
+      Torobi::Session.open(config, weights: held) { |s| s.forward(batch)["m.logits"].to_a }
+    end
+
+    refute_equal plain, scaled_logits, "a scaled rope is a different model from the first token"
   end
 
   # --- a model small enough to answer for itself ---
@@ -137,24 +241,26 @@ class LlamaTest < Minitest::Test
 
   # Two key heads under four query heads, so the grouping is exercised
   # rather than degenerate, and three layers.
-  def small
-    @small ||= Torobi::Models::Llama.from_hash(
-      "vocab_size" => 11, "hidden_size" => 8, "intermediate_size" => 16,
+  def small_config
+    { "vocab_size" => 11, "hidden_size" => 8, "intermediate_size" => 16,
       "num_hidden_layers" => 3, "num_attention_heads" => 4,
       "num_key_value_heads" => 2, "rms_norm_eps" => 1e-6, "rope_theta" => 10_000.0,
-      "tie_word_embeddings" => true, "eos_token_id" => 10
-    )
+      "tie_word_embeddings" => true, "eos_token_id" => 10 }
   end
+
+  def small = @small ||= Torobi::Models::Llama.from_hash(small_config)
 
   def model = @model ||= Torobi::Models::Llama.causal_lm(small, seq: SEQ)
 
   # What a language model is trained on: what it should have said next,
   # at the positions where there is a next. Written here rather than in
   # the model, because which positions count is the recipe's.
-  def graph_config
-    @graph_config ||= Torobi::GraphConfig.new(
-      models: { m: model },
-      objective: Torobi.objective(m: model) do |g|
+  def graph_config = @graph_config ||= config_for(model)
+
+  def config_for(built)
+    Torobi::GraphConfig.new(
+      models: { m: built },
+      objective: Torobi.objective(m: built) do |g|
         at = g.cross_entropy(g.from_model(:m, :logits),
                              g.from_batch(:targets, [nil, SEQ], dtype: :i32))
         kept = g.from_batch(:kept, [nil, SEQ])
@@ -163,16 +269,16 @@ class LlamaTest < Minitest::Test
     )
   end
 
-  def weights
-    @weights ||= begin
-      rng = Random.new(23)
-      params = graph_config.parameters.to_h do |parameter|
-        shape = parameter.spec.shape
-        [parameter.qualified_path,
-         { shape:, data: Array.new(shape.reduce(1, :*)) { rng.rand(-0.4..0.4) } }]
-      end
-      { params: }
+  def weights = @weights ||= random_weights(graph_config)
+
+  def random_weights(config)
+    rng = Random.new(23)
+    params = config.parameters.to_h do |parameter|
+      shape = parameter.spec.shape
+      [parameter.qualified_path,
+       { shape:, data: Array.new(shape.reduce(1, :*)) { rng.rand(-0.4..0.4) } }]
     end
+    { params: }
   end
 
   ROWS = [[3, 8, 5, 9, 2], [4, 6, 1]].freeze

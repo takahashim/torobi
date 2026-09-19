@@ -241,7 +241,7 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
         Op::StopGradient => mlx_rs::stop_gradient(&ins[0])?,
 
         Op::Softmax { axis } => mlx_rs::ops::softmax_axis(&ins[0], *axis, None)?,
-        Op::Rope { theta } => rope(&ins[0], *theta)?,
+        Op::Rope { theta, freqs } => rope(&ins[0], *theta, freqs.as_deref())?,
 
         Op::Transpose(axes) => ins[0].transpose_axes(axes)?,
         Op::Reshape(shape) => ins[0].reshape(&kept(shape, ins[0].shape())?)?,
@@ -350,22 +350,36 @@ fn kept(target: &[i32], from: &[i32]) -> Result<Vec<i32>> {
 ///
 /// Positions are the second-to-last axis, which is the sequence, and the
 /// last axis is split in half: the first half rotates against the second.
-fn rope(x: &Array, theta: f32) -> Result<Array> {
+fn rope(x: &Array, theta: f32, freqs: Option<&[f32]>) -> Result<Array> {
     let shape = x.shape().to_vec();
     let rank = shape.len();
     let (positions, width) = (shape[rank - 2], shape[rank - 1]);
     let half = width / 2;
 
-    // angle[p, i] = p / theta^(2i/width). Built on the host: it is
-    // positions x half floats, which is nothing beside the matmuls this
-    // sits between, and it keeps the device graph to the rotation itself.
-    let angles: Vec<f32> = (0..positions)
-        .flat_map(|p| {
-            (0..half).map(move |i| {
-                p as f32 / theta.powf(2.0 * i as f32 / width as f32)
+    // angle[p, i] = p / theta^(2i/width), or p * freqs[i] where the model
+    // scaled them (Op::Rope). Built on the host: it is positions x half
+    // floats, which is nothing beside the matmuls this sits between, and
+    // it keeps the device graph to the rotation itself.
+    let angles: Vec<f32> = match freqs {
+        Some(given) => {
+            if given.len() != half as usize {
+                return Err(Exception::custom(format!(
+                    "rope: {} frequencies for {width} dimensions, which wants {half}",
+                    given.len()
+                )));
+            }
+            (0..positions)
+                .flat_map(|p| given.iter().map(move |f| p as f32 * f))
+                .collect()
+        }
+        None => (0..positions)
+            .flat_map(|p| {
+                (0..half).map(move |i| {
+                    p as f32 / theta.powf(2.0 * i as f32 / width as f32)
+                })
             })
-        })
-        .collect();
+            .collect(),
+    };
     let angle = Array::from_slice(&angles, &[positions, half]);
     let (cos, sin) = (angle.cos()?, angle.sin()?);
 
@@ -697,5 +711,46 @@ mod tests {
             &[&[1.0, 0.0, 1.0, 0.0]],
         );
         close(&got, &[1.0, 0.0, 1.0f32.cos(), 1.0f32.sin()]);
+    }
+
+    /// A scaled rope turns by the frequencies it was handed.
+    ///
+    /// The base is still there and is still ignored: what a model scaled
+    /// its frequencies to is the model's arithmetic, and the engine is
+    /// told the answer rather than the formula (`Op::Rope`).
+    #[test]
+    fn rope_turns_by_the_frequencies_it_is_given_rather_than_the_base() {
+        let got = output(
+            "rope",
+            &[2, 2],
+            serde_json::json!({"theta": 10000.0, "freqs": [0.25]}),
+            &[&[1.0, 0.0, 1.0, 0.0]],
+        );
+        // Position 0 is still the identity; position 1 turns by 0.25
+        // rather than by the 1 radian the base alone would have given.
+        close(&got, &[1.0, 0.0, 0.25f32.cos(), 0.25f32.sin()]);
+    }
+
+    #[test]
+    fn a_rope_given_the_wrong_number_of_frequencies_says_so() {
+        // Four dimensions want two frequencies. A description handing
+        // over another count has miscounted its head, and the difference
+        // between being told and not being told is a wrong model that
+        // trains.
+        let (config, weights) = fixtures::one_op(
+            "rope",
+            serde_json::json!([2, 4]),
+            serde_json::json!({"theta": 10000.0, "freqs": [0.25, 0.5, 0.75]}),
+            0,
+        );
+        let mut session = Session::open(&config, Weights::Inline(&weights)).unwrap();
+        let batch: Batch = [fixtures::field("x", &[2, 4], &[1.0f32; 8])].into_iter().collect();
+
+        let said = session
+            .evaluate(&batch)
+            .expect_err("three frequencies for four dimensions")
+            .to_string();
+
+        assert!(said.contains("frequencies"), "{said}");
     }
 }

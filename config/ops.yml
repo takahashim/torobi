@@ -118,9 +118,17 @@
   attributes: { axis: int }
   shape_rule: same_as_input
   handle: true
+# `freqs` is what a scaled rope says instead: one angular frequency per
+# pair of dimensions, so position p turns by `p * freqs[i]` rather than by
+# `p / theta^(2i/width)`. Which frequencies those are is the model's
+# business and not the engine's -- Llama 3 stretches the low ones and
+# leaves the high ones alone (`Models::Llama`) -- so what crosses the
+# boundary is the numbers rather than the name of a formula. Left out
+# when the base alone says it, which is what keeps the digest of every
+# graph built before this the same.
 - name: rope
   inputs: 1
-  attributes: { theta: number }
+  attributes: { theta: number, freqs: number_list_or_null }
   shape_rule: same_as_input
   handle: true
 
