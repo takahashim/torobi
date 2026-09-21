@@ -179,6 +179,11 @@ class HooksTest < Minitest::Test
   # times what it leaves behind, and the larger number is the one the
   # machine reacts to.
   def test_a_memory_guard_under_the_limit_is_quiet_and_watches_the_peak
+    # The peak is the process's high-water mark, not this run's, and it only
+    # grows: a test that ran earlier (a published model loaded for parity,
+    # say) can leave it above the 4 GB a run this small would set. Reset it
+    # so the test is about its own run.
+    Torobi::Memory.reset_peak!
     Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.1 }) do |s|
       guard = Torobi::Policies::MemoryGuard.new(4 * (1024**3))
       s.use(guard)
