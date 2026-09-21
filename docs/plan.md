@@ -3562,6 +3562,89 @@ safetensors ヘッダに対して、この記述は **146 個のテンソルに�
 sliding window は断ったままである。こちらは seq が window を超えない限り causal と厳密に
 同じなので、性質が違う (別の節にする)。
 
+### 15.73 upstream mlx-rs へ戻した(2026-09-21)
+
+`notes/plan-upstream-mlx-rs.md` の移行。OminiX-MLX の fork をやめ、crates.io の
+`mlx-rs 0.32.0` / `mlx-sys 0.6.0` を使い、prebuilt MLX は mlx-c の
+`MLX_C_USE_SYSTEM_MLX` 経由で渡す。§5 が「pinned git」に変えたときに失った
+「刈り込みとローカルパッチ」ではなく、**fork を持つ理由そのもの**が消えたための変更である:
+fork が必要だったのは upstream が MLX 0.32 に追随していなかったことと、Xcode なしの
+経路が無かったことで、いまは `MLX_C_USE_SYSTEM_MLX` が後者を upstream 無改造で与える。
+
+**コードに入ったもの。**
+
+| | |
+| --- | --- |
+| `engine/Cargo.toml` | `mlx-rs = "=0.32.0"`(features は `safetensors`)、`mlx-sys = "=0.6.0"`。移行が落ち着くまで完全固定 |
+| `Cargo.lock` | OminiX の git URL が消え、registry の 0.32.0 / 0.6.0 になった |
+| `engine/Cargo.lock` | **削除**。workspace member なので cargo は root lock だけを使い、この中古は OminiX の commit を名乗ったままだった |
+| `engine/build.rs` | 記録するのは rev ではなく version (`mlx_rs` / `mlx_sys`)。metallib の在り処は `MLX_RS_METAL_PATH`(無ければ従来どおり profile dir) |
+| `ext/torobi/mlx_prebuilt.rb` | 「prebuilt の準備」から「**system MLX prefix の取得と検証**」へ。`MLX_PREBUILT_PATH` は消え、`TOROBI_MLX_PREFIX` が手元ビルド用の逃げ道 |
+| `ext/torobi/extconf.rb` / `Rakefile` | cargo に `CMAKE_TOOLCHAIN_FILE`(生成した toolchain file)、`MLX_RS_METAL_PATH`、`-L native=<prefix>/lib` を渡す |
+
+**API の差は 4 つ**だった。OminiX の rev は upstream の少し手前を指しており、読んで見つけた
+2 つは動いた (`interp.rs`): `scaled_dot_product_attention` に attention sinks の引数が
+増えていた (`None`)、`ops::stack` は axis を要求するようになっていた (`0`)。残り 2 つは
+コンパイル時に出た deprecation で、`concatenate_axis` → `concatenate`、`Array::item` →
+`item_cast` に置き換えた。§4.3 に挙げた API は他にすべて upstream にあった。
+
+**ビルドして確かめた。** mlx-prebuilt が `c74db530` から MLX 0.32.2 の archive を作ったので、
+それを展開した prefix を `TOROBI_MLX_PREFIX` に指して、**Metal toolchain 無しで**通した
+(MLX は source build されず、`find_package` が見つけたものを使う)。
+
+| | |
+| --- | --- |
+| `cargo check --workspace` | 通る (warning ゼロ) |
+| `cargo test -p torobi-engine` | **132 件全て通る**。MLX の Metal kernel がこの機械で動く |
+| `rake rust_test:facade` | 41 件が並列で通る |
+| `rake test` | **348 件通る / 2 skip** (skip は checkpoint の要る parity) |
+| `rake engine:check` | 閉形式と一致 (max&vert;Δ&vert; 2.84e-08、MLX 0.30.1 のときと同じ数字) |
+| `rake parquet:test` | 通る |
+
+**ビルドが 2 つの穴を教えた。**
+
+1. **mlx-c は examples を既定でビルドする。** `MLX_C_BUILD_EXAMPLES` が既定 ON で、
+   `example-gguf` / `example-safe-tensors` が MLX の vendored `gguflib` をリンクしようと
+   する。system MLX ではその木が無いので `_gguf_*` の未定義で cmake が止まる。
+   **library には要らない**ので、toolchain file に `set(MLX_C_BUILD_EXAMPLES OFF)` を足した。
+2. **metallib は CLI バイナリの隣にも要る。** `build.rs` は test binary の `deps/` だけに
+   link していたが、`torobi-engine` は `target/<profile>/` から走るので、そちらにも
+   link するようにした。`engine:check` が最初これで落ちた。
+
+`mlx-sys` が `libgguflib.a` の link search を `_deps/mlx-build/mlx/io` に決め打ちしている
+懸念は、prefix の `lib/` を `RUSTFLAGS` で足すことで解けた (バイナリがリンクして動く)。
+
+**`requires` が名指すのは mlx-c の commit であって `v0.6.0` タグではない。** mlx-sys 0.6.0 が
+pin するのは `c74db530` (v0.6.0 の 7 コミット先) で、タグの `v0.6.0` は MLX **0.31.1** を
+pin する。しかもその 7 コミットは `mlx/c/*.h` (`ops.h` / `fast.h` を含む) を触る。つまり
+タグからビルドしたものは 0.6.0 と名乗ったまま**別の世代**であり、§15.42 で失敗したのと
+同じ種類のずれになる。`c74db530` からビルドしたものだけを受け入れる (前方一致なので
+短縮 SHA でも完全 SHA でも通る)。
+
+**release を打って、さらに 2 つ見つかった。**
+
+1. **`rake mlx:pin` は pin を動かせなかった。** `PIN` をロード時に定数へ読んでいたので、
+   タスクが JSON を書き換えても `ensure!` は**古い archive** を検証していた (同じ release を
+   2 回 pin する分には気付かない。§15.43 の試験はまさにそれだった)。pin を**呼び出し時に
+   読む**ように直した。これで「別の release へ移す」が実際に動く。
+2. **`mlx-prebuilt` の workflow 既定が古かった。** リポジトリ側の `release.yml` が
+   `MLX_C_REF` の既定を `v0.4.1` のままにしていた。tag push では `github.event.inputs` が
+   空なのでそれが使われ、`v0.6.0.0` の release は MLX 0.30.1 / mlx-c 0.4.1 で作られた。
+   `requires` はそれを拒否する (正しい動作)。workflow の既定を `c74db530` に直して
+   再リリースする必要がある。
+
+この状態の release に対して `rake mlx:pin[v0.6.0.0]` を走らせ、**v0.6.0.0 を取得し、
+digest を通し、世代で拒否し、pin を元に戻す**ところまで確認した。ガードは実 release に
+対しても効いている。
+
+**正しい世代で打ち直して、ダウンロード経路も確かめた。** `v0.6.0.0` が MLX 0.32.2 /
+mlx-c `c74db530` で再リリースされたあと (`rake mlx:pin[v0.6.0.0]` が成功し、asset も
+`mlx-v0.32.2-mlxc-c74db5307cc8…` になった)、キャッシュを消して `bundle exec rake` を
+走らせ、release からの**ダウンロード・digest 検証・展開・prefix の確認・世代の確認**を
+1 回通した。`rake smoke` も通り、隔離した GEM_HOME に install して checkout の外から
+1 step が動いた (10.625 → 1.449985、§15.26 と同じ数字)。**これで移行の出口条件
+(notes/plan-upstream-mlx-rs.md §16) はすべて満たした。**
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。

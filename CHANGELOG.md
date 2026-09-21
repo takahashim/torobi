@@ -84,6 +84,11 @@ between two versions people have.
   process of its own with a memory cap.
 - **`rake mlx:pin`**, and a prebuilt MLX fetched by digest rather than
   by URL alone.
+- **The upstream mlx-rs from crates.io** (`0.32.0`, whose `mlx-sys`
+  `0.6.0` pins mlx-c and MLX 0.32.2) rather than a fork of it. The
+  pre-built MLX reaches mlx-c through `MLX_C_USE_SYSTEM_MLX` and a
+  generated CMake toolchain file, so the gem still installs with no Metal
+  toolchain and with a dependency anyone can read.
 
 - **`parquet/`**, a reader for the part of parquet that datasets are
   written in: flat columns, snappy, dictionary-encoded pages of the
