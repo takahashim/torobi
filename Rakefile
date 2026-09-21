@@ -185,6 +185,29 @@ namespace :oracle do
 
     sh "ruby tools/inventory.rb #{dir.shellescape} test/oracle/ruri-v3-reranker-310m.json"
   end
+
+  # The rendering and tokenization a Jev Local checkpoint is served with,
+  # recorded from the reference itself so the Ruby port can be held to the
+  # same bytes (docs/plan.md section 15.58). Not part of `rake oracle`:
+  # it needs a jev_local checkout and the tokenizer, which the others do
+  # not.
+  JEV_LOCAL = ENV.fetch("JEV_LOCAL", File.expand_path("../jev_local", __dir__))
+  JEV_BASE = "sbintuitions/modernbert-ja-130m"
+  JEV_REVISION = "28c180b16463ba6f3fa79b48756fbf21586fe23e"
+
+  desc "record what jev_local renders and tokenizes, for test/oracle"
+  task :jev_tokenizer do
+    tokenizer = ENV.fetch("JEV_TOKENIZER", nil)
+    unless tokenizer
+      raise "set JEV_TOKENIZER to #{JEV_BASE}'s tokenizer.json " \
+            "(from the Hub cache or `huggingface-cli download`)"
+    end
+
+    sh "uv", "run", "--with", "tokenizers", "python", "tools/jev_tokenizer_oracle.py",
+       "--jev-local", JEV_LOCAL, "--tokenizer", tokenizer,
+       "--model", JEV_BASE, "--revision", JEV_REVISION,
+       "--out", "test/oracle/jev-tokenizer.json"
+  end
 end
 
 desc "regenerate every oracle artifact"
