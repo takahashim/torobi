@@ -15,7 +15,7 @@ use mlx_rs::transforms::eval;
 use mlx_rs::{Array, Dtype};
 
 use crate::checkpoint;
-use crate::optimizer::{Config as OptimizerConfig, Optimizer};
+use crate::optimizer::{global_norm, scaled, Config as OptimizerConfig, Optimizer};
 use crate::plan::{Model, Pattern, Plan};
 use crate::tensor::{to_tensor, Tensor};
 
@@ -65,6 +65,10 @@ pub struct TrainState {
     seed: u64,
     step: usize,
     last_loss: f32,
+    /// The L2 norm of the last step's gradients, before any clipping, so a
+    /// watcher can see how close a run is to its cap rather than having to
+    /// guess. NaN until a step is taken, and when a step is skipped.
+    last_grad_norm: f32,
     /// Gradients waiting for a step, and the losses they came from.
     ///
     /// A batch that does not fit is trained as several that do, summing
@@ -103,6 +107,7 @@ impl TrainState {
             seed,
             step: 0,
             last_loss: f32::NAN,
+            last_grad_norm: f32::NAN,
             pending: None,
         })
     }
@@ -136,6 +141,32 @@ impl TrainState {
     /// A knob: effect begins with the next step.
     pub fn set_lr(&mut self, lr: f32) {
         self.optimizer.config_mut().set_lr(lr);
+    }
+
+    /// The norm of the last step's gradients, before clipping. NaN before
+    /// the first step and on a step that was skipped.
+    pub fn grad_norm(&self) -> f32 {
+        self.last_grad_norm
+    }
+
+    /// The largest gradient norm a step may carry, or `None`.
+    pub fn clip(&self) -> Option<f32> {
+        self.optimizer.config().clip()
+    }
+
+    /// A knob: effect begins with the next step. `None` is no cap.
+    pub fn set_clip(&mut self, clip: Option<f32>) {
+        self.optimizer.config_mut().set_clip(clip);
+    }
+
+    /// The L2 norm of every parameter, over the whole model.
+    ///
+    /// On demand rather than per step: it is a reduction over all the
+    /// weights, and unlike the gradient norm nothing in a step reads it.
+    /// Frozen parameters count, so this is the size of the model and not
+    /// of what is being trained.
+    pub fn param_norm(&self) -> Result<f32> {
+        global_norm(&self.params)
     }
 
     /// What update rule this run uses, as data.
@@ -248,7 +279,16 @@ impl TrainState {
     /// and nothing after it could recover; the only way back would be a
     /// checkpoint, which is why the plan listed a rollback knob. Not going
     /// there is cheaper than coming back, and free: the loss is already
-    /// evaluated by the time this is called.
+    /// evaluated by the time this is called. A finite loss with a
+    /// non-finite gradient is refused the same way, which is why the norm
+    /// is taken before the update rather than only when clipping is on.
+    ///
+    /// **Gradients are clipped to `clip`, if one is set.** The norm is
+    /// global over every differentiated parameter, taken in f32, and when
+    /// it exceeds the cap every gradient is scaled by the same factor: the
+    /// direction of the step is untouched and only its length is bounded.
+    /// The cap is recorded with the optimizer, and `grad_norm()` reports
+    /// what the norm was, so a run can say how close it came.
     ///
     /// The counters still move. A step was attempted, its batch was
     /// consumed, and the RNG was drawn from during the forward, so the draw
@@ -264,12 +304,28 @@ impl TrainState {
             eval(std::iter::once(&rng))?;
             self.rng = rng;
             self.last_loss = value;
+            self.last_grad_norm = f32::NAN;
             self.step += 1;
             return Ok(value);
         }
 
+        let norm = global_norm(grads)?;
+        if !norm.is_finite() {
+            eval(std::iter::once(&rng))?;
+            self.rng = rng;
+            self.last_loss = value;
+            self.last_grad_norm = norm;
+            self.step += 1;
+            return Ok(value);
+        }
+
+        let grads: Vec<Array> = match self.optimizer.config().clip() {
+            Some(max) if norm > max => scaled(grads, max / norm)?,
+            _ => grads.to_vec(),
+        };
+
         let mut params = self.params.clone();
-        let next_optimizer = self.optimizer.next(&mut params, &self.argnums, grads)?;
+        let next_optimizer = self.optimizer.next(&mut params, &self.argnums, &grads)?;
 
         let (m, v) = next_optimizer.slots();
         eval(
@@ -284,6 +340,7 @@ impl TrainState {
         self.optimizer = next_optimizer;
         self.rng = rng;
         self.last_loss = value;
+        self.last_grad_norm = norm;
         self.step += 1;
         Ok(value)
     }
@@ -666,7 +723,7 @@ mod tests {
     }
 
     fn sgd(lr: f32) -> OptimizerConfig {
-        OptimizerConfig::Sgd { lr }
+        OptimizerConfig::Sgd { lr, clip: None }
     }
 
     fn adamw() -> OptimizerConfig {
@@ -676,6 +733,7 @@ mod tests {
             beta2: 0.999,
             eps: 1e-8,
             weight_decay: 0.0,
+            clip: None,
         }
     }
 
@@ -727,6 +785,44 @@ mod tests {
         step(&plan, &mut state, &[2.0, 2.0]);
         let w = values(&state.fetch(&plan, "m.w").unwrap());
         assert!((w[0] - 0.75).abs() < 1e-6, "{w:?}");
+    }
+
+    #[test]
+    fn the_gradient_norm_is_reported_whether_or_not_a_clip_is_set() {
+        let (plan, mut state) = open(fixtures::scaled_mean(), sgd(0.5));
+        assert_eq!(state.clip(), None);
+        assert!(state.grad_norm().is_nan());
+        step(&plan, &mut state, &[2.0, 2.0]);
+        // The gradient is [1, 1], so the norm is sqrt(2).
+        assert!((state.grad_norm() - 2.0f32.sqrt()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_clip_bounds_the_norm_of_the_step_and_leaves_its_direction() {
+        let (plan, mut state) = open(fixtures::scaled_mean(), sgd(0.5));
+        state.set_clip(Some(0.1));
+        assert_eq!(state.clip(), Some(0.1));
+        step(&plan, &mut state, &[2.0, 2.0]);
+        // The norm is still reported as it was before clipping, so a
+        // watcher sees how far past the cap the run went.
+        assert!((state.grad_norm() - 2.0f32.sqrt()).abs() < 1e-5);
+        // The step is lr * (clip / norm) * [1, 1], whose own norm is
+        // lr * clip = 0.05. The weights start at [1, 2] and both move by
+        // the same amount, since one factor scales the whole vector.
+        let w = values(&state.fetch(&plan, "m.w").unwrap());
+        let moved = ((1.0 - w[0]).powi(2) + (2.0 - w[1]).powi(2)).sqrt();
+        assert!((moved - 0.5 * 0.1).abs() < 1e-5, "{w:?}");
+        assert!(((1.0 - w[0]) - (2.0 - w[1])).abs() < 1e-6, "{w:?}");
+    }
+
+    #[test]
+    fn the_parameter_norm_is_over_the_whole_model() {
+        let (plan, mut state) = open(fixtures::scaled_mean(), sgd(0.1));
+        // The one parameter holds [1.0, 2.0].
+        assert!((state.param_norm().unwrap() - 5.0f32.sqrt()).abs() < 1e-5);
+        // A step moves it, so the norm it reports moves too.
+        step(&plan, &mut state, &[2.0, 2.0]);
+        assert!((state.param_norm().unwrap() - 5.0f32.sqrt()).abs() > 1e-4);
     }
 
     #[test]

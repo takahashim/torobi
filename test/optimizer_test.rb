@@ -160,6 +160,80 @@ class OptimizerTest < Minitest::Test
     end
   end
 
+  # Global-norm clipping: one factor for every gradient, so the direction
+  # of the step is untouched and only its length is bounded. The norm read
+  # back is the one before clipping, so a run can see how far past the cap
+  # it went.
+  def test_a_clip_bounds_the_global_norm_of_the_step
+    lr = 0.1
+    clip = 0.05
+    w = [0.5, -0.25]
+    b = [0.125]
+    b_batch = batch
+    dw, db = gradients(w, b, b_batch)
+    norm = Math.sqrt((dw + db).sum { |g| g * g })
+
+    Torobi::Session.open(config, weights: weights,
+                         optimizer: { kind: :sgd, lr:, clip: }) do |session|
+      session.step!(b_batch)
+
+      assert_in_delta norm, session.grad_norm, 1e-5
+
+      scale = lr * clip / norm
+      engine_w = session.fetch("m.l.weight").to_a
+      engine_b = session.fetch("m.l.bias").to_a
+
+      w.each_with_index do |value, i|
+        assert_in_delta value - (scale * dw[i]), engine_w[i], 1e-5
+      end
+      assert_in_delta b[0] - (scale * db[0]), engine_b[0], 1e-5
+
+      # The step it took has a norm of exactly lr * clip, which is what
+      # the cap asks for when the gradient was over it.
+      delta = engine_w.each_with_index.map { |value, i| w[i] - value } + [b[0] - engine_b[0]]
+
+      assert_in_delta lr * clip, Math.sqrt(delta.sum { |d| d * d }), 1e-5
+    end
+  end
+
+  def test_the_gradient_norm_is_read_and_the_clip_is_a_recorded_knob
+    io = StringIO.new
+    Torobi::Session.open(config, weights: weights,
+                         optimizer: { kind: :sgd, lr: 0.1 }, io:) do |session|
+      assert_nil session.clip
+      assert_predicate session.grad_norm, :nan?, "no step has been taken yet"
+      session.step!(batch)
+
+      assert_predicate session.grad_norm, :finite?
+
+      session.adjust(clip: 1.0)
+
+      assert_in_delta(1.0, session.clip)
+      session.step!(batch)
+      session.adjust(clip: nil)
+
+      assert_nil session.clip
+    end
+
+    adjusted = Torobi::Journal.read(io.string).select { |entry| entry["kind"] == "adjust" }
+
+    assert_equal [1.0, nil], adjusted.map { |entry| entry["clip"] },
+                 "the knob and its removal are both recorded"
+  end
+
+  def test_the_parameter_norm_is_over_every_weight
+    Torobi::Session.open(config, weights: weights, optimizer: { kind: :sgd, lr: 0.1 }) do |session|
+      expected = Math.sqrt((0.5**2) + (0.25**2) + (0.125**2))
+
+      assert_in_delta expected, session.param_norm, 1e-6
+
+      before = session.param_norm
+      session.step!(batch)
+
+      refute_in_delta before, session.param_norm, 1e-9, "the step moved the weights"
+    end
+  end
+
   def test_an_unknown_optimizer_is_refused_by_name
     e = assert_raises(ArgumentError) do
       Torobi::Session.open(config, weights: weights, optimizer: { kind: :adagrad, lr: 0.1 })

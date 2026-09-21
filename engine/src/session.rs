@@ -93,6 +93,25 @@ impl SessionCore {
         self.state.set_lr(lr);
     }
 
+    /// The norm of the last step's gradients, before clipping.
+    pub(crate) fn grad_norm(&self) -> f32 {
+        self.state.grad_norm()
+    }
+
+    pub(crate) fn clip(&self) -> Option<f32> {
+        self.state.clip()
+    }
+
+    /// A knob: effect begins with the next step. `None` is no cap.
+    pub(crate) fn set_clip(&mut self, clip: Option<f32>) {
+        self.state.set_clip(clip);
+    }
+
+    /// The L2 norm of every parameter, over the whole model.
+    pub(crate) fn param_norm(&self) -> Result<f32> {
+        self.state.param_norm()
+    }
+
     /// What update rule this session runs, as data.
     pub(crate) fn optimizer_config(&self) -> &OptimizerConfig {
         self.state.optimizer_config()
@@ -437,7 +456,13 @@ impl Session {
     /// Two places say "sgd 0.1" and neither reads the other, which is
     /// fine as long as neither is mistaken for one contract in two
     /// languages.
-    const SPIKE: (OptimizerConfig, u64) = (OptimizerConfig::Sgd { lr: 0.1 }, 0);
+    const SPIKE: (OptimizerConfig, u64) = (
+        OptimizerConfig::Sgd {
+            lr: 0.1,
+            clip: None,
+        },
+        0,
+    );
 
     /// Loads a GraphConfig and its initial parameters. Parameters are given
     /// by qualified path ("student.head.weight"), which is also the order
@@ -504,6 +529,23 @@ impl Session {
     /// A knob: effect begins with the next step.
     pub fn set_lr(&mut self, lr: f32) -> Outcome<()> {
         self.core_mut()?.set_lr(lr);
+        Ok(())
+    }
+
+    /// The norm of the last step's gradients, before clipping. NaN before
+    /// the first step and on a step that was skipped.
+    pub fn grad_norm(&self) -> Outcome<f32> {
+        Ok(self.core()?.grad_norm())
+    }
+
+    /// The largest gradient norm a step may carry, or `None`.
+    pub fn clip(&self) -> Outcome<Option<f32>> {
+        Ok(self.core()?.clip())
+    }
+
+    /// A knob: effect begins with the next step. `None` is no cap.
+    pub fn set_clip(&mut self, clip: Option<f32>) -> Outcome<()> {
+        self.core_mut()?.set_clip(clip);
         Ok(())
     }
 
@@ -659,6 +701,14 @@ impl Session {
     pub fn fetch(&self, path: &str) -> Outcome<Tensor> {
         let core = self.core()?;
         runtime().execute(|| core.fetch(path))
+    }
+
+    /// The L2 norm of every parameter. A reduction over the whole model, so
+    /// it is asked for rather than kept up to date; nothing in a step reads
+    /// it. Goes through the runtime like any other MLX work.
+    pub fn param_norm(&self) -> Outcome<f32> {
+        let core = self.core()?;
+        runtime().execute(|| core.param_norm())
     }
 
     /// Writes the run's state and the description it belongs to. Atomic.

@@ -35,6 +35,11 @@ module Torobi
     # should still be the same run twice.
     DEFAULT_SEED = 0
 
+    # A value that says "this knob was not named". `adjust` needs it for
+    # `clip` alone: lr and seed treat nil as "leave it", but nil is also
+    # the answer that means "no cap", so clip has to be able to say both.
+    NOT_GIVEN = Object.new.freeze
+
     # Opens a session over `config` (a GraphConfig).
     #
     # Where the parameters come from is said by keyword, because there is
@@ -340,6 +345,23 @@ module Torobi
     def loss = @native.loss
     def lr = @native.lr
 
+    # The L2 norm of the last step's gradients, before any clipping: how
+    # far past the cap the run went, or how close it came. NaN before the
+    # first step and on a step that was skipped.
+    def grad_norm = @native.grad_norm
+
+    # The largest gradient norm a step may carry, or nil for no cap. Set at
+    # open through the optimizer, `{ kind: :adamw, lr:, clip: }`, or by
+    # `adjust(clip:)`.
+    def clip = @native.clip
+
+    # The L2 norm of every parameter, over the whole model (frozen ones
+    # included). Unlike `grad_norm` this is not kept up to date: it is a
+    # reduction over all the weights, computed when asked, so it reaches
+    # MLX and can raise Busy while a step is in flight. A hook, which runs
+    # at a step boundary, is the place to call it.
+    def param_norm = @native.param_norm
+
     # The seed the RNG runs from. Explicit state, not a global: the draws a
     # step makes are a function of this and the step count, which is what
     # lets a resumed run take the same ones (docs/plan.md section 11.1).
@@ -347,7 +369,7 @@ module Torobi
 
     # Knobs take effect from the next step, and are recorded: a journal
     # that holds the decisions is what a replay applies (docs/plan.md 8.6).
-    def adjust(lr: nil, seed: nil)
+    def adjust(lr: nil, seed: nil, clip: NOT_GIVEN)
       atomically do
         turned = {}
         if lr
@@ -357,6 +379,10 @@ module Torobi
         if seed
           @native.seed = seed
           turned[:seed] = seed
+        end
+        unless clip.equal?(NOT_GIVEN)
+          @native.clip = clip
+          turned[:clip] = clip
         end
         @journal&.adjust(step: @native.step, **turned) unless turned.empty?
       end

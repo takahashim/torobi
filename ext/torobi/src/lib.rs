@@ -137,12 +137,17 @@ struct Snapshot {
     loss: f32,
     lr: f32,
     seed: u64,
+    /// The last step's gradient norm, before clipping: NaN until a step
+    /// is taken, and on a step that was skipped.
+    grad_norm: f32,
+    /// The cap in force, or `None`.
+    clip: Option<f32>,
 }
 
 impl Snapshot {
     /// Taken from an open session; the caller has one in hand.
     ///
-    /// None of the four can refuse (they read state and reach no MLX), and
+    /// None of these can refuse (they read state and reach no MLX), and
     /// a default would be a lie a watcher could not tell from an answer:
     /// step 0 is where a run starts.
     fn of(engine: &EngineSession) -> Self {
@@ -151,6 +156,8 @@ impl Snapshot {
             loss: engine.loss().expect("an open session answers loss"),
             lr: engine.lr().expect("an open session answers lr"),
             seed: engine.seed().expect("an open session answers seed"),
+            grad_norm: engine.grad_norm().expect("an open session answers grad_norm"),
+            clip: engine.clip().expect("an open session answers clip"),
         }
     }
 }
@@ -675,6 +682,33 @@ impl Session {
         })
     }
 
+    /// The last step's gradient norm, before clipping.
+    fn grad_norm(&self) -> f32 {
+        self.watch().grad_norm
+    }
+
+    /// The cap in force, or nil.
+    fn clip(&self) -> Option<f32> {
+        self.watch().clip
+    }
+
+    fn set_clip(
+        ruby: &Ruby,
+        rb_self: &Self,
+        clip: Option<f32>,
+    ) -> Result<Option<f32>, Error> {
+        rb_self.with_engine(ruby, |engine| {
+            engine.set_clip(clip)?;
+            Ok(clip)
+        })
+    }
+
+    /// The L2 norm of every parameter. A reduction over the whole model, so
+    /// it is asked for rather than published with the step's numbers.
+    fn param_norm(ruby: &Ruby, rb_self: &Self) -> Result<f32, Error> {
+        rb_self.read(ruby, |engine| engine.param_norm())
+    }
+
     fn seed(&self) -> u64 {
         self.watch().seed
     }
@@ -946,6 +980,10 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("loss", method!(Session::loss, 0))?;
     class.define_method("lr", method!(Session::lr, 0))?;
     class.define_method("lr=", method!(Session::set_lr, 1))?;
+    class.define_method("grad_norm", method!(Session::grad_norm, 0))?;
+    class.define_method("clip", method!(Session::clip, 0))?;
+    class.define_method("clip=", method!(Session::set_clip, 1))?;
+    class.define_method("param_norm", method!(Session::param_norm, 0))?;
     class.define_method("seed", method!(Session::seed, 0))?;
     class.define_method("seed=", method!(Session::set_seed, 1))?;
     class.define_method("set_frozen", method!(Session::set_frozen, 2))?;

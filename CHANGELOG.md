@@ -72,6 +72,14 @@ between two versions people have.
   possible; it differentiates, and there is a test that it does.
 - **`Torobi::GradCache`**, which trains a contrastive batch larger than
   the machine can hold, landing where the whole batch would have.
+- **Gradient clipping by global norm**: `optimizer: { kind: :adamw, lr:,
+  clip: }` at open, `adjust(clip:)` while it runs. The norm is taken in
+  f32 whatever the run is held in, one factor scales every gradient so the
+  direction is untouched, and `Session#grad_norm` reports what the norm was
+  before the cap. A finite loss with a non-finite gradient is a step that
+  is not taken, the way a non-finite loss already was.
+- **`Session#param_norm`**, the L2 norm of the whole model (frozen weights
+  included), computed when asked rather than kept with the step.
 - **`Torobi::Export`**: a run's weights written as a HuggingFace /
   sentence-transformers checkpoint, carrying the source model's
   tokenizer and configuration so the result loads as the model it is.

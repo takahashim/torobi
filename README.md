@@ -149,6 +149,27 @@ Inside an adapter nothing else is trainable, so the base is the same
 bytes at the end as at the start. On Qwen2.5-0.5B with rank 8 that
 leaves 0.109% of the parameters being trained.
 
+## Keeping the step bounded
+
+A step can be capped by the L2 norm of its gradients. The cap is set on
+the optimizer or turned while the run goes, is recorded with the run, and
+`grad_norm` reports what the last step's norm was *before* clipping, so the
+cap reads as a measurement rather than a switch:
+
+```ruby
+Torobi::Session.open(config, weights:,
+                     optimizer: { kind: :adamw, lr: 2e-5, clip: 1.0 }) do |s|
+  s.step!(batch)
+  s.grad_norm        # => the norm this step had, before the cap
+  s.adjust(clip: 0.5)
+  s.adjust(clip: nil) # no cap again
+end
+```
+
+`param_norm` is the other half of that reading: the L2 norm of every
+weight, frozen ones included. It is a reduction over the whole model, so
+it is computed when asked rather than carried with the step.
+
 ## Running a long one
 
 A training run belongs in a process of its own with a cap on what it may

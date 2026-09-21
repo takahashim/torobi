@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use mlx_rs::ops::zeros_like;
-use mlx_rs::Array;
+use mlx_rs::{Array, Dtype};
 use serde::{Deserialize, Serialize};
 
 /// How an optimizer is configured, as it appears in a journal, a manifest
@@ -17,6 +17,12 @@ use serde::{Deserialize, Serialize};
 pub enum Config {
     Sgd {
         lr: f32,
+        /// The largest L2 norm the gradients may have when the step is
+        /// taken; `None` is no cap. A setting of the update rather than
+        /// of the rule, and recorded with it, so a resumed run clips the
+        /// same way. See `TrainState::advance`.
+        #[serde(default)]
+        clip: Option<f32>,
     },
     /// Decoupled weight decay, as in the paper and as PyTorch's AdamW
     /// implements it: the decay is applied to the parameter, not to the
@@ -32,6 +38,8 @@ pub enum Config {
         eps: f32,
         #[serde(default)]
         weight_decay: f32,
+        #[serde(default)]
+        clip: Option<f32>,
     },
 }
 
@@ -45,16 +53,67 @@ fn default_eps() -> f32 {
     1e-8
 }
 
+/// The L2 norm of a set of arrays, in f32: gradients before a step, or a
+/// run's parameters at a point in time.
+///
+/// Always f32, whatever the arrays are held in: squaring a bf16 value can
+/// leave its exponent range, and a norm is the single number a clipping
+/// decision is made from, which is not the place to lose precision. The
+/// cast is skipped when there is nothing to cast, which is the common
+/// case for gradients. Evaluates the arrays.
+pub fn global_norm(arrays: &[Array]) -> Result<f32> {
+    let mut total: Option<Array> = None;
+    for array in arrays {
+        let value = if array.dtype() == Dtype::Float32 {
+            array.clone()
+        } else {
+            array.as_dtype(Dtype::Float32)?
+        };
+        let square = value.square()?.sum(false)?;
+        total = Some(match total {
+            None => square,
+            Some(so_far) => so_far.add(&square)?,
+        });
+    }
+    let norm = match total {
+        None => Array::from_f32(0.0),
+        Some(so_far) => so_far.sqrt()?,
+    };
+    Ok(norm.item_cast::<f32>())
+}
+
+/// Every gradient multiplied by the same scalar, as a new slice.
+pub fn scaled(grads: &[Array], scale: f32) -> Result<Vec<Array>> {
+    let factor = Array::from_f32(scale);
+    grads
+        .iter()
+        .map(|grad| Ok(grad.multiply(&factor)?))
+        .collect()
+}
+
 impl Config {
     pub fn lr(&self) -> f32 {
         match self {
-            Config::Sgd { lr } | Config::AdamW { lr, .. } => *lr,
+            Config::Sgd { lr, .. } | Config::AdamW { lr, .. } => *lr,
         }
     }
 
     pub fn set_lr(&mut self, value: f32) {
         match self {
-            Config::Sgd { lr } | Config::AdamW { lr, .. } => *lr = value,
+            Config::Sgd { lr, .. } | Config::AdamW { lr, .. } => *lr = value,
+        }
+    }
+
+    /// The largest gradient norm this rule will step on, or `None`.
+    pub fn clip(&self) -> Option<f32> {
+        match self {
+            Config::Sgd { clip, .. } | Config::AdamW { clip, .. } => *clip,
+        }
+    }
+
+    pub fn set_clip(&mut self, value: Option<f32>) {
+        match self {
+            Config::Sgd { clip, .. } | Config::AdamW { clip, .. } => *clip = value,
         }
     }
 
@@ -203,7 +262,7 @@ impl Optimizer {
         }
         self.t += 1;
         match self.config {
-            Config::Sgd { lr } => {
+            Config::Sgd { lr, .. } => {
                 let lr = Array::from_f32(lr);
                 for (&i, grad) in argnums.iter().zip(grads) {
                     let i = i as usize;
@@ -216,6 +275,7 @@ impl Optimizer {
                 beta2,
                 eps,
                 weight_decay,
+                ..
             } => {
                 // Bias correction from the step count, so a resumed run
                 // takes the step it would have taken.
@@ -286,6 +346,7 @@ mod tests {
         beta2: 0.999,
         eps: 1e-8,
         weight_decay: 0.0,
+        clip: None,
     };
 
     #[test]
@@ -309,13 +370,53 @@ mod tests {
                 beta2: 0.999,
                 eps: 1e-8,
                 weight_decay: 0.0,
+                clip: None,
             }
         );
     }
 
     #[test]
+    fn a_clip_travels_with_the_rule_it_belongs_to() {
+        let with = r#"{"kind":"sgd","lr":0.1,"clip":1.0}"#;
+        let back: Config = serde_json::from_str(with).unwrap();
+        assert_eq!(back.clip(), Some(1.0));
+        // Absent is no clip, and an old config without the key reads that
+        // way rather than failing.
+        let back: Config = serde_json::from_str(r#"{"kind":"sgd","lr":0.1}"#).unwrap();
+        assert_eq!(back.clip(), None);
+    }
+
+    #[test]
+    fn the_global_norm_is_over_every_gradient_at_once() {
+        let grads = [array(&[3.0, 4.0]), array(&[12.0, 0.0])];
+        // sqrt(3^2 + 4^2 + 12^2) = 13, not either gradient's own norm.
+        assert!((global_norm(&grads).unwrap() - 13.0).abs() < 1e-5);
+        // No gradients is a norm of zero, not an error.
+        assert_eq!(global_norm(&[]).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn scaling_leaves_the_direction_and_takes_the_norm_to_the_cap() {
+        let grads = [array(&[3.0]), array(&[4.0])];
+        let norm = global_norm(&grads).unwrap();
+        let capped = scaled(&grads, 1.0 / norm).unwrap();
+        let before = [3.0 / 5.0, 4.0 / 5.0];
+        close(&read(&capped[0]), &before[..1]);
+        close(&read(&capped[1]), &before[1..]);
+        assert!((global_norm(&capped).unwrap() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
     fn sgd_subtracts_the_gradient_scaled_by_the_rate() {
-        let opt = Optimizer::new(Config::Sgd { lr: 0.5 }, &[array(&[1.0, 2.0])], &[0]).unwrap();
+        let opt = Optimizer::new(
+            Config::Sgd {
+                lr: 0.5,
+                clip: None,
+            },
+            &[array(&[1.0, 2.0])],
+            &[0],
+        )
+        .unwrap();
         let mut params = vec![array(&[1.0, 2.0])];
         let next = opt.next(&mut params, &[0], &[array(&[2.0, 4.0])]).unwrap();
         close(&read(&params[0]), &[0.0, 0.0]);
@@ -398,6 +499,7 @@ mod tests {
             beta2: 0.999,
             eps: 1e-8,
             weight_decay: 0.5,
+            clip: None,
         };
         let params0 = vec![array(&[2.0])];
         let opt = Optimizer::new(decayed, &params0, &[0]).unwrap();
@@ -434,7 +536,7 @@ mod tests {
     #[test]
     fn refit_is_nothing_for_an_optimizer_with_no_slots() {
         let params = vec![array(&[0.0]), array(&[0.0])];
-        let mut opt = Optimizer::new(Config::Sgd { lr: 0.1 }, &params, &[0]).unwrap();
+        let mut opt = Optimizer::new(Config::Sgd { lr: 0.1, clip: None }, &params, &[0]).unwrap();
         opt.refit(&[0], &[0, 1], &params).unwrap();
         assert!(opt.slots().0.is_empty());
         assert!(!opt.wants_slots());
@@ -443,7 +545,7 @@ mod tests {
     #[test]
     fn a_gradient_count_that_does_not_match_is_refused() {
         let params = vec![array(&[0.0]), array(&[0.0])];
-        let opt = Optimizer::new(Config::Sgd { lr: 0.1 }, &params, &[0, 1]).unwrap();
+        let opt = Optimizer::new(Config::Sgd { lr: 0.1, clip: None }, &params, &[0, 1]).unwrap();
         let mut copy = params.clone();
         let e = opt
             .next(&mut copy, &[0, 1], &[array(&[1.0])])

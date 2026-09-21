@@ -3645,6 +3645,45 @@ mlx-c `c74db530` で再リリースされたあと (`rake mlx:pin[v0.6.0.0]` が
 1 step が動いた (10.625 → 1.449985、§15.26 と同じ数字)。**これで移行の出口条件
 (notes/plan-upstream-mlx-rs.md §16) はすべて満たした。**
 
+### 15.74 gradient clipping と、それを測る目(2026-09-21)
+
+ModernBERT-base の候補選択 fine-tune(§「候補選択 fine-tuning 計画」)を Torobi で組む検討で、
+学習アルゴリズム側に 1 つだけ欠けが見つかった: **global-norm の gradient clipping**。
+AdamW も warmup+decay もあるが、ノルムで勾配を切る口が無かった。それを足した。
+
+**ノルムは f32 で取る。** 勾配が bf16 でも、ノルムだけは f32 で計算する。bf16 の二乗は
+指数部を外れやすく、**clipping の判断はその 1 つの数の上で行われる**ので、精度を落とす
+場所ではない。`optimizer::global_norm` が全パラメータの勾配を 1 つのノルムに畳み、
+`optimizer::scaled` が同じ係数を全部に掛ける。方向は動かず、長さだけが cap に収まる。
+
+**上限は optimizer の設定として持つ。** `optimizer: { kind: :adamw, lr:, clip: 1.0 }` で開き、
+`adjust(clip:)` で動かす。`lr` と同じ棚に置いたのは、manifest が既に optimizer の設定を
+記録しているからである(§11.2)。resume は同じ clip を要る(lr と同じ厳しさで照合する)。
+`adjust(clip: nil)` が「cap を外す」、キーを渡さないのが「触らない」なので、`adjust` は
+`clip` だけ sentinel で受ける。journal には `1.0` も `null` も残る。
+
+**ついでに 2 つ入った。どちらもノルムを取るなら無料である。**
+
+| | |
+| --- | --- |
+| **`grad_norm` が読める** | 直前の step の勾配ノルム(clipping の前)。`Session#grad_norm`、NaN は「まだ step が無い」と「step を取らなかった」。§8.3 A が「grad norm を読む」と書いていた口に実体が入った。clipping は cap を超えたかを黙って隠すので、見えることは clipping の一部である |
+| **非有限な勾配の step を取らない** | これまで見ていたのは非有限な loss だけだった。loss が有限でも勾配が非有限になる経路はある(sqrt の 0、log の 0)。ノルムを取ると分かるので、非有限 loss と同じ扱いにした。counter と RNG は進み、parameter と slot は動かない |
+
+`accumulate` / `apply!` ともそのまま噛み合う。部分の勾配は足され、`apply!` が `advance` を
+呼ぶので、**clipping は和に対して 1 回**掛かる(部分ごとではない)。
+
+**`param_norm` も入れた。** §8.3 A のもう半分(「grad / param norm を読む」)。ただし
+これは step では誰も読まないので、毎 step 持たずに**呼んだときに全重みを畳む** on-demand に
+した。MLX に触れる以上 gate を通り、step 中に別スレッドから呼べば `Busy` を返す(フックは
+step 境界で走るので、そこが正しい呼び場所)。frozen も数えるので「モデルの大きさ」であって
+「いま学習しているものの大きさ」ではない。ノルムの実装は勾配と共有していて、f32 でない
+ときだけ cast する(f32 の勾配はそのまま)。
+
+検査は Rust 6 件(ノルムが全勾配のものであること、方向が変わらずノルムが cap になること、
+設定が serde で往復すること、param norm が全重みのもので step で動くこと)+ Ruby 3 件
+(clipping 後の step が `lr * clip` のノルムを持つこと、`grad_norm` が読めて clip が journal に
+残ること、`param_norm` が全重みのもので step で動くこと)。Rust 138 / Ruby 351 が通る。
+
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 
 engine のレビューで 🟡 に残していたものを、Runtime の移動と同じ波で処理した。
