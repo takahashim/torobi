@@ -32,23 +32,31 @@ module Jev
 
     attr_reader :config, :pair_budget, :max_length
 
-    # Parsed JSONL rows in, batch hashes out, bundled so a step's pairs do
-    # not exceed the budget.
-    def batches(rows)
+    # Parsed JSONL rows in, groups of rows out, bundled so a step's pairs
+    # do not exceed the budget. The bundling on its own, so evaluation can
+    # read the rows a batch was made from.
+    def bundles(rows)
       Enumerator.new do |yielder|
         bundle = []
         pairs = 0
         rows.each do |row|
           k = row.fetch("choices").size
           if !bundle.empty? && pairs + k > @pair_budget
-            yielder << build_batch(bundle.map { |held| encode(held) })
+            yielder << bundle
             bundle = []
             pairs = 0
           end
           bundle << row
           pairs += k
         end
-        yielder << build_batch(bundle.map { |held| encode(held) }) unless bundle.empty?
+        yielder << bundle unless bundle.empty?
+      end
+    end
+
+    # The same, rendered and tokenized.
+    def batches(rows)
+      Enumerator.new do |yielder|
+        bundles(rows).each { |bundle| yielder << build_batch(bundle.map { |held| encode(held) }) }
       end
     end
 
