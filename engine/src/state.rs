@@ -257,7 +257,7 @@ impl TrainState {
     /// and the optimizer's slots, so a policy that lowers the rate and
     /// carries on has something clean to carry on from.
     pub fn advance(&mut self, loss: &Array, grads: &[Array]) -> Result<f32> {
-        let value = loss.item::<f32>();
+        let value = loss.item_cast::<f32>();
         let (rng, _) = mlx_rs::random::split(&self.rng, 2)?;
 
         if !value.is_finite() {
@@ -306,7 +306,7 @@ impl TrainState {
     /// The RNG does not move. A draw belongs to a step, and this is a
     /// fraction of one; the step that applies these makes the draw.
     pub fn accumulate(&mut self, loss: &Array, grads: &[Array]) -> Result<f32> {
-        let value = loss.item::<f32>();
+        let value = loss.item_cast::<f32>();
         anyhow::ensure!(
             grads.len() == self.argnums.len(),
             "these gradients are for {} parameters and {} are differentiated",

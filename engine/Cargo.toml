@@ -6,25 +6,24 @@ description = "Torobi's execution engine: interprets GraphConfig on MLX"
 license = "MIT"
 
 [dependencies]
-# MLX through OminiX-MLX, pinned to an exact revision.
+# MLX through the upstream mlx-rs from crates.io (oxiglade/mlx-rs), pinned
+# to an exact version while the move off OminiX-MLX settles. Exact rather
+# than `0.32` so the lockfile is not the only thing saying which one this
+# is; docs/vendoring.md records why the move happened and what it costs.
 #
-# Which mlx-rs this is matters, and the crate metadata will not tell you:
-# it still carries upstream's `repository = github.com/oxideai/mlx-rs`
-# (renamed to oxiglade/mlx-rs), which is a different repository from the
-# one these two lines fetch. docs/vendoring.md puts the three of them side
-# by side, with their licences.
+# Upstream rather than OminiX's fork: the fork existed because upstream's
+# MLX was old and had no pre-built path, and neither is true any more. The
+# pre-built MLX is now handed to mlx-c through `MLX_C_USE_SYSTEM_MLX`
+# (docs/vendoring.md), which is upstream's own route rather than a fork's.
 #
-# A git dependency rather than the vendored copy the plan first imagined:
-# it costs no source tree of ours, cargo records the commit in Cargo.lock,
-# and it builds anywhere - which an absolute path to a local checkout did
-# not (docs/vendoring.md records what that cost us). This one rather than
-# crates.io's mlx-rs because it tracks MLX 0.32 and falls back to a
-# pre-built MLX when no Metal compiler is present, which is what lets the
-# gem build on a machine without Xcode.
-mlx-rs = { git = "https://github.com/OminiX-ai/OminiX-MLX.git", rev = "4988a3fcfa48b8cb5d0780a501b92c6a41401523", features = ["safetensors"] }
-# The memory metrics are mlx-c's rather than mlx-rs's, so the sys crate
-# is a direct dependency for those few calls (engine/src/memory.rs).
-mlx-sys = { git = "https://github.com/OminiX-ai/OminiX-MLX.git", rev = "4988a3fcfa48b8cb5d0780a501b92c6a41401523" }
+# The `safetensors` feature is what `Array::load_safetensors` and
+# `Array::save_safetensors` come from (engine/src/checkpoint.rs).
+mlx-rs = { version = "=0.32.0", features = ["safetensors"] }
+# The memory metrics are mlx-c's rather than mlx-rs's, so the sys crate is
+# a direct dependency for those few calls (engine/src/memory.rs). It must
+# be the 0.6.0 that mlx-rs 0.32.0 itself pins, or the two would describe
+# different native code; the version is exact for that reason.
+mlx-sys = "=0.6.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

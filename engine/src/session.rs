@@ -260,7 +260,7 @@ impl SessionCore {
         let (loss, tapped) =
             executor::evaluate(&self.plan, self.state.pass().params, &fields, &self.taps)?;
         self.record(tapped)?;
-        Ok(loss.item::<f32>())
+        Ok(loss.item_cast::<f32>())
     }
 
     /// Named model outputs for `batch`, without taking a step.

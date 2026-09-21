@@ -105,7 +105,7 @@ impl Stat {
             Stat::Extent => {
                 let min = value.min(false)?;
                 let max = value.max(false)?;
-                mlx_rs::ops::stack(&[min, max])
+                mlx_rs::ops::stack(&[min, max], 0)
             }
         }
     }
@@ -387,7 +387,7 @@ fn rope(x: &Array, theta: f32, freqs: Option<&[f32]>) -> Result<Array> {
     let second = slice(x, -1, half, half)?;
     let rotated_first = first.multiply(&cos)?.subtract(second.multiply(&sin)?)?;
     let rotated_second = second.multiply(&cos)?.add(first.multiply(&sin)?)?;
-    mlx_rs::ops::concatenate_axis(&[rotated_first, rotated_second], -1)
+    mlx_rs::ops::concatenate(&[rotated_first, rotated_second], -1)
 }
 
 /// Scaled dot-product attention: softmax(q k^T / sqrt(d) + mask) v.
@@ -429,7 +429,8 @@ fn sdpa(ins: &[Array], scale: Option<f32>, causal: bool) -> Result<Array> {
             other => other.map(Mask::Array),
         }
     };
-    let out = mlx_rs::fast::scaled_dot_product_attention(&q, &k, &v, scale, mask)?;
+    // The last argument is attention sinks, which nothing here uses.
+    let out = mlx_rs::fast::scaled_dot_product_attention(&q, &k, &v, scale, mask, None)?;
     Ok(if flat { out.squeeze_axes(&[1])? } else { out })
 }
 
@@ -685,7 +686,7 @@ mod tests {
 
         let forward = |args: &[Array]| -> Vec<Array> {
             let out = mlx_rs::fast::scaled_dot_product_attention(
-                &args[0], &args[1], &args[2], 0.5, None,
+                &args[0], &args[1], &args[2], 0.5, None, None,
             )
             .expect("fused attention");
             vec![out.sum(false).expect("sum")]
@@ -695,7 +696,7 @@ mod tests {
 
         // Every value is 0.3, so any weighted average of them is 0.3, and
         // there are 4 heads * 2 positions * 3 wide of them.
-        assert!((value[0].item::<f32>() - 0.3 * 24.0).abs() < 1e-5);
+        assert!((value[0].item_cast::<f32>() - 0.3 * 24.0).abs() < 1e-5);
         assert_eq!(grads[0].shape(), &[1, 4, 2, 3]);
         assert_eq!(grads[1].shape(), &[1, 2, 2, 3], "k stays untiled");
     }
