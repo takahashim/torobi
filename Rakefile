@@ -6,14 +6,23 @@ require "rb_sys/extensiontask"
 
 GEMSPEC = Gem::Specification.load("torobi.gemspec")
 
-# The MLX binary every cargo build here links, fetched once and checked
-# against a recorded digest (ext/torobi/mlx_prebuilt.rb). `rake compile`
-# reaches it through extconf.rb; the engine's own builds reach it here,
-# and both share one copy.
+# The pre-built MLX every cargo build here links, fetched once and checked
+# against a recorded digest and the mlx-sys generation it was built for
+# (ext/torobi/mlx_prebuilt.rb). `rake compile` reaches it through
+# extconf.rb; the engine's own builds reach it here, and both share one
+# copy and one toolchain file.
 require_relative "ext/torobi/mlx_prebuilt"
 
+# Points cargo at that MLX: the toolchain file mlx-c is configured with,
+# where mlx-sys looks for the kernels, and the one link path upstream
+# cannot know about when MLX is a system package. Returns the prefix.
 def with_mlx
-  ENV["MLX_PREBUILT_PATH"] = MlxPrebuilt.ensure!
+  prefix = MlxPrebuilt.ensure!
+  ENV["CMAKE_TOOLCHAIN_FILE"] = MlxPrebuilt.toolchain_file(prefix)
+  ENV["MLX_RS_METAL_PATH"] = MlxPrebuilt.link_dir(prefix)
+  flags = [ENV.fetch("RUSTFLAGS", nil), "-L", "native=#{MlxPrebuilt.link_dir(prefix)}"]
+  ENV["RUSTFLAGS"] = flags.compact.join(" ")
+  prefix
 rescue MlxPrebuilt::Refused => e
   abort "torobi: #{e.message}"
 end
@@ -25,12 +34,10 @@ end
 
 # MLX finds its Metal kernels through dladdr: the metallib must sit beside
 # the loaded library, which for us is the extension bundle, not the engine
-# binary. mlx-sys drops it in the cargo target directory; put a copy where
-# the bundle can find it. See docs/vendoring.md.
+# binary. The archive brought it to the machine inside the prefix; put a
+# copy where the bundle can find it. See docs/vendoring.md.
 task :metallib do
-  source = Dir["target/*/mlx.metallib"].max_by { |path| File.mtime(path) }
-  raise "no mlx.metallib in target/; run rake compile first" unless source
-
+  source = MlxPrebuilt.metallib(with_mlx)
   destination = "lib/torobi/mlx.metallib"
   next if File.exist?(destination) && File.mtime(destination) >= File.mtime(source)
 
@@ -220,7 +227,7 @@ namespace :mlx do
     require "json"
     require "net/http"
 
-    pin = MlxPrebuilt::PIN.dup
+    pin = MlxPrebuilt.pin
     tag = args[:tag]
     api = "https://api.github.com/repos/#{pin.fetch("repo")}/releases/" \
           "#{tag ? "tags/#{tag}" : "latest"}"
@@ -234,18 +241,29 @@ namespace :mlx do
     pin["release"] = release.fetch("tag_name")
     pin["asset"] = asset.fetch("name")
     pin["digest"] = digest
-    write_pin(pin)
 
-    # Through the same path an install takes, so the digest is checked
-    # against the bytes rather than believed.
-    MlxPrebuilt.ensure!(io: $stdout)
-    said = MlxPrebuilt.manifest
-    if said
-      pin["mlx"] = said.fetch("mlx", pin["mlx"]).delete_prefix("v")
-      pin["mlx_c"] = said.fetch("mlx-c", pin["mlx_c"]).delete_prefix("v")
+    # The pin is written before it is fetched, because the fetch reads it;
+    # but a pin that does not survive its own check is put back. A wrong
+    # or wrong-generation archive must leave the file as it was, since the
+    # next `rake` is what would otherwise build against it.
+    before = File.read("ext/torobi/mlx_prebuilt.json")
+    begin
       write_pin(pin)
-    else
-      warn "torobi: the archive has no MANIFEST.txt, so the versions are unchanged"
+      # Through the same path an install takes, so the digest is checked
+      # against the bytes rather than believed, and the generation is
+      # checked against what mlx-sys wants.
+      MlxPrebuilt.ensure!(io: $stdout)
+      said = MlxPrebuilt.manifest
+      if said
+        pin["mlx"] = said.fetch("mlx", pin["mlx"]).delete_prefix("v")
+        pin["mlx_c"] = said.fetch("mlx-c", pin["mlx_c"]).delete_prefix("v")
+        write_pin(pin)
+      else
+        warn "torobi: the archive has no MANIFEST.txt, so the versions are unchanged"
+      end
+    rescue MlxPrebuilt::Refused => e
+      File.write("ext/torobi/mlx_prebuilt.json", before)
+      abort "torobi: #{e.message}\nthe pin is unchanged"
     end
 
     puts was == pin.slice("release", "asset", "digest") ? "unchanged" : "pinned:"

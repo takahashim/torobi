@@ -1,8 +1,12 @@
 {
   "repo": "takahashim/mlx-prebuilt",
-  "release": "v0.4.1.0",
-  "asset": "mlx-v0.30.1-mlxc-v0.4.1-macos-arm64.tar.gz",
-  "digest": "ee7af2c6d511f82af67502017d55019abb4fa2252105dd7aa2f10156f933851a",
-  "mlx": "0.30.1",
-  "mlx_c": "0.4.1"
+  "release": "v0.6.0.0",
+  "asset": "mlx-v0.32.2-mlxc-c74db5307cc8ce122f48d97ef951b30578674e7f-macos-arm64.tar.gz",
+  "digest": "09f634a17109fdc0bb369bbfb2e87433133cb3a0bbab636bdf5fd284506128df",
+  "mlx": "0.32.2",
+  "mlx_c": "c74db5307cc8ce122f48d97ef951b30578674e7f",
+  "requires": {
+    "mlx": "0.32.2",
+    "mlx-c": "c74db5307cc8"
+  }
 }
