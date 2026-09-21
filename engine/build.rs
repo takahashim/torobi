@@ -76,10 +76,24 @@ fn link_metallib_beside_test_binaries() {
     }
 }
 
-/// Creates `link` pointing at `named`, unless something is already there.
+/// Creates `link` pointing at `named`, replacing whatever is there.
+///
+/// **Replaced rather than left alone when it exists.** MLX matches its
+/// kernels to the library by name, and after the MLX under it moves
+/// versions an old link still loads and then cannot find the kernel a step
+/// asks for (`Unable to load kernel ...`). That is what a stale link from
+/// the previous dependency did: the tests that did not need the moved
+/// kernel passed and one did not. A link already pointing at `named` is
+/// kept, so the common case still does nothing.
 fn link(named: &Path, link: &Path) {
-    if link.exists() || link.symlink_metadata().is_ok() {
+    if fs::read_link(link).is_ok_and(|target| target == named) {
         return;
+    }
+    if link.symlink_metadata().is_ok() {
+        if let Err(e) = fs::remove_file(link) {
+            println!("cargo:warning=could not replace {}: {e}", link.display());
+            return;
+        }
     }
     if let Err(e) = symlink(named, link) {
         println!("cargo:warning=could not link {}: {e}", named.display());
