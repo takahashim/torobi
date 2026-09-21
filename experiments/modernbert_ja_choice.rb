@@ -181,6 +181,14 @@ unless base_dir && train && valid && dir
         "<run-dir> [epochs]"
 end
 
+# The reference refuses a non-empty output directory, and so does this. A
+# run always opens from the base weights -- it does not resume -- and the
+# journal is opened for appending, so a run into a directory that already
+# holds one would leave the two mixed and the record unreadable.
+if File.directory?(dir) && !Dir.empty?(dir)
+  abort "#{dir} is not empty; choose a new run directory (this run does not resume)"
+end
+
 runner = Torobi::Runner.new([RbConfig.ruby, __FILE__, base_dir, train, valid,
                              dir, (epochs || EPOCHS).to_s],
                             dir:, memory_limit: CAP).start
