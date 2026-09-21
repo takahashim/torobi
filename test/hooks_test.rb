@@ -324,6 +324,46 @@ class HooksTest < Minitest::Test
     assert_operator seen.first, :<=, 0.1
   end
 
+  def test_a_linear_schedule_warms_up_and_decays_in_lines
+    linear = Torobi::Policies::Linear.new(peak: 3e-5, total: 1000)
+
+    assert_equal 50, linear.warmup, "five percent of the run, by default"
+    assert_operator linear.at(0), :<, 3e-6, "the first step barely moves the model"
+    assert_in_delta 3e-5, linear.at(linear.warmup), 1e-12, "and the peak is what was asked"
+    # A line, not a curve: halfway down the decay is half the peak.
+    assert_in_delta 1.5e-5, linear.at(linear.warmup + ((1000 - linear.warmup) / 2)), 1e-9
+    assert_in_delta 0.0, linear.at(1000), 1e-12
+    assert_in_delta 0.0, linear.at(5000), 1e-12, "past the end it stays at the floor"
+  end
+
+  def test_a_linear_schedule_can_stop_short_of_zero
+    linear = Torobi::Policies::Linear.new(peak: 1e-4, total: 100, warmup: 10, floor: 1e-5)
+
+    assert_equal 10, linear.warmup, "a warmup of one or more is a number of steps"
+    assert_in_delta 1e-5, linear.at(100), 1e-12
+  end
+
+  def test_a_linear_schedule_that_asks_for_nothing_is_refused
+    assert_raises(ArgumentError) { Torobi::Policies::Linear.new(peak: 0, total: 10) }
+    assert_raises(ArgumentError) { Torobi::Policies::Linear.new(peak: 1e-4, total: 0) }
+  end
+
+  def test_a_linear_schedule_moves_the_rate_of_a_run
+    skip "extension not compiled" unless defined?(Torobi::Session)
+
+    seen = []
+    Torobi::Session.open(config, weights:, optimizer: { kind: :sgd, lr: 0.5 }) do |s|
+      s.use(Torobi::Policies::Linear.new(peak: 0.1, total: 20, warmup: 4))
+      6.times { s.step!(batch) }
+      seen << s.lr
+      14.times { s.step!(batch) }
+      seen << s.lr
+    end
+
+    assert_operator seen.first, :>, seen.last, "the rate came down as the run went on"
+    assert_operator seen.first, :<=, 0.1
+  end
+
   # `every: 0` used to be a ZeroDivisionError at the first step, which
   # arrives far from the call that caused it.
   def test_a_cadence_that_never_comes_round_is_refused

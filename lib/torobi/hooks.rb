@@ -270,6 +270,48 @@ module Torobi
       end
     end
 
+    # The same warmup and decay, in straight lines.
+    #
+    # Schedule's sibling, for the runs whose reference decays linearly
+    # rather than by a cosine: Jev Local's `train.py` warms up over six
+    # percent of the run and then brings the rate to zero in a line, which
+    # is what the published `modernbert-ja-310m-jev` was trained with.
+    # Kept apart from Schedule rather than given a `shape:` because the two
+    # do not share their arithmetic: this reaches the peak at the end of
+    # warmup and decays by `peak * (1 - progress)`, where the cosine is
+    # `0.5 * (1 + cos(pi * progress))`.
+    #
+    #   s.use(Torobi::Policies::Linear.new(peak: 3e-5, total: 5386), every: 10)
+    class Linear
+      # `warmup` is a share of the run when it is below one, and a number
+      # of steps when it is not, as in Schedule.
+      def initialize(peak:, total:, warmup: 0.05, floor: 0.0)
+        raise ArgumentError, "a schedule needs a positive peak" unless peak.positive?
+        raise ArgumentError, "a schedule needs a positive length" unless total.positive?
+
+        @peak = Float(peak)
+        @total = Integer(total)
+        @warmup = warmup < 1 ? (total * warmup).round : Integer(warmup)
+        @floor = Float(floor)
+      end
+
+      attr_reader :peak, :total, :warmup, :floor
+
+      # The rate at a step: up in a line to the peak over `warmup`, then
+      # down in a line to the floor over the rest. Public so it can be
+      # looked at without a run, as Schedule's is.
+      def at(step)
+        return @peak * (step + 1) / [@warmup, 1].max.to_f if step < @warmup
+
+        over = (step - @warmup).to_f / [@total - @warmup, 1].max
+        @floor + ((@peak - @floor) * (1.0 - [over, 1.0].min))
+      end
+
+      def call(event)
+        event.session.adjust(lr: at(event.step))
+      end
+    end
+
     # Stops a run before the machine notices it.
     #
     # `Torobi::Memory.limit=` is not a refusal, which was measured rather

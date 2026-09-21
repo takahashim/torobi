@@ -87,6 +87,8 @@ between two versions people have.
   because a fine-tune of a model that is already good spends it
   otherwise. It turns the same knob a caller could turn, and a gradient
   cache's `apply!` fires the hook a plain step does, so it sees them all.
+  `Policies::Linear` is the same warmup with a straight-line decay, for
+  the references that use one.
 - **The window**: a journal of what a run did, hooks and knobs while it
   runs, two kinds of replay, and `Torobi::Runner` for a long run in a
   process of its own with a memory cap.
