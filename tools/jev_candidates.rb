@@ -9,36 +9,22 @@ module Jev
   # rendered and tokenized as pairs, and the loss is the listwise
   # cross-entropy over a group's logits.
   #
-  # Two of Torobi's constraints shape this. The graph's sequence length is
-  # fixed, so rows are padded to a sequence bucket, and **K must be a graph
-  # constant**, so questions are grouped by a K bucket and short candidate
-  # sets are padded to it and masked. The reference (`train.py`) bundles by
-  # a free pair count instead; the loss is the same listwise cross-entropy
-  # either way, but which questions share a step differs, which is the one
-  # place this port knowingly departs from it.
+  # **K and the sequence are free**, as the reference has them. The graph
+  # is built with `seq: nil`, so a batch says how long it is, and the
+  # grouped loss is written with membership masks rather than a reshape to
+  # a fixed K (see `experiments/modernbert_ja_choice.rb`), so a batch may
+  # mix questions of different K. Questions are bundled by a pair budget,
+  # which is the reference's own batching.
   #
   # Tokenizing is separated from batching so the batching can be tested
   # without the `tokenizers` gem: `encode` uses the tokenizer, `build_batch`
   # takes rows already tokenized.
   class Candidates
-    # The K the data actually has (Noul/JCoLA/Moral 2, JNLI 3, JCommonSenseQA
-    # 5, JSTS 6, MASSIVE 18, and MASSIVE subsets 2..6).
-    DEFAULT_K_BUCKETS = [2, 3, 4, 5, 6, 18].freeze
-    DEFAULT_SEQ_BUCKETS = [64, 96, 128, 192, 256, 384, 512].freeze
-
-    # A padded candidate is attended to by nothing, so its logit must not
-    # enter the softmax; a large finite floor rather than -Infinity, as the
-    # masks elsewhere use.
-    NEGATIVE = -1.0e9
-
-    def initialize(config, tokenizer: nil, pair_budget: 128, max_length: 512,
-                   k_buckets: DEFAULT_K_BUCKETS, seq_buckets: DEFAULT_SEQ_BUCKETS)
+    def initialize(config, tokenizer: nil, pair_budget: 128, max_length: 512)
       @config = config
       @tokenizer = tokenizer
       @pair_budget = pair_budget
       @max_length = max_length
-      @k_buckets = k_buckets.sort.freeze
-      @seq_buckets = seq_buckets.sort.freeze
       # The reference truncates the context side only, so the question is
       # never lost; set here so a caller cannot forget it.
       tokenizer&.enable_truncation(max_length, strategy: "only_first")
@@ -46,67 +32,69 @@ module Jev
 
     attr_reader :config, :pair_budget, :max_length
 
-    # Parsed JSONL rows in, batch hashes out, grouped by (K, sequence)
-    # bucket and sliced to the pair budget.
+    # Parsed JSONL rows in, batch hashes out, bundled so a step's pairs do
+    # not exceed the budget.
     def batches(rows)
       Enumerator.new do |yielder|
-        grouped = rows.map { |row| encode(row) }
-                      .group_by { |encoded| [bucket_k(encoded[:k]), bucket_seq(encoded[:seq])] }
-        grouped.each do |(k, seq), group|
-          group.each_slice(per_batch(k)) { |slice| yielder << build_batch(slice, k, seq) }
+        bundle = []
+        pairs = 0
+        rows.each do |row|
+          k = row.fetch("choices").size
+          if !bundle.empty? && pairs + k > @pair_budget
+            yielder << build_batch(bundle.map { |held| encode(held) })
+            bundle = []
+            pairs = 0
+          end
+          bundle << row
+          pairs += k
         end
+        yielder << build_batch(bundle.map { |held| encode(held) }) unless bundle.empty?
       end
     end
 
-    # One row: rendered, tokenized, and measured. What `build_batch` needs
-    # and nothing more.
+    # One row: rendered, tokenized, and measured.
     def encode(row)
       context = Jev.render_context(row.fetch("state"), row.fetch("question"))
       candidates = Jev.render_candidates(row.fetch("choices"), row.fetch("descriptions"))
       ids = candidates.map { |candidate| @tokenizer.encode(context, candidate).ids }
-      { ids: ids, k: ids.size, seq: ids.map(&:size).max,
-        gold: Integer(row.fetch("answer")), weight: Float(row.fetch("weight")) }
+      { ids: ids, k: ids.size, gold: Integer(row.fetch("answer")),
+        weight: Float(row.fetch("weight")) }
     end
 
-    # One batch from rows already tokenized.
+    # One step's questions as a batch.
     #
-    # Real candidates are the rows; a padded candidate is an empty row,
-    # which `ModernBERT.batch` fills with the pad token and masks out, so
-    # the model sees the padding it would have seen and the objective's own
-    # candidate mask is what keeps the padded logit out of the loss.
-    def build_batch(encoded, k, seq)
-      rows = encoded.flat_map { |one| one[:ids] + Array.new(k - one[:k]) { [] } }
-      carried = Torobi::Models::ModernBERT.batch(@config, rows, seq:)
-      carried.merge(
-        cand_mask: Torobi::TensorData.from_a(
-          [encoded.size, k],
-          encoded.flat_map { |one| Array.new(one[:k], 0.0) + Array.new(k - one[:k], NEGATIVE) }
-        ),
-        gold: Torobi::TensorData.from_a([encoded.size], encoded.map do |one|
-          one[:gold]
-        end, dtype: :i32),
-        weight: Torobi::TensorData.from_a([encoded.size], encoded.map { |one| one[:weight] })
+    # Candidates are flattened in question order, so the rows of a group are
+    # a contiguous run; the sequence is the longest pair in the batch; and
+    # the two membership masks say which rows belong to which group and
+    # where each group's answer is. Those are what let the loss be a
+    # grouped cross-entropy without a fixed K.
+    def build_batch(encoded)
+      rows = encoded.flat_map { |one| one[:ids] }
+      groups = encoded.size
+      seq = rows.map(&:size).max
+      member, gold_member = memberships(encoded, groups)
+      Torobi::Models::ModernBERT.batch(@config, rows, seq:).merge(
+        member: Torobi::TensorData.from_a([rows.size, groups], member),
+        gold_member: Torobi::TensorData.from_a([rows.size, groups], gold_member),
+        weight: Torobi::TensorData.from_a([groups], encoded.map { |one| one[:weight] })
       )
     end
 
-    def bucket_k(k) = bucket(@k_buckets, k, "K")
-
-    def bucket_seq(seq) = bucket(@seq_buckets, seq, "sequence")
-
     private
 
-    # How many questions fit in one step at this K, so the pairs do not
-    # exceed the budget.
-    def per_batch(k) = [@pair_budget / k, 1].max
-
-    def bucket(buckets, value, what)
-      found = buckets.find { |edge| edge >= value }
-      unless found
-        raise Torobi::ConfigError,
-              "#{what} #{value} is past every bucket (#{buckets.inspect})"
+    # [rows, groups]: one where a row is one of a group's candidates, and a
+    # second with one at the row a group's answer points to.
+    def memberships(encoded, groups)
+      rows = encoded.sum { |one| one[:k] }
+      member = Array.new(rows * groups, 0.0)
+      gold_member = Array.new(rows * groups, 0.0)
+      offset = 0
+      encoded.each_with_index do |one, group|
+        one[:k].times { |i| member[((offset + i) * groups) + group] = 1.0 }
+        gold_member[((offset + one[:gold]) * groups) + group] = 1.0
+        offset += one[:k]
       end
-
-      found
+      [member, gold_member]
     end
   end
 end
