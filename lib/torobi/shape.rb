@@ -185,8 +185,17 @@ module Torobi
       start = attrs.fetch("start")
       length = attrs.fetch("length")
       dim = shape[axis]
-      raise ConfigError, "#{where}: cannot slice symbolic dimension #{axis}" if dim.nil?
-      unless length.positive? && start >= 0 && start + length <= dim
+      unless length.positive? && start >= 0
+        raise ConfigError,
+              "#{where}: slice #{start}...#{start + length} is not a positive range"
+      end
+      # A concrete dimension bounds the range and is checked here. A
+      # symbolic one has no length to check against, and the engine checks
+      # it when the batch arrives; what a symbolic axis cannot change is
+      # the length the slice produces. This is what lets a classifier pool
+      # the first token of a sequence whose length the batch decides
+      # (`classifier(seq: nil)`).
+      if dim && start + length > dim
         raise ConfigError,
               "#{where}: slice #{start}...#{start + length} is out of 0...#{dim} on axis #{axis}"
       end

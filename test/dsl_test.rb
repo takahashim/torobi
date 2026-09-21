@@ -250,6 +250,25 @@ class DslTest < Minitest::Test
     assert_match(/does not divide/, e.message)
   end
 
+  # A symbolic dimension has no length to check against, but a concrete
+  # range still names a definite result. This is what lets a classifier
+  # pool the first token of a sequence whose length the batch decides.
+  def test_a_symbolic_dimension_can_be_sliced_when_the_range_is_concrete
+    graph = Torobi.graph do |g|
+      x = g.input :x, [nil, nil]
+      g.output :out, x.slice(axis: 1, start: 0, length: 1)
+    end
+
+    assert_equal [nil, 1], graph.nodes.find { |n| n.op == "slice" }.shape
+
+    e = assert_raises(Torobi::ConfigError) do
+      Torobi.graph do |g|
+        g.output :out, g.input(:x, [nil, nil]).slice(axis: 1, start: 0, length: 0)
+      end
+    end
+    assert_match(/not a positive range/, e.message)
+  end
+
   def test_embedding_gathers_by_i32_ids
     graph = Torobi.graph do |g|
       ids = g.input :ids, [nil, nil], dtype: :i32
