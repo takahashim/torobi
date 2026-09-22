@@ -39,6 +39,11 @@ module MlxPrebuilt
   METALLIB = "lib/mlx.metallib"
   LIBS = %w[lib/libmlx.a lib/libmlxc.a lib/libgguflib.a].freeze
 
+  # What MLX compiles its CUDA kernels against at run time. Everything
+  # above is in both archives, so this is also what tells a macOS one
+  # unpacked on Linux from an archive that belongs there.
+  JIT_HEADERS = "include/cccl"
+
   # A note that this directory was extracted from an archive with the
   # right digest. Cheaper than hashing 140 MB on every build, and enough:
   # what it defends against is a different download, not a hostile
@@ -56,12 +61,37 @@ module MlxPrebuilt
   def pin = JSON.parse(File.read(PIN_PATH))
   def repo = pin.fetch("repo")
   def release = pin.fetch("release")
-  def asset = pin.fetch("asset")
   def url = "https://github.com/#{repo}/releases/download/#{release}/#{asset}"
+
+  # Which of a release's archives this machine wants. Coarse on purpose:
+  # nothing here can tell which CUDA a machine has, so moving from 12 to 13
+  # is an asset and digest under the same key rather than a new one.
+  def platform
+    case RUBY_PLATFORM
+    when /\Aarm64-darwin/ then "macos-arm64"
+    when /\Ax86_64-linux/ then "linux-x86_64"
+    else
+      raise Refused, "torobi has no pre-built MLX for #{RUBY_PLATFORM}. Build MLX " \
+                     "yourself and set TOROBI_MLX_PREFIX to its install prefix."
+    end
+  end
+
+  def metal? = platform.start_with?("macos")
+
+  # The pinned archive for this machine.
+  def entry
+    pin.fetch("platforms").fetch(platform) do
+      raise Refused, "no MLX archive is pinned for #{platform} in #{PIN_PATH}. " \
+                     "Build one with takahashim/mlx-prebuilt and `rake mlx:pin`, " \
+                     "or set TOROBI_MLX_PREFIX to a prefix you built yourself."
+    end
+  end
+
+  def asset = entry.fetch("asset")
 
   # SHA-256 of that asset. The whole point of this file: a release asset
   # can be replaced without its URL changing, and this is what notices.
-  def digest = pin.fetch("digest")
+  def digest = entry.fetch("digest")
 
   # The generation mlx-sys expects, keyed the way the manifest spells it.
   # A different question from what the archive holds: the archive is what
@@ -113,16 +143,24 @@ module MlxPrebuilt
                .map { |path| File.dirname(path, 4) }
                .find { |place| complete?(place) }
     unless found
-      raise Refused, "#{dir} holds no MLX install prefix (wants #{CMAKE_CONFIG}, " \
-                     "#{HEADERS}, #{METALLIB}, #{LIBS.join(", ")})"
+      raise Refused, "#{dir} holds no MLX install prefix for #{platform} " \
+                     "(wants #{(wanted_dirs + wanted_files).join(", ")})"
     end
 
     found
   end
 
+  def wanted_files
+    metal? ? [CMAKE_CONFIG, METALLIB, *LIBS] : [CMAKE_CONFIG, *LIBS]
+  end
+
+  def wanted_dirs
+    metal? ? [HEADERS] : [HEADERS, JIT_HEADERS]
+  end
+
   def complete?(place)
-    File.directory?(File.join(place, HEADERS)) &&
-      [CMAKE_CONFIG, METALLIB, *LIBS].all? { |rel| File.file?(File.join(place, rel)) }
+    wanted_dirs.all? { |rel| File.directory?(File.join(place, rel)) } &&
+      wanted_files.all? { |rel| File.file?(File.join(place, rel)) }
   end
 
   # Whether the archive is the generation mlx-sys was built for.

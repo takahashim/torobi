@@ -96,8 +96,9 @@ module Torobi
       line = output.lines.map(&:strip).reject(&:empty?).first
       unless line
         return "initializing its device ended a probe process rather than raising. " \
-               "Torobi needs Apple silicon with a working Metal device; " \
-               "see docs/vendoring.md."
+               "Torobi needs a working GPU for the backend it was built against: " \
+               "Metal on Apple silicon, or an NVIDIA card and its driver " \
+               "elsewhere; see docs/vendoring.md."
       end
 
       # An unrescued Ruby exception prints as "-e:12:in '<main>': message".

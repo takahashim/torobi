@@ -26,14 +26,19 @@ File.open("Makefile", "a") do |makefile|
   # Exported rather than set in this process: make spawns cargo, and this
   # process is gone by then.
   makefile.puts("\nexport CMAKE_TOOLCHAIN_FILE := #{MlxPrebuilt.toolchain_file(prefix)}")
-  # Where mlx-sys looks for the kernels and decides whether they are
-  # there. Pointing it at the prefix is what keeps a pre-built MLX from
-  # being mistaken for a missing one and warned about.
-  makefile.puts("export MLX_RS_METAL_PATH := #{MlxPrebuilt.link_dir(prefix)}")
   # mlx-sys links MLX's archive by name, and with a system MLX that
   # archive is in the prefix rather than in mlx-sys's build tree. One
   # search path, appended so a caller's RUSTFLAGS survive.
   makefile.puts("export RUSTFLAGS := $(RUSTFLAGS) -L native=#{MlxPrebuilt.link_dir(prefix)}")
+
+  # The rest is Metal's: CUDA compiles its kernels at run time and ships
+  # no metallib to install beside the bundle.
+  next unless MlxPrebuilt.metal?
+
+  # Where mlx-sys looks for the kernels and decides whether they are
+  # there. Pointing it at the prefix is what keeps a pre-built MLX from
+  # being mistaken for a missing one and warned about.
+  makefile.puts("export MLX_RS_METAL_PATH := #{MlxPrebuilt.link_dir(prefix)}")
   makefile.puts(<<~MAKE)
 
     install-so: install-metallib

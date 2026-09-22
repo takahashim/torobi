@@ -19,7 +19,7 @@ require_relative "ext/torobi/mlx_prebuilt"
 def with_mlx
   prefix = MlxPrebuilt.ensure!
   ENV["CMAKE_TOOLCHAIN_FILE"] = MlxPrebuilt.toolchain_file(prefix)
-  ENV["MLX_RS_METAL_PATH"] = MlxPrebuilt.link_dir(prefix)
+  ENV["MLX_RS_METAL_PATH"] = MlxPrebuilt.link_dir(prefix) if MlxPrebuilt.metal?
   flags = [ENV.fetch("RUSTFLAGS", nil), "-L", "native=#{MlxPrebuilt.link_dir(prefix)}"]
   ENV["RUSTFLAGS"] = flags.compact.join(" ")
   prefix
@@ -37,6 +37,8 @@ end
 # binary. The archive brought it to the machine inside the prefix; put a
 # copy where the bundle can find it. See docs/vendoring.md.
 task :metallib do
+  next unless MlxPrebuilt.metal?
+
   source = MlxPrebuilt.metallib(with_mlx)
   destination = "lib/torobi/mlx.metallib"
   next if File.exist?(destination) && File.mtime(destination) >= File.mtime(source)
@@ -255,15 +257,22 @@ namespace :mlx do
     api = "https://api.github.com/repos/#{pin.fetch("repo")}/releases/" \
           "#{tag ? "tags/#{tag}" : "latest"}"
     release = JSON.parse(fetch_json(api))
-    asset = release.fetch("assets").find { |a| a.fetch("name").end_with?(".tar.gz") }
-    abort "#{release["tag_name"]} has no .tar.gz asset" unless asset
+    # Only this machine's archive: the digest is checked against the bytes,
+    # and only these bytes can be fetched and run here.
+    platform = MlxPrebuilt.platform
+    asset = release.fetch("assets")
+                   .find { |a| a.fetch("name").end_with?("-#{platform}.tar.gz") }
+    unless asset
+      abort "#{release["tag_name"]} has no .tar.gz asset for #{platform}; it holds " \
+            "#{release.fetch("assets").map { |a| a["name"] }.join(", ")}"
+    end
     digest = asset["digest"].to_s.delete_prefix("sha256:")
     abort "#{asset["name"]} carries no sha256 digest" if digest.empty?
 
-    was = pin.slice("release", "asset", "digest")
+    was = pin.slice("release").merge(pin.dig("platforms", platform) || {})
     pin["release"] = release.fetch("tag_name")
-    pin["asset"] = asset.fetch("name")
-    pin["digest"] = digest
+    pin["platforms"] ||= {}
+    pin["platforms"][platform] = { "asset" => asset.fetch("name"), "digest" => digest }
 
     # The pin is written before it is fetched, because the fetch reads it;
     # but a pin that does not survive its own check is put back. A wrong
@@ -289,8 +298,11 @@ namespace :mlx do
       abort "torobi: #{e.message}\nthe pin is unchanged"
     end
 
-    puts was == pin.slice("release", "asset", "digest") ? "unchanged" : "pinned:"
-    %w[release asset digest mlx mlx_c].each { |key| puts "  #{key}: #{pin[key]}" }
+    now = pin.slice("release").merge(pin.fetch("platforms").fetch(platform))
+    puts was == now ? "unchanged" : "pinned:"
+    puts "  platform: #{platform}"
+    now.each { |key, value| puts "  #{key}: #{value}" }
+    %w[mlx mlx_c].each { |key| puts "  #{key}: #{pin[key]}" }
     puts "now run `rake`, and commit ext/torobi/mlx_prebuilt.json if it passes"
   end
 end
