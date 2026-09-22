@@ -3,3 +3,18 @@
 [workspace]
 members = ["engine", "ext/torobi"]
 resolver = "2"
+
+# `mlx-rs` and `mlx-sys` as published cannot be built for anything that is
+# not Apple's, and a Linux box with an NVIDIA card is where the larger
+# training runs happen. The four commits named here are the fix, one per
+# failure; docs/vendoring.md ("The Linux patch, and when it goes") says
+# what each is and what has to be published for this section to be
+# deleted. It is meant to be deleted rather than maintained.
+#
+# By revision rather than by branch: a branch is a name that moves, and
+# what is compiled here should be a thing that does not. The versions are
+# untouched by the patch, which is what lets engine/Cargo.toml's `=0.32.0`
+# and `=0.6.0` keep meaning what they say.
+[patch.crates-io]
+mlx-rs = { git = "https://github.com/takahashim/mlx-rs.git", rev = "341e0634abf1a44df43ee5b7731e4fb846860d53" }
+mlx-sys = { git = "https://github.com/takahashim/mlx-rs.git", rev = "341e0634abf1a44df43ee5b7731e4fb846860d53" }

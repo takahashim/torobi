@@ -384,15 +384,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
-name = "mach-sys"
-version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48460c2e82a3a0de197152fdf8d2c2d5e43adc501501553e439bf2156e6f87c7"
-dependencies = [
- "fastrand",
-]
-
-[[package]]
 name = "magnus"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -430,8 +421,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "mlx-internal-macros"
 version = "0.32.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf724ff93a5ddcf64299f7786844301b147e0e37a7de30a7e1536fd60fb7e9f1"
+source = "git+https://github.com/takahashim/mlx-rs.git?rev=341e0634abf1a44df43ee5b7731e4fb846860d53#341e0634abf1a44df43ee5b7731e4fb846860d53"
 dependencies = [
  "darling",
  "itertools 0.14.0",
@@ -443,8 +433,7 @@ dependencies = [
 [[package]]
 name = "mlx-macros"
 version = "0.32.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df160e2aa7cd71a8bf652eeefa9a03117c775327071b68cb7750e1be7d6985e7"
+source = "git+https://github.com/takahashim/mlx-rs.git?rev=341e0634abf1a44df43ee5b7731e4fb846860d53#341e0634abf1a44df43ee5b7731e4fb846860d53"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -455,15 +444,13 @@ dependencies = [
 [[package]]
 name = "mlx-rs"
 version = "0.32.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44774de28d595d6bc0f9ae359e5365321b96eab252698ec0773406c0cf77762b"
+source = "git+https://github.com/takahashim/mlx-rs.git?rev=341e0634abf1a44df43ee5b7731e4fb846860d53#341e0634abf1a44df43ee5b7731e4fb846860d53"
 dependencies = [
  "bytemuck",
  "dyn-clone",
  "half",
  "itertools 0.14.0",
  "libc",
- "mach-sys",
  "mlx-internal-macros",
  "mlx-macros",
  "mlx-sys",
@@ -481,8 +468,7 @@ dependencies = [
 [[package]]
 name = "mlx-sys"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1848b6f1686114039e6e0adcf1578911e2e4d7707b9768ad61da074132319e1c"
+source = "git+https://github.com/takahashim/mlx-rs.git?rev=341e0634abf1a44df43ee5b7731e4fb846860d53#341e0634abf1a44df43ee5b7731e4fb846860d53"
 dependencies = [
  "bindgen",
  "cc",
