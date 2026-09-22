@@ -94,11 +94,15 @@ between two versions people have.
   process of its own with a memory cap.
 - **`rake mlx:pin`**, and a prebuilt MLX fetched by digest rather than
   by URL alone.
-- **The upstream mlx-rs from crates.io** (`0.32.0`, whose `mlx-sys`
-  `0.6.0` pins mlx-c and MLX 0.32.2) rather than a fork of it. The
-  pre-built MLX reaches mlx-c through `MLX_C_USE_SYSTEM_MLX` and a
-  generated CMake toolchain file, so the gem still installs with no Metal
-  toolchain and with a dependency anyone can read.
+- **The upstream mlx-rs** (`0.32.0`, whose `mlx-sys` `0.6.0` pins mlx-c
+  and MLX 0.32.2) rather than a fork of it. The pre-built MLX reaches
+  mlx-c through `MLX_C_USE_SYSTEM_MLX` and a generated CMake toolchain
+  file, so the gem still installs with no Metal toolchain and with a
+  dependency anyone can read. It is built from four commits on top of
+  upstream rather than from crates.io directly, because as published it
+  cannot be built for anything that is not Apple's; the patch is pinned
+  by revision and is meant to be deleted rather than maintained
+  (docs/vendoring.md).
 
 - **`parquet/`**, a reader for the part of parquet that datasets are
   written in: flat columns, snappy, dictionary-encoded pages of the
@@ -112,4 +116,7 @@ between two versions people have.
   attention are not implemented (docs/plan.md section 9.1, M6).
 - `Torobi::Memory.limit=` does not refuse an allocation that exceeds it;
   a run that must stay under a number wants `Policies::MemoryGuard`.
+- Apple Silicon only. The dependency patch above is what a Linux build
+  would need from the bindings, and nothing more: no Linux build has been
+  run, and `mlx_prebuilt.rb` still knows one platform.
 - The API still moves. Nothing here is a compatibility promise yet.

@@ -26,6 +26,14 @@ that option, driven from a generated CMake toolchain file, and the fork is
 no longer needed. The cost is the same one the exit always named: it is a
 number (the MLX/mlx-c pair), not a fork of `mlx-sys`.
 
+**2026-09-22 - a patch on top, so that a Linux build can exist.** MLX's
+CUDA backend is how a graph written on this Mac is trained on a rented
+Linux box with an NVIDIA card, and `mlx-rs` could not be built for such a
+machine at all: four separate failures, only two of them about CUDA. The
+answer is a `[patch.crates-io]` onto a fork, which is a bridge and not a
+destination - "The Linux patch, and when it goes" below says what has to
+become true for it to be deleted.
+
 The parts below headed "Which one is upstream", "Is the fork's mlx-rs the
 same", "What Apple publishes" and "Which mlx-c, and which MLX under it"
 are the investigation that led here, kept for its evidence.
@@ -161,11 +169,47 @@ The dependency is the crates.io crate now. It installs without Xcode
 because the MLX it is built against is provided as a system package
 (below), not because a fork reaches for one.
 
+## The Linux patch, and when it goes
+
+The crates on crates.io cannot be built for anything that is not Apple's.
+This matters because MLX itself can: `ml-explore/mlx` carries a CUDA
+backend, builds and tests it on every pull request against CUDA 12.6,
+12.9 and 13.0, and publishes `mlx-cuda-12` / `mlx-cuda-13` to PyPI in step
+with the Metal wheels. The backend is there; the bindings do not reach it.
+
+Four things stop them, and it is worth saying that only two are about
+CUDA. The other two would stop a CPU-only Linux build just as dead:
+
+| | where | what |
+|---|---|---|
+| 1 | `mlx-sys/build.rs` | `dylib=objc` and `framework=Foundation` are linked for every target, cmake is handed `/usr/bin/cc` for the macOS SDK, and `clang_rt.osx` is looked up through `xcrun` |
+| 2 | `mlx-sys` | no way to ask for the CUDA backend: `MLX_BUILD_CUDA` is never set, and because MLX is linked as a **static** archive its CUDA dependencies (cuBLASLt, cuFFT, NVRTC, the driver API, cuDNN) arrive at the final link unresolved and must be named there too |
+| 3 | `mlx-rs/src/random.rs` | `RandomState::new` seeds itself from `mach_approximate_time`, Mach's clock, reached from a `thread_local!`. Any use of `mlx_rs::random` therefore fails to link off Apple - and the engine uses it in ten places (`init`, dropout in `interp`, `executor`, `plan`, `state`). The patch does not port the clock, it drops it: the value only ever reaches `key()`, so `std::hash::RandomState` answers the same question with no dependency and no `cfg`, and is the better seed besides - a clock is shared by two runs started close enough together, which on one training box is a thing that happens |
+| 4 | `mlx-rs/Cargo.toml` | `mlx-sys` is taken with its defaults on, so `default-features = false` on `mlx-rs` turns off this crate's `metal` and leaves the sys crate linking Metal regardless. No feature combination produces a build that is not Apple's |
+
+**The exit condition, which is the point of writing this down.** The
+patch is deleted - not edited, deleted - when a published `mlx-sys` and
+`mlx-rs` carry these four. Concretely: when a crates.io release builds for
+`x86_64-unknown-linux-gnu` and offers a `cuda` feature, `[patch.crates-io]`
+comes out of the workspace manifest and `engine/Cargo.toml` goes back to
+naming versions alone. Nothing else in the tree depends on the fork, which
+is what keeps that a deletion rather than a migration.
+
+Until then the fork is `takahashim/mlx-rs`, branch `linux-cuda`, pinned by
+revision rather than by branch: a branch is a name that moves, and what is
+compiled here should be a thing that does not. The four commits are one
+per row of the table above, and each leaves macOS behaviour alone - which
+is checkable, and was checked, by building and testing this project
+against the patch on a Mac before anything else was done with it.
+
+This is the second time a fork has been carried here, and the first one
+(OminiX-MLX, above) is the reason the exit is written before the entrance.
+
 ## The ledger
 
 | what | state |
 |---|---|
-| mlx-rs / mlx-sys | **crates.io, `mlx-rs = "=0.32.0"` with `mlx-sys = "=0.6.0"`.** `Cargo.lock` records the versions and the checksums. Both are exact while the move settles |
+| mlx-rs / mlx-sys | **crates.io, `mlx-rs = "=0.32.0"` with `mlx-sys = "=0.6.0"`.** `Cargo.lock` records the versions and the checksums. Both are exact while the move settles. Both are also **patched**, by revision, onto `takahashim/mlx-rs` so that a Linux build can exist at all; "The Linux patch, and when it goes" above says what the patch is and what deletes it. The versions are unchanged by it, which is what lets `=0.32.0` and `=0.6.0` keep meaning what they say. `Cargo.lock` shows **four** crates coming from the fork rather than the two named: `mlx-macros` and `mlx-internal-macros` follow because the patched `mlx-rs` takes its workspace siblings by path. Removing the patch returns all four at once |
 | mlx-c | the submodule inside `mlx-sys 0.6.0`, pinned there to `c74db530` (v0.6.0-7). bindgen reads its headers; nothing of ours fetches it separately |
 | MLX core | **not built from source here**: there is no Metal compiler on this machine, so a pre-built archive is used instead. `takahashim/mlx-prebuilt`, built from stated inputs on a runner with the toolchain rather than taken from a third party's release. It must carry the generation `mlx-sys 0.6.0` was generated for - **MLX 0.32.2 over mlx-c `c74db5307cc8`** - and `mlx_prebuilt.json`'s `requires` is what holds it to that. It names the mlx-c **commit**, not `v0.6.0`: the tag pins MLX 0.31.1 and seven later commits pin 0.32.2, and those commits change headers under `mlx/c/`, so a build from the tag is the wrong generation even though it says 0.6.0. The pin now names **`takahashim/mlx-prebuilt` `v0.6.0.0`** (MLX 0.32.2 / mlx-c `c74db530`, digest `09f634a1…`), which is what a build fetches |
 | mlx.metallib | 105 MB. MLX locates it through `dladdr`, i.e. **beside whichever library holds the MLX symbols**: the installed bundle, or `lib/torobi/` for a checkout. It comes from the prefix at `<prefix>/lib/mlx.metallib`; `ext/torobi/extconf.rb` installs it beside the bundle and `rake metallib` copies it into the checkout. Any distribution must ship it beside the bundle |
