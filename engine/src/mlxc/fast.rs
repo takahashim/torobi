@@ -1,7 +1,6 @@
 //! MLX's fused kernels.
 
 use super::error::Result;
-use super::handle::Stream;
 use super::{sys, Array};
 
 /// What masks the scores before the softmax: an additive array, or the
@@ -22,8 +21,7 @@ impl<'a> From<&'a Array> for ScaledDotProductAttentionMask<'a> {
 ///
 /// mlx-c says "no mask" and "no sinks" with an empty array and names the
 /// mask's kind in a string: `""` for an array (or none) and `"causal"` for
-/// the triangle. The empty arrays are owned and freed here; mlx-rs made
-/// them and let them go. `force_fused` is `false`, as mlx-rs passes it,
+/// the triangle ([`NoArray`]). `force_fused` is `false`, as mlx-rs passes it,
 /// so MLX falls back to the unfused form where its kernel does not apply.
 pub fn scaled_dot_product_attention<'a>(
     queries: impl AsRef<Array>,
@@ -33,32 +31,36 @@ pub fn scaled_dot_product_attention<'a>(
     mask: impl Into<Option<ScaledDotProductAttentionMask<'a>>>,
     sinks: impl Into<Option<&'a Array>>,
 ) -> Result<Array> {
-    let (q, k, v) = (queries.as_ref().raw()?, keys.as_ref().raw()?, values.as_ref().raw()?);
-    // The empty handle is mlx-c's "none" here, so it is passed as it is
-    // (`as_raw`); an array the caller did hand over must have been made.
-    let none = Array::empty();
+    let none = NoArray::new();
     let (mode, mask) = match mask.into() {
         None => (c"", none.as_raw()),
-        Some(ScaledDotProductAttentionMask::Array(mask)) => (c"", mask.raw()?),
+        Some(ScaledDotProductAttentionMask::Array(mask)) => (c"", mask.as_raw()),
         Some(ScaledDotProductAttentionMask::Causal) => (c"causal", none.as_raw()),
     };
-    let sinks = match sinks.into() {
-        Some(sinks) => sinks.raw()?,
-        None => none.as_raw(),
-    };
-    let stream = Stream::current();
-    Array::try_from_op(|res| unsafe {
-        sys::mlx_fast_scaled_dot_product_attention(
-            res,
-            q,
-            k,
-            v,
-            scale,
-            mode.as_ptr(),
-            mask,
-            sinks,
-            false,
-            stream.as_raw(),
-        )
+    let sinks = sinks.into().map_or(none.as_raw(), Array::as_raw);
+    let (q, k, v) = (queries.as_ref().as_raw(), keys.as_ref().as_raw(), values.as_ref().as_raw());
+    Array::on_stream("mlx_fast_scaled_dot_product_attention", |res, s| unsafe {
+        sys::mlx_fast_scaled_dot_product_attention(res, q, k, v, scale, mode.as_ptr(), mask, sinks, false, s)
     })
+}
+
+/// mlx-c's "no array", for an optional argument: an empty handle. Its own
+/// type because an [`Array`] always holds one, and owned so it is freed;
+/// mlx-rs made these and let them go.
+struct NoArray(sys::mlx_array);
+
+impl NoArray {
+    fn new() -> Self {
+        NoArray(unsafe { sys::mlx_array_new() })
+    }
+
+    fn as_raw(&self) -> sys::mlx_array {
+        self.0
+    }
+}
+
+impl Drop for NoArray {
+    fn drop(&mut self) {
+        unsafe { sys::mlx_array_free(self.0) };
+    }
 }

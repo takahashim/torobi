@@ -1,9 +1,10 @@
 //! What MLX says when it refuses, and how that becomes a Rust error.
 //!
 //! mlx-c reports a failure twice: once through the error handler, with a
-//! message, and once through the status the call returns. The handler runs
-//! first, so its message waits here ([`Reports`]) until the caller sees
-//! the status and asks for it ([`check`]).
+//! message, and once through the status the call returns (or, for a
+//! constructor, the empty handle it returns). The handler runs first, so
+//! its message waits here until the caller sees the failure and asks for
+//! it ([`check`], [`failure`]).
 //!
 //! **Our handler must be in place before mlx-c is first asked anything.**
 //! mlx-c's own prints and calls `exit`, which no caller can rescue. The
@@ -67,38 +68,11 @@ impl From<&str> for Exception {
     }
 }
 
-/// What MLX has said on this thread and nobody has read yet.
-///
-/// MLX reports on the thread that failed, so one of these per thread is
-/// one per failure in flight.
-#[derive(Default)]
-struct Reports {
-    /// The last message, waiting for the failing status that goes with it.
-    said: Option<String>,
-    /// Why a constructor could not make an array. Kept apart from `said`:
-    /// constructors return no status, so the failure surfaces later, when
-    /// the empty array they left is used, and by then other calls may have
-    /// reported in between.
-    unmade: Option<String>,
-}
-
-impl Reports {
-    fn record(&mut self, message: String) {
-        self.said = Some(message);
-    }
-
-    /// Moves the last message to where an empty array's cause is kept.
-    fn defer_to_next_use(&mut self) {
-        self.unmade = self.said.take();
-    }
-}
-
 thread_local! {
-    static REPORTS: RefCell<Reports> = RefCell::new(Reports::default());
-}
-
-fn reports<R>(f: impl FnOnce(&mut Reports) -> R) -> R {
-    REPORTS.with(|slot| f(&mut slot.borrow_mut()))
+    /// What MLX last said on this thread, waiting for the failing status
+    /// that goes with it. MLX reports on the thread that failed, so one
+    /// slot per thread is one per failure in flight.
+    static SAID: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Called by mlx-c, from C++, before it returns a failing status.
@@ -109,9 +83,9 @@ fn reports<R>(f: impl FnOnce(&mut Reports) -> R) -> R {
 extern "C" fn on_error(message: *const c_char, _data: *mut c_void) {
     let _ = catch_unwind(AssertUnwindSafe(|| {
         let text = describe(message);
-        let _ = REPORTS.try_with(|slot| {
-            if let Ok(mut reports) = slot.try_borrow_mut() {
-                reports.record(text);
+        let _ = SAID.try_with(|slot| {
+            if let Ok(mut said) = slot.try_borrow_mut() {
+                *said = Some(text);
             }
         });
     }));
@@ -140,7 +114,7 @@ pub(crate) fn install() {
 #[track_caller]
 pub(crate) fn failure(operation: &str) -> Exception {
     let location = Location::caller();
-    let what = reports(|r| r.said.take()).unwrap_or_else(|| format!("{operation} failed"));
+    let what = SAID.with(|slot| slot.borrow_mut().take()).unwrap_or_else(|| format!("{operation} failed"));
     Exception { what, location }
 }
 
@@ -157,23 +131,15 @@ pub(crate) fn check(status: c_int, operation: &str) -> Result<()> {
 /// Drops whatever MLX last said on this thread, for a caller that already
 /// knows a better reason for the failure (a closure's own error).
 pub(crate) fn forget_said() {
-    reports(|r| r.said = None);
+    SAID.with(|slot| slot.borrow_mut().take());
 }
 
-/// A constructor handed back an empty array: keep what MLX said about it
-/// for whoever uses that array ([`never_made`]).
-pub(crate) fn unmade() {
-    reports(Reports::defer_to_next_use);
-}
-
-/// The error for using an empty array: why it could not be made, if a
-/// constructor on this thread failed and its reason has not been used yet.
-#[track_caller]
-pub(crate) fn never_made() -> Exception {
-    Exception::custom(match reports(|r| r.unmade.take()) {
-        Some(cause) => format!("{cause} (an array could not be made)"),
-        None => "this array was never made: mlx-c returned an empty handle".to_string(),
-    })
+/// MLX's report, as mlx-c would deliver it, for tests that stage a failure
+/// MLX cannot be made to produce on this machine.
+#[cfg(test)]
+pub(crate) fn report(message: &str) {
+    let message = std::ffi::CString::new(message).unwrap();
+    on_error(message.as_ptr(), std::ptr::null_mut());
 }
 
 #[cfg(test)]
@@ -222,35 +188,13 @@ mod tests {
         }
         let said = runtime::runtime()
             .execute(|| {
-                let two = Array::from_slice(&[1.0f32, 2.0], &[2]);
-                let three = Array::from_slice(&[1.0f32, 2.0, 3.0], &[3]);
+                let two = Array::from_slice(&[1.0f32, 2.0], &[2])?;
+                let three = Array::from_slice(&[1.0f32, 2.0, 3.0], &[3])?;
                 Ok(two.add(&three).err().map(|error| error.what().to_string()))
             })
             .expect("the runtime should let this through");
         let said = said.expect("shapes 2 and 3 do not broadcast");
         assert!(said.contains("broadcast"), "{said}");
-    }
-
-    /// Using an array a constructor could not make is an error that says
-    /// why, found from the handle before mlx-c is asked anything. On a Mac
-    /// the empty handle is the only way to reach this, since making an
-    /// array there cannot fail.
-    #[test]
-    fn an_array_that_was_never_made_is_refused_with_its_cause() {
-        let said = runtime::runtime()
-            .execute(|| {
-                on_error(c"cudaMallocManaged(&data, size) failed".as_ptr(), std::ptr::null_mut());
-                unmade();
-                Ok(Array::empty().add(Array::from_f32(1.0)).unwrap_err().what().to_string())
-            })
-            .expect("the runtime should let this through");
-        assert!(said.starts_with("cudaMallocManaged"), "{said}");
-
-        // The cause is used once, not blamed on a later empty array.
-        let later = runtime::runtime()
-            .execute(|| Ok(Array::empty().exp().unwrap_err().what().to_string()))
-            .expect("the runtime should let this through");
-        assert!(later.contains("never made") && !later.contains("cudaMalloc"), "{later}");
     }
 
     #[test]

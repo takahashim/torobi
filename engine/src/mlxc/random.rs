@@ -7,68 +7,50 @@
 //! from the run's seed.
 
 use super::error::Result;
-use super::handle::Stream;
 use super::{sys, Array, ArrayElement};
 
 /// A key from a seed.
 pub fn key(seed: u64) -> Result<Array> {
-    Array::try_from_op(|res| unsafe { sys::mlx_random_key(res, seed) })
+    Array::try_from_op("mlx_random_key", |res| unsafe { sys::mlx_random_key(res, seed) })
 }
 
 /// Two keys from one, as mlx-rs returned them: split `num` ways, then the
 /// first and second of those. The engine asks for two and uses both.
 pub fn split(key: &Array, num: i32) -> Result<(Array, Array)> {
-    let key = key.raw()?;
-    let stream = Stream::current();
-    let keys = Array::try_from_op(|res| unsafe {
-        sys::mlx_random_split_num(res, key, num, stream.as_raw())
+    let keys = Array::on_stream("mlx_random_split_num", |res, s| unsafe {
+        sys::mlx_random_split_num(res, key.as_raw(), num, s)
     })?;
-    Ok((keys.take_axis(Array::from_i32(0), 0)?, keys.take_axis(Array::from_i32(1), 0)?))
+    Ok((keys.take_axis(Array::from_i32(0)?, 0)?, keys.take_axis(Array::from_i32(1)?, 0)?))
 }
 
 /// Uniform on [lower, upper), in `T`'s dtype.
 pub fn uniform<T: ArrayElement>(lower: f32, upper: f32, shape: &[i32], key: &Array) -> Result<Array> {
-    let (lower, upper) = (Array::from_f32(lower), Array::from_f32(upper));
-    let (lo, hi, key) = (lower.raw()?, upper.raw()?, key.raw()?);
-    let stream = Stream::current();
-    Array::try_from_op(|res| unsafe {
+    let (lower, upper) = (Array::from_f32(lower)?, Array::from_f32(upper)?);
+    Array::on_stream("mlx_random_uniform", |res, s| unsafe {
         sys::mlx_random_uniform(
             res,
-            lo,
-            hi,
+            lower.as_raw(),
+            upper.as_raw(),
             shape.as_ptr(),
             shape.len(),
             T::DTYPE.to_raw(),
-            key,
-            stream.as_raw(),
+            key.as_raw(),
+            s,
         )
     })
 }
 
 /// Normal with mean `loc` and standard deviation `scale`, in `T`'s dtype.
 pub fn normal<T: ArrayElement>(shape: &[i32], loc: f32, scale: f32, key: &Array) -> Result<Array> {
-    let key = key.raw()?;
-    let stream = Stream::current();
-    Array::try_from_op(|res| unsafe {
-        sys::mlx_random_normal(
-            res,
-            shape.as_ptr(),
-            shape.len(),
-            T::DTYPE.to_raw(),
-            loc,
-            scale,
-            key,
-            stream.as_raw(),
-        )
+    Array::on_stream("mlx_random_normal", |res, s| unsafe {
+        sys::mlx_random_normal(res, shape.as_ptr(), shape.len(), T::DTYPE.to_raw(), loc, scale, key.as_raw(), s)
     })
 }
 
 /// `true` with probability `p` at each position of `shape`.
 pub fn bernoulli(p: &Array, shape: &[i32], key: &Array) -> Result<Array> {
-    let (p, key) = (p.raw()?, key.raw()?);
-    let stream = Stream::current();
-    Array::try_from_op(|res| unsafe {
-        sys::mlx_random_bernoulli(res, p, shape.as_ptr(), shape.len(), key, stream.as_raw())
+    Array::on_stream("mlx_random_bernoulli", |res, s| unsafe {
+        sys::mlx_random_bernoulli(res, p.as_raw(), shape.as_ptr(), shape.len(), key.as_raw(), s)
     })
 }
 
@@ -95,14 +77,14 @@ mod tests {
             let (first, second) = split(&root, 2)?;
             let normal = super::normal::<f32>(&[3], 0.0, 0.02, &first)?;
             let uniform = super::uniform::<f32>(-0.5, 0.5, &[3], &second)?;
-            let kept = bernoulli(&Array::from_f32(0.75), &[8], &first)?;
+            let kept = bernoulli(&Array::from_f32(0.75)?, &[8], &first)?;
             Ok((
-                root.as_slice::<u32>().to_vec(),
-                first.as_slice::<u32>().to_vec(),
-                second.as_slice::<u32>().to_vec(),
-                normal.as_slice::<f32>().to_vec(),
-                uniform.as_slice::<f32>().to_vec(),
-                kept.as_slice::<bool>().to_vec(),
+                root.as_slice::<u32>()?.to_vec(),
+                first.as_slice::<u32>()?.to_vec(),
+                second.as_slice::<u32>()?.to_vec(),
+                normal.as_slice::<f32>()?.to_vec(),
+                uniform.as_slice::<f32>()?.to_vec(),
+                kept.as_slice::<bool>()?.to_vec(),
             ))
         });
         assert_eq!(key, RECORDED.key);
@@ -136,7 +118,7 @@ mod tests {
         let got = run(|| {
             let k = key(1)?;
             let n = normal::<f32>(&[2, 3], 0.0, 1.0, &k)?;
-            let b = bernoulli(&Array::from_f32(0.5), &[4], &k)?;
+            let b = bernoulli(&Array::from_f32(0.5)?, &[4], &k)?;
             Ok((n.shape().to_vec(), n.dtype(), b.shape().to_vec(), b.dtype()))
         });
         assert_eq!(got, (vec![2, 3], Dtype::Float32, vec![4], Dtype::Bool));

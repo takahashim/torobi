@@ -278,8 +278,9 @@ recorded in docs/plan.md section 15.75.
 | what | `mlx-rs 0.32.0` | here |
 |---|---|---|
 | error handler | installed lazily on first use | installed once, by the runtime when it is created and wherever a handle that can fail is made (`engine/src/mlxc/error.rs` says where); tested in a child process, so an exit would fail the test rather than end the run |
-| an array a constructor could not make | an empty handle, and a later failure in MLX's words | refused by the shim from the handle before mlx-c sees it, with the constructor's reason |
-| `as_slice` on an empty array | panics (a null data pointer) | an empty slice |
+| a constructor mlx-c could not serve | an `Array` holding an empty handle, which fails later in MLX's words | an error at the constructor, in MLX's words: constructors return `Result`, and an `Array` always holds an array |
+| data that does not fill the shape | a panic | an error |
+| reading a value (`item`, `as_slice`) | panics on failure (`item_cast`, `as_slice`) | returns `Result`; an empty array's slice is empty rather than a panic |
 | a closure panicking inside `value_and_grad` | caught, then resumed after the call | the same |
 | the closure's output vector | written into mlx-c's | the same, with mlx-c's own empty vector filled rather than overwritten |
 
@@ -287,7 +288,7 @@ recorded in docs/plan.md section 15.75.
 
 What each method the engine calls maps to. **Ownership** is the same for
 every row and so is said once: inputs are borrowed (mlx-c takes a new
-reference where it keeps one) and checked to have been made, and the
+reference where it keeps one), and the
 output is written into an `mlx_array` the shim owns before the call, so a
 failing call frees it. Every op runs on `Stream::current`, the default
 device's default stream, which is what `mlx-rs` used when no thread-local
@@ -305,11 +306,11 @@ stream was set.
 | `contiguous` | `mlx_contiguous` with `allow_col_major = false` | `mlx-rs`'s default |
 | `as_dtype` | `mlx_astype` | |
 | `zeros::<T>` `ones::<T>` | `mlx_zeros` `mlx_ones` with `T`'s dtype | |
-| `from_slice` | `mlx_array_new_data` (copies) | panics when the data does not fill the shape, as `mlx-rs` does |
-| `from_f32` | `mlx_array_new_float32` | |
+| `from_slice` | `mlx_array_new_data` (copies) | refused when the data does not fill the shape, before mlx-c reads it |
+| `from_f32` `from_i32` | `mlx_array_new_float32` `mlx_array_new_int` | a constructor that returns an empty handle is an error, with what MLX said |
 | `clone` | `mlx_array_set` into a new handle | another reference, not a copy of the data |
-| `item_cast::<T>` | `mlx_array_eval`, then `mlx_astype` when the dtype differs, then `mlx_array_item_<T>` | panics on more than one value, as `mlx-rs` does; `try_item_cast` returns the error |
-| `as_slice::<T>` | `mlx_array_eval`, `_mlx_array_is_row_contiguous`, `mlx_array_data_<T>` | panics on another dtype or a non-row-major layout, as `mlx-rs` does; `T` is `f32`, `i32`, `u32` or `bool` |
+| `item::<T>` (mlx-rs's `item_cast`) | `mlx_array_eval`, then `mlx_astype` when the dtype differs, then `mlx_array_item_<T>` | an error on more than one value |
+| `as_slice::<T>` | `mlx_array_eval`, `_mlx_array_is_row_contiguous`, `mlx_array_data_<T>` | an error on another dtype or a non-row-major layout; `T` is `f32`, `i32`, `u32` or `bool` |
 | `shape` `ndim` `size` `dtype` | `mlx_array_shape` `mlx_array_ndim` `mlx_array_size` `mlx_array_dtype` | a scalar's shape is empty |
 | `ops::tanh` `ops::sigmoid` `ops::erf` `stop_gradient` | `mlx_tanh` `mlx_sigmoid` `mlx_erf` `mlx_stop_gradient` | none |
 | `ops::maximum` | `mlx_maximum` | |

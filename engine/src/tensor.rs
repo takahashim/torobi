@@ -60,11 +60,11 @@ impl std::fmt::Debug for Tensor {
 }
 
 impl Tensor {
-    pub fn to_array(&self) -> Array {
-        match &self.values {
-            Values::F32(data) => Array::from_slice(data, &self.shape),
-            Values::I32(data) => Array::from_slice(data, &self.shape),
-        }
+    pub fn to_array(&self) -> Result<Array> {
+        Ok(match &self.values {
+            Values::F32(data) => Array::from_slice(data, &self.shape)?,
+            Values::I32(data) => Array::from_slice(data, &self.shape)?,
+        })
     }
 
     /// From the bytes the boundary carries: native-endian, four to a value.
@@ -175,10 +175,10 @@ pub fn to_tensor(array: &Array) -> Result<Tensor> {
     // bf16 to put them in, and a label that disagreed with the bytes
     // would be a trap for whoever unpacked them.
     let (dtype, values) = match array.dtype() {
-        Dtype::Int32 => (Dtype::Int32, Values::I32(array.as_slice::<i32>().to_vec())),
+        Dtype::Int32 => (Dtype::Int32, Values::I32(array.as_slice::<i32>()?.to_vec())),
         _ => (
             Dtype::Float32,
-            Values::F32(array.as_dtype(Dtype::Float32)?.as_slice::<f32>().to_vec()),
+            Values::F32(array.as_dtype(Dtype::Float32)?.as_slice::<f32>()?.to_vec()),
         ),
     };
     Ok(Tensor {
@@ -258,7 +258,7 @@ mod tests {
     fn a_strided_array_comes_back_in_reading_order() {
         // A gradient can arrive through a transpose. Reading it out needs
         // contiguous memory, so to_tensor must not hand back the strides.
-        let a = Array::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let a = Array::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
         let t = to_tensor(&a.transpose_axes(&[1, 0]).unwrap()).unwrap();
         assert_eq!(t.shape, vec![3, 2]);
         match t.values {
@@ -272,13 +272,13 @@ mod tests {
     /// with the bytes would be a trap for whoever unpacked them.
     #[test]
     fn the_boundary_carries_i32_or_f32_and_says_which() {
-        let ids = to_tensor(&Array::from_slice(&[3i32, 4], &[2])).unwrap();
+        let ids = to_tensor(&Array::from_slice(&[3i32, 4], &[2]).unwrap()).unwrap();
         assert_eq!(ids.dtype, Dtype::Int32);
         assert!(matches!(ids.values, Values::I32(_)));
 
         for other in [
-            Array::from_slice(&[true, false], &[2]),
-            Array::from_slice(&[1.0f32, 0.0], &[2])
+            Array::from_slice(&[true, false], &[2]).unwrap(),
+            Array::from_slice(&[1.0f32, 0.0], &[2]).unwrap()
                 .as_dtype(Dtype::Bfloat16)
                 .unwrap(),
         ] {
@@ -305,7 +305,7 @@ mod tests {
                 values: Values::I32(vec![1, 2]),
             },
         ] {
-            let back = to_tensor(&t.to_array()).unwrap();
+            let back = to_tensor(&t.to_array().unwrap()).unwrap();
             assert_eq!(back.dtype, t.dtype);
             assert_eq!(back.shape, t.shape);
         }

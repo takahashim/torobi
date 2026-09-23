@@ -193,10 +193,10 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
         Op::Sub => ins[0].subtract(&ins[1])?,
         Op::Mul => ins[0].multiply(&ins[1])?,
         Op::Div => ins[0].divide(&ins[1])?,
-        Op::AddScalar(v) => ins[0].add(scalar(*v))?,
-        Op::SubScalar(v) => ins[0].subtract(scalar(*v))?,
-        Op::MulScalar(v) => ins[0].multiply(scalar(*v))?,
-        Op::DivScalar(v) => ins[0].divide(scalar(*v))?,
+        Op::AddScalar(v) => ins[0].add(scalar(*v)?)?,
+        Op::SubScalar(v) => ins[0].subtract(scalar(*v)?)?,
+        Op::MulScalar(v) => ins[0].multiply(scalar(*v)?)?,
+        Op::DivScalar(v) => ins[0].divide(scalar(*v)?)?,
 
         Op::Neg => ins[0].negative()?,
         Op::Abs => ins[0].abs()?,
@@ -204,16 +204,16 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
         Op::Square => ins[0].square()?,
         Op::Exp => ins[0].exp()?,
         Op::Log => ins[0].log()?,
-        Op::Relu => crate::mlxc::ops::maximum(&ins[0], Array::from_f32(0.0))?,
+        Op::Relu => crate::mlxc::ops::maximum(&ins[0], Array::from_f32(0.0)?)?,
         Op::Sigmoid => crate::mlxc::ops::sigmoid(&ins[0])?,
         Op::Tanh => crate::mlxc::ops::tanh(&ins[0])?,
         // The exact form, not the tanh approximation: erf is what the
         // reference implementations of these models use, and a parity
         // check against them is the point (docs/plan.md 9.2).
         Op::Gelu => {
-            let half = ins[0].multiply(scalar(0.5))?;
-            let inner = ins[0].divide(scalar(std::f32::consts::SQRT_2))?;
-            half.multiply(crate::mlxc::ops::erf(&inner)?.add(scalar(1.0))?)?
+            let half = ins[0].multiply(scalar(0.5)?)?;
+            let inner = ins[0].divide(scalar(std::f32::consts::SQRT_2)?)?;
+            half.multiply(crate::mlxc::ops::erf(&inner)?.add(scalar(1.0)?)?)?
         }
         // And the tanh approximation, which is a different function:
         // 0.5x(1 + tanh(sqrt(2/pi)(x + 0.044715x^3))). Gemma is trained
@@ -230,7 +230,7 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
                 Some(current) => {
                     let (next, draw) = crate::mlxc::random::split(current, 2)?;
                     *key = Some(next);
-                    let keep = scalar(1.0 - p);
+                    let keep = scalar(1.0 - p)?;
                     let mask = crate::mlxc::random::bernoulli(&keep, ins[0].shape(), &draw)?;
                     ins[0]
                         .multiply(mask.as_dtype(crate::mlxc::Dtype::Float32)?)?
@@ -289,7 +289,7 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
 /// indices is the same function.
 fn slice(x: &Array, axis: i32, start: i32, length: i32) -> Result<Array> {
     let indices: Vec<i32> = (start..start + length).collect();
-    x.take_axis(&Array::from_slice(&indices, &[length]), axis)
+    x.take_axis(&Array::from_slice(&indices, &[length])?, axis)
 }
 
 /// Normalize over the last axis, then scale and shift.
@@ -302,7 +302,7 @@ fn layer_norm(ins: &[Array], eps: f32) -> Result<Array> {
     let mean = x.mean_axes(&[-1], true)?;
     let centred = x.subtract(&mean)?;
     let variance = centred.square()?.mean_axes(&[-1], true)?;
-    let normed = centred.divide(variance.add(Array::from_f32(eps))?.sqrt()?)?;
+    let normed = centred.divide(variance.add(Array::from_f32(eps)?)?.sqrt()?)?;
     let scaled = normed.multiply(weight)?;
     match ins.get(2) {
         Some(bias) => scaled.add(bias),
@@ -316,7 +316,7 @@ fn rms_norm(x: &Array, weight: &Array, eps: f32) -> Result<Array> {
     let scale = x
         .square()?
         .mean_axes(&[-1], true)?
-        .add(Array::from_f32(eps))?
+        .add(Array::from_f32(eps)?)?
         .rsqrt()?;
     x.multiply(scale)?.multiply(weight)
 }
@@ -380,7 +380,7 @@ fn rope(x: &Array, theta: f32, freqs: Option<&[f32]>) -> Result<Array> {
             })
             .collect(),
     };
-    let angle = Array::from_slice(&angles, &[positions, half]);
+    let angle = Array::from_slice(&angles, &[positions, half])?;
     let (cos, sin) = (angle.cos()?, angle.sin()?);
 
     let first = slice(x, -1, 0, half)?;
@@ -680,9 +680,9 @@ mod tests {
         use crate::mlxc::transforms::value_and_grad_with_argnums;
         use crate::mlxc::Array;
 
-        let q = Array::from_slice(&[0.1f32; 24], &[1, 4, 2, 3]);
-        let k = Array::from_slice(&[0.2f32; 12], &[1, 2, 2, 3]);
-        let v = Array::from_slice(&[0.3f32; 12], &[1, 2, 2, 3]);
+        let q = Array::from_slice(&[0.1f32; 24], &[1, 4, 2, 3]).unwrap();
+        let k = Array::from_slice(&[0.2f32; 12], &[1, 2, 2, 3]).unwrap();
+        let v = Array::from_slice(&[0.3f32; 12], &[1, 2, 2, 3]).unwrap();
 
         let forward = |args: &[Array]| -> Vec<Array> {
             let out = crate::mlxc::fast::scaled_dot_product_attention(
@@ -696,7 +696,7 @@ mod tests {
 
         // Every value is 0.3, so any weighted average of them is 0.3, and
         // there are 4 heads * 2 positions * 3 wide of them.
-        assert!((value[0].item_cast::<f32>() - 0.3 * 24.0).abs() < 1e-5);
+        assert!((value[0].item::<f32>().unwrap() - 0.3 * 24.0).abs() < 1e-5);
         assert_eq!(grads[0].shape(), &[1, 4, 2, 3]);
         assert_eq!(grads[1].shape(), &[1, 2, 2, 3], "k stays untiled");
     }

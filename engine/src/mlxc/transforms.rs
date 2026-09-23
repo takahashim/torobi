@@ -157,12 +157,54 @@ extern "C" fn release<F>(payload: *mut c_void) {
     }));
 }
 
-/// An `mlx_closure_value_and_grad`, freed when it goes.
-struct ValueAndGrad(sys::mlx_closure_value_and_grad);
+/// A closure made differentiable: the function MLX returns for its value
+/// and its gradient with respect to `argnums`.
+///
+/// Made once and applied as often as it is called, so "differentiate this"
+/// and "at these arguments" are separate steps. Holds the closure it was
+/// made from, since MLX's copy calls back into it, and so borrows what the
+/// closure borrows.
+struct Gradient<'a> {
+    raw: sys::mlx_closure_value_and_grad,
+    closure: Closure<'a>,
+}
 
-impl Drop for ValueAndGrad {
+impl<'a> Gradient<'a> {
+    fn new(closure: Closure<'a>, argnums: &[i32]) -> Result<Self> {
+        let mut gradient = Gradient {
+            raw: unsafe { sys::mlx_closure_value_and_grad_new() },
+            closure,
+        };
+        check(
+            unsafe {
+                sys::mlx_value_and_grad(
+                    &mut gradient.raw,
+                    gradient.closure.raw,
+                    argnums.as_ptr(),
+                    argnums.len(),
+                )
+            },
+            "mlx_value_and_grad",
+        )?;
+        Ok(gradient)
+    }
+
+    /// The values and the gradients at `arrays`.
+    fn apply(&mut self, arrays: &[Array]) -> Result<(Vec<Array>, Vec<Array>)> {
+        let given = Vector::of(arrays)?;
+        let mut values = Vector::new();
+        let mut grads = Vector::new();
+        let status = unsafe {
+            sys::mlx_closure_value_and_grad_apply(values.as_out(), grads.as_out(), self.raw, given.as_raw())
+        };
+        settle(status, "mlx_closure_value_and_grad_apply")?;
+        Ok((values.arrays()?, grads.arrays()?))
+    }
+}
+
+impl Drop for Gradient<'_> {
     fn drop(&mut self) {
-        unsafe { sys::mlx_closure_value_and_grad_free(self.0) };
+        unsafe { sys::mlx_closure_value_and_grad_free(self.raw) };
     }
 }
 
@@ -210,27 +252,13 @@ pub fn value_and_grad_with_argnums<'a, F, Err>(
 where
     F: IntoValueAndGrad<'a, Err> + 'a,
 {
-    // mlx-rs's signature returns the function, not a `Result`, so a closure
-    // mlx-c would not take is reported on each call, as the error it was.
-    let closure = Closure::new(f.into_function());
-    move |arrays: &[Array]| {
-        let closure = closure.as_ref().map_err(Exception::clone)?;
-        let mut valued = ValueAndGrad(unsafe { sys::mlx_closure_value_and_grad_new() });
-        check(
-            unsafe {
-                sys::mlx_value_and_grad(&mut valued.0, closure.raw, argnums.as_ptr(), argnums.len())
-            },
-            "mlx_value_and_grad",
-        )?;
-
-        let given = Vector::of(arrays)?;
-        let mut values = Vector::new();
-        let mut grads = Vector::new();
-        let status = unsafe {
-            sys::mlx_closure_value_and_grad_apply(values.as_out(), grads.as_out(), valued.0, given.as_raw())
-        };
-        settle(status, "mlx_closure_value_and_grad_apply")?;
-        Ok((values.arrays()?, grads.arrays()?))
+    // The signature returns the function rather than a `Result`, as mlx-rs's
+    // did, so a closure MLX would not take is reported on each call, as the
+    // error it was.
+    let mut gradient = Closure::new(f.into_function()).and_then(|closure| Gradient::new(closure, argnums));
+    move |arrays: &[Array]| match &mut gradient {
+        Ok(gradient) => gradient.apply(arrays),
+        Err(refused) => Err(refused.clone()),
     }
 }
 
@@ -240,7 +268,6 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::mlxc::handle::Stream;
     use crate::runtime;
 
     fn run<R>(f: impl FnOnce() -> Result<R>) -> R {
@@ -250,9 +277,8 @@ mod tests {
     }
 
     fn square(x: &Array) -> Result<Array> {
-        let stream = Stream::current();
-        Array::try_from_op(|res| unsafe {
-            sys::mlx_multiply(res, x.as_raw(), x.as_raw(), stream.as_raw())
+        Array::on_stream("mlx_multiply", |res, s| unsafe {
+            sys::mlx_multiply(res, x.as_raw(), x.as_raw(), s)
         })
     }
 
@@ -281,8 +307,8 @@ mod tests {
     fn a_closure_crosses_into_mlx_and_its_gradient_comes_back() {
         let answer = run(|| {
             let f = |inputs: &[Array]| -> Result<Vec<Array>> { Ok(vec![square(&inputs[0])?]) };
-            let (values, grads) = value_and_grad_with_argnums(f, &[0])(&[Array::from_f32(3.0)])?;
-            Ok((values[0].item_cast::<f32>(), grads[0].item_cast::<f32>()))
+            let (values, grads) = value_and_grad_with_argnums(f, &[0])(&[Array::from_f32(3.0)?])?;
+            Ok((values[0].item::<f32>()?, grads[0].item::<f32>()?))
         });
         assert_eq!(answer, (9.0, 6.0));
     }
@@ -292,8 +318,8 @@ mod tests {
     fn a_closure_that_cannot_fail_is_taken_as_well() {
         let answer = run(|| {
             let f = |inputs: &[Array]| -> Vec<Array> { vec![square(&inputs[0]).unwrap()] };
-            let (_, grads) = value_and_grad_with_argnums(f, &[0])(&[Array::from_f32(2.0)])?;
-            Ok(grads[0].item_cast::<f32>())
+            let (_, grads) = value_and_grad_with_argnums(f, &[0])(&[Array::from_f32(2.0)?])?;
+            grads[0].item::<f32>()
         });
         assert_eq!(answer, 4.0);
     }
@@ -307,7 +333,7 @@ mod tests {
             let refuses = |_: &[Array]| -> Result<Vec<Array>> {
                 Err(Exception::custom("the objective gave up"))
             };
-            Ok(value_and_grad_with_argnums(refuses, &[0])(&[Array::from_f32(1.0)])
+            Ok(value_and_grad_with_argnums(refuses, &[0])(&[Array::from_f32(1.0)?])
                 .unwrap_err()
                 .to_string())
         });
@@ -323,7 +349,7 @@ mod tests {
         // would poison it for every later test.
         let caught = std::panic::catch_unwind(|| {
             let panics = |_: &[Array]| -> Result<Vec<Array>> { panic!("inside the closure") };
-            let _ = value_and_grad_with_argnums(panics, &[0])(&[Array::from_f32(1.0)]);
+            let _ = value_and_grad_with_argnums(panics, &[0])(&[Array::from_f32(1.0).unwrap()]);
         });
         let payload = caught.expect_err("the panic should come back");
         let said = payload
@@ -336,8 +362,8 @@ mod tests {
         // And nothing is left parked to be blamed on the next call.
         let next = run(|| {
             let f = |inputs: &[Array]| -> Result<Vec<Array>> { Ok(vec![square(&inputs[0])?]) };
-            let (values, _) = value_and_grad_with_argnums(f, &[0])(&[Array::from_f32(2.0)])?;
-            Ok(values[0].item_cast::<f32>())
+            let (values, _) = value_and_grad_with_argnums(f, &[0])(&[Array::from_f32(2.0)?])?;
+            values[0].item::<f32>()
         });
         assert_eq!(next, 4.0);
     }
@@ -353,7 +379,7 @@ mod tests {
             ("failed", |_| Err(Exception::custom("no"))),
             // Not a scalar, so MLX refuses to differentiate it after the
             // closure has run and produced arrays.
-            ("MLX refused", |_| Ok(vec![Array::from_slice(&[1.0f32, 2.0], &[2])])),
+            ("MLX refused", |_| Ok(vec![Array::from_slice(&[1.0f32, 2.0], &[2])?])),
         ];
         for (what, outcome) in outcomes {
             let (count, token) = counter();
@@ -363,8 +389,8 @@ mod tests {
                     outcome(inputs)
                 };
                 let mut vg = value_and_grad_with_argnums(f, &[0]);
-                let _ = vg(&[Array::from_f32(3.0)]);
-                let _ = vg(&[Array::from_f32(4.0)]);
+                let _ = vg(&[Array::from_f32(3.0)?]);
+                let _ = vg(&[Array::from_f32(4.0)?]);
                 drop(vg);
                 Ok(())
             });
@@ -377,7 +403,7 @@ mod tests {
                 let _held = &token;
                 panic!("mid-trace")
             };
-            let _ = value_and_grad_with_argnums(f, &[0])(&[Array::from_f32(1.0)]);
+            let _ = value_and_grad_with_argnums(f, &[0])(&[Array::from_f32(1.0).unwrap()]);
         }));
         assert_eq!(count.load(Ordering::SeqCst), 1, "released after it panicked");
     }
@@ -398,7 +424,7 @@ mod tests {
         let (before, after) = run(|| {
             let before = active();
             for _ in 0..3 {
-                let input = Array::from_slice(&vec![1.0f32; 1 << 20], &[1 << 20]);
+                let input = Array::from_slice(&vec![1.0f32; 1 << 20], &[1 << 20])?;
                 input.eval()?;
                 let not_a_scalar = |inputs: &[Array]| -> Result<Vec<Array>> {
                     Ok(vec![square(&inputs[0])?])

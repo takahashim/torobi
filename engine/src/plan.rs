@@ -350,7 +350,7 @@ fn bind_one(field: &str, spec: &InputSpec, given: &Tensor) -> Result<Array> {
         given.values.len(),
         given.shape
     );
-    Ok(given.to_array())
+    given.to_array()
 }
 
 /// Initial parameters, read and waiting to be matched to what the graph
@@ -435,7 +435,7 @@ impl Source {
                     t.data.len(),
                     t.shape
                 );
-                Array::from_slice(&t.data, &t.shape)
+                Array::from_slice(&t.data, &t.shape)?
             }
             Source::File(arrays) => {
                 let array = arrays.get(path).with_context(|| {
@@ -843,7 +843,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = write_parameters(
             dir.path(),
-            &[("m.w", Array::from_slice(&[5.0f32, 6.0], &[2]))],
+            &[("m.w", Array::from_slice(&[5.0f32, 6.0], &[2]).unwrap())],
         );
 
         let (config, _) = fixtures::scaled_mean();
@@ -857,7 +857,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = write_parameters(
             dir.path(),
-            &[("something.else", Array::from_slice(&[0.0f32, 0.0], &[2]))],
+            &[("something.else", Array::from_slice(&[0.0f32, 0.0], &[2]).unwrap())],
         );
 
         let (config, _) = fixtures::scaled_mean();
@@ -874,7 +874,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = write_parameters(
             dir.path(),
-            &[("m.w", Array::from_slice(&[1.0f32, 2.0, 3.0], &[3]))],
+            &[("m.w", Array::from_slice(&[1.0f32, 2.0, 3.0], &[3]).unwrap())],
         );
 
         let (config, _) = fixtures::scaled_mean();
@@ -890,7 +890,7 @@ mod tests {
         // Importing is starting somewhere, not resuming: a model published
         // in bf16 is a fine place to start an f32 run.
         let dir = tempfile::tempdir().unwrap();
-        let half = Array::from_slice(&[0.5f32, 2.0], &[2])
+        let half = Array::from_slice(&[0.5f32, 2.0], &[2]).unwrap()
             .as_dtype(Dtype::Bfloat16)
             .unwrap();
         let file = write_parameters(dir.path(), &[("m.w", half)]);

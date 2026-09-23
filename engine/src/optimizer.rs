@@ -76,15 +76,15 @@ pub fn global_norm(arrays: &[Array]) -> Result<f32> {
         });
     }
     let norm = match total {
-        None => Array::from_f32(0.0),
+        None => Array::from_f32(0.0)?,
         Some(so_far) => so_far.sqrt()?,
     };
-    Ok(norm.item_cast::<f32>())
+    Ok(norm.item::<f32>()?)
 }
 
 /// Every gradient multiplied by the same scalar, as a new slice.
 pub fn scaled(grads: &[Array], scale: f32) -> Result<Vec<Array>> {
-    let factor = Array::from_f32(scale);
+    let factor = Array::from_f32(scale)?;
     grads
         .iter()
         .map(|grad| Ok(grad.multiply(&factor)?))
@@ -263,7 +263,7 @@ impl Optimizer {
         self.t += 1;
         match self.config {
             Config::Sgd { lr, .. } => {
-                let lr = Array::from_f32(lr);
+                let lr = Array::from_f32(lr)?;
                 for (&i, grad) in argnums.iter().zip(grads) {
                     let i = i as usize;
                     params[i] = params[i].subtract(grad.multiply(&lr)?)?;
@@ -282,15 +282,15 @@ impl Optimizer {
                 let t = self.t as f32;
                 let bias1 = 1.0 - beta1.powf(t);
                 let bias2 = 1.0 - beta2.powf(t);
-                let (b1, b2) = (Array::from_f32(beta1), Array::from_f32(beta2));
+                let (b1, b2) = (Array::from_f32(beta1)?, Array::from_f32(beta2)?);
                 let (one_b1, one_b2) = (
-                    Array::from_f32(1.0 - beta1),
-                    Array::from_f32(1.0 - beta2),
+                    Array::from_f32(1.0 - beta1)?,
+                    Array::from_f32(1.0 - beta2)?,
                 );
-                let lr_a = Array::from_f32(lr);
-                let eps_a = Array::from_f32(eps);
-                let bias1_a = Array::from_f32(bias1);
-                let bias2_a = Array::from_f32(bias2);
+                let lr_a = Array::from_f32(lr)?;
+                let eps_a = Array::from_f32(eps)?;
+                let bias1_a = Array::from_f32(bias1)?;
+                let bias2_a = Array::from_f32(bias2)?;
 
                 for (slot, (&i, grad)) in argnums.iter().zip(grads).enumerate() {
                     let i = i as usize;
@@ -308,7 +308,7 @@ impl Optimizer {
                     if weight_decay != 0.0 {
                         // Decoupled: applied to the parameter, after the
                         // Adam step, and never through the moments.
-                        let decay = Array::from_f32(lr * weight_decay);
+                        let decay = Array::from_f32(lr * weight_decay)?;
                         next = next.subtract(params[i].multiply(&decay)?)?;
                     }
                     params[i] = next;
@@ -325,12 +325,12 @@ mod tests {
     use crate::mlxc::transforms::eval;
 
     fn array(values: &[f32]) -> Array {
-        Array::from_slice(values, &[values.len() as i32])
+        Array::from_slice(values, &[values.len() as i32]).unwrap()
     }
 
     fn read(array: &Array) -> Vec<f32> {
         eval(std::iter::once(array)).unwrap();
-        array.as_slice::<f32>().to_vec()
+        array.as_slice::<f32>().unwrap().to_vec()
     }
 
     fn close(got: &[f32], want: &[f32]) {

@@ -244,7 +244,7 @@ impl TrainState {
         let index = plan
             .index_of(path)
             .with_context(|| format!("no parameter named {path:?}"))?;
-        let array = tensor.to_array();
+        let array = tensor.to_array()?;
         anyhow::ensure!(
             array.shape() == self.params[index].shape(),
             "parameter {path:?}: given shape {:?} is not {:?}",
@@ -297,7 +297,7 @@ impl TrainState {
     /// and the optimizer's slots, so a policy that lowers the rate and
     /// carries on has something clean to carry on from.
     pub fn advance(&mut self, loss: &Array, grads: &[Array]) -> Result<f32> {
-        let value = loss.item_cast::<f32>();
+        let value = loss.item::<f32>()?;
         let (rng, _) = crate::mlxc::random::split(&self.rng, 2)?;
 
         if !value.is_finite() {
@@ -363,7 +363,7 @@ impl TrainState {
     /// The RNG does not move. A draw belongs to a step, and this is a
     /// fraction of one; the step that applies these makes the draw.
     pub fn accumulate(&mut self, loss: &Array, grads: &[Array]) -> Result<f32> {
-        let value = loss.item_cast::<f32>();
+        let value = loss.item::<f32>()?;
         anyhow::ensure!(
             grads.len() == self.argnums.len(),
             "these gradients are for {} parameters and {} are differentiated",
@@ -407,7 +407,7 @@ impl TrainState {
             anyhow::bail!("nothing has been accumulated, so there is no step to take");
         };
         let mean = pending.losses.iter().sum::<f32>() / pending.losses.len() as f32;
-        let loss = Array::from_f32(mean);
+        let loss = Array::from_f32(mean)?;
         self.advance(&loss, &pending.grads)
     }
 

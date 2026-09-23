@@ -20,10 +20,10 @@ use super::Array;
 /// engine compiles. `rake oracle:gemma3_forward` is what holds its numbers.
 pub fn gelu_approximate(x: impl AsRef<Array>) -> Result<Array> {
     let x = x.as_ref();
-    let cubed = x.power(Array::from_i32(3))?;
-    let inner = x.add(Array::from_f32(0.044715).multiply(&cubed)?)?;
-    let scaled = Array::from_f32(2.0 / PI).sqrt()?.multiply(&inner)?;
-    Array::from_f32(0.5)
+    let cubed = x.power(Array::from_i32(3)?)?;
+    let inner = x.add(Array::from_f32(0.044715)?.multiply(&cubed)?)?;
+    let scaled = Array::from_f32(2.0 / PI)?.sqrt()?.multiply(&inner)?;
+    Array::from_f32(0.5)?
         .multiply(x)?
-        .multiply(Array::from_f32(1.0).add(tanh(&scaled)?)?)
+        .multiply(Array::from_f32(1.0)?.add(tanh(&scaled)?)?)
 }

@@ -3,15 +3,14 @@
 //! Which call is the whole difficulty: `sum` and `sum_axes` are different
 //! functions in mlx-c (`mlx_sum` reduces everything, `mlx_sum_axes` only
 //! what it is told), and picking the wrong one compiles and gives a wrong
-//! number. Each one here is the call mlx-rs 0.32.0 makes for the same
+//! number. Each one here is the call mlx-rs 0.32.0 made for the same
 //! method, and docs/vendoring.md ("mlx-c, call by call") lists them.
 //!
-//! Every op runs on [`Stream::current`], and takes its array arguments
-//! through [`Array::raw`], so an array that was never made is refused
-//! before mlx-c sees it.
+//! Every op goes through [`Array::on_stream`], which runs it on the current
+//! stream and names the mlx-c call in the error if MLX gives no reason.
 
 use super::error::Result;
-use super::handle::{Stream, Vector};
+use super::handle::Vector;
 use super::{sys, Array, ArrayElement, Dtype};
 
 /// `a.$name()`: one array in, one out.
@@ -20,9 +19,7 @@ macro_rules! unary {
         impl Array {
             $(
                 pub fn $name(&self) -> Result<Array> {
-                    let a = self.raw()?;
-                    let stream = Stream::current();
-                    Array::try_from_op(|res| unsafe { sys::$call(res, a, stream.as_raw()) })
+                    Array::on_stream(stringify!($call), |res, s| unsafe { sys::$call(res, self.as_raw(), s) })
                 }
             )*
         }
@@ -35,9 +32,8 @@ macro_rules! binary {
         impl Array {
             $(
                 pub fn $name(&self, other: impl AsRef<Array>) -> Result<Array> {
-                    let (a, b) = (self.raw()?, other.as_ref().raw()?);
-                    let stream = Stream::current();
-                    Array::try_from_op(|res| unsafe { sys::$call(res, a, b, stream.as_raw()) })
+                    let b = other.as_ref().as_raw();
+                    Array::on_stream(stringify!($call), |res, s| unsafe { sys::$call(res, self.as_raw(), b, s) })
                 }
             )*
         }
@@ -45,16 +41,14 @@ macro_rules! binary {
 }
 
 /// `a.$name(keep_dims)`: a reduction over every axis. `None` keeps no
-/// dimensions, as mlx-rs's default does.
+/// dimensions, as mlx-rs's default did.
 macro_rules! reduce_all {
     ($($name:ident => $call:ident),* $(,)?) => {
         impl Array {
             $(
                 pub fn $name(&self, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
-                    let a = self.raw()?;
                     let keep = keep_dims.into().unwrap_or(false);
-                    let stream = Stream::current();
-                    Array::try_from_op(|res| unsafe { sys::$call(res, a, keep, stream.as_raw()) })
+                    Array::on_stream(stringify!($call), |res, s| unsafe { sys::$call(res, self.as_raw(), keep, s) })
                 }
             )*
         }
@@ -69,11 +63,9 @@ macro_rules! reduce_axes {
         impl Array {
             $(
                 pub fn $name(&self, axes: &[i32], keep_dims: impl Into<Option<bool>>) -> Result<Array> {
-                    let a = self.raw()?;
                     let keep = keep_dims.into().unwrap_or(false);
-                    let stream = Stream::current();
-                    Array::try_from_op(|res| unsafe {
-                        sys::$call(res, a, axes.as_ptr(), axes.len(), keep, stream.as_raw())
+                    Array::on_stream(stringify!($call), |res, s| unsafe {
+                        sys::$call(res, self.as_raw(), axes.as_ptr(), axes.len(), keep, s)
                     })
                 }
             )*
@@ -87,10 +79,8 @@ macro_rules! with_ints {
         impl Array {
             $(
                 pub fn $name(&self, ints: &[i32]) -> Result<Array> {
-                    let a = self.raw()?;
-                    let stream = Stream::current();
-                    Array::try_from_op(|res| unsafe {
-                        sys::$call(res, a, ints.as_ptr(), ints.len(), stream.as_raw())
+                    Array::on_stream(stringify!($call), |res, s| unsafe {
+                        sys::$call(res, self.as_raw(), ints.as_ptr(), ints.len(), s)
                     })
                 }
             )*
@@ -142,25 +132,26 @@ with_ints! {
 impl Array {
     /// The array in another dtype.
     pub fn as_dtype(&self, dtype: Dtype) -> Result<Array> {
-        let a = self.raw()?;
-        let stream = Stream::current();
-        Array::try_from_op(|res| unsafe { sys::mlx_astype(res, a, dtype.to_raw(), stream.as_raw()) })
+        Array::on_stream("mlx_astype", |res, s| unsafe {
+            sys::mlx_astype(res, self.as_raw(), dtype.to_raw(), s)
+        })
     }
 
     /// The rows (or whatever `axis` is) that `indices` names, in its order.
     pub fn take_axis(&self, indices: impl AsRef<Array>, axis: i32) -> Result<Array> {
-        let (a, at) = (self.raw()?, indices.as_ref().raw()?);
-        let stream = Stream::current();
-        Array::try_from_op(|res| unsafe { sys::mlx_take_axis(res, a, at, axis, stream.as_raw()) })
+        let at = indices.as_ref().as_raw();
+        Array::on_stream("mlx_take_axis", |res, s| unsafe {
+            sys::mlx_take_axis(res, self.as_raw(), at, axis, s)
+        })
     }
 
     /// The same values laid out row-major, sharing the buffer when it
     /// already is. Column-major is not accepted as contiguous, which is
     /// mlx-rs's default and what `as_slice` needs.
     pub fn contiguous(&self) -> Result<Array> {
-        let a = self.raw()?;
-        let stream = Stream::current();
-        Array::try_from_op(|res| unsafe { sys::mlx_contiguous(res, a, false, stream.as_raw()) })
+        Array::on_stream("mlx_contiguous", |res, s| unsafe {
+            sys::mlx_contiguous(res, self.as_raw(), false, s)
+        })
     }
 
     pub fn zeros<T: ArrayElement>(shape: &[i32]) -> Result<Array> {
@@ -168,16 +159,14 @@ impl Array {
     }
 
     pub fn ones<T: ArrayElement>(shape: &[i32]) -> Result<Array> {
-        let stream = Stream::current();
-        Array::try_from_op(|res| unsafe {
-            sys::mlx_ones(res, shape.as_ptr(), shape.len(), T::DTYPE.to_raw(), stream.as_raw())
+        Array::on_stream("mlx_ones", |res, s| unsafe {
+            sys::mlx_ones(res, shape.as_ptr(), shape.len(), T::DTYPE.to_raw(), s)
         })
     }
 
     fn zeros_dtype(shape: &[i32], dtype: Dtype) -> Result<Array> {
-        let stream = Stream::current();
-        Array::try_from_op(|res| unsafe {
-            sys::mlx_zeros(res, shape.as_ptr(), shape.len(), dtype.to_raw(), stream.as_raw())
+        Array::on_stream("mlx_zeros", |res, s| unsafe {
+            sys::mlx_zeros(res, shape.as_ptr(), shape.len(), dtype.to_raw(), s)
         })
     }
 }
@@ -187,9 +176,8 @@ macro_rules! unary_function {
     ($($name:ident => $call:ident),* $(,)?) => {
         $(
             pub fn $name(a: impl AsRef<Array>) -> Result<Array> {
-                let a = a.as_ref().raw()?;
-                let stream = Stream::current();
-                Array::try_from_op(|res| unsafe { sys::$call(res, a, stream.as_raw()) })
+                let a = a.as_ref().as_raw();
+                Array::on_stream(stringify!($call), |res, s| unsafe { sys::$call(res, a, s) })
             }
         )*
     };
@@ -207,23 +195,20 @@ unary_function! {
 /// nothing about it enters the graph.
 pub fn zeros_like(a: impl AsRef<Array>) -> Result<Array> {
     let a = a.as_ref();
-    a.raw()?;
     Array::zeros_dtype(a.shape(), a.dtype())
 }
 
 pub fn maximum(a: impl AsRef<Array>, b: impl AsRef<Array>) -> Result<Array> {
-    let (a, b) = (a.as_ref().raw()?, b.as_ref().raw()?);
-    let stream = Stream::current();
-    Array::try_from_op(|res| unsafe { sys::mlx_maximum(res, a, b, stream.as_raw()) })
+    let (a, b) = (a.as_ref().as_raw(), b.as_ref().as_raw());
+    Array::on_stream("mlx_maximum", |res, s| unsafe { sys::mlx_maximum(res, a, b, s) })
 }
 
 /// Softmax along one axis. `precise: None` is `false`: MLX then computes
 /// in the input's precision, which for f32 is f32.
 pub fn softmax_axis(a: impl AsRef<Array>, axis: i32, precise: impl Into<Option<bool>>) -> Result<Array> {
-    let a = a.as_ref().raw()?;
+    let a = a.as_ref().as_raw();
     let precise = precise.into().unwrap_or(false);
-    let stream = Stream::current();
-    Array::try_from_op(|res| unsafe { sys::mlx_softmax_axis(res, a, axis, precise, stream.as_raw()) })
+    Array::on_stream("mlx_softmax_axis", |res, s| unsafe { sys::mlx_softmax_axis(res, a, axis, precise, s) })
 }
 
 pub fn logsumexp_axes(
@@ -231,28 +216,25 @@ pub fn logsumexp_axes(
     axes: &[i32],
     keep_dims: impl Into<Option<bool>>,
 ) -> Result<Array> {
-    let a = a.as_ref().raw()?;
+    let a = a.as_ref().as_raw();
     let keep = keep_dims.into().unwrap_or(false);
-    let stream = Stream::current();
-    Array::try_from_op(|res| unsafe {
-        sys::mlx_logsumexp_axes(res, a, axes.as_ptr(), axes.len(), keep, stream.as_raw())
+    Array::on_stream("mlx_logsumexp_axes", |res, s| unsafe {
+        sys::mlx_logsumexp_axes(res, a, axes.as_ptr(), axes.len(), keep, s)
     })
 }
 
 /// The arrays end to end along an existing axis.
 pub fn concatenate(arrays: &[impl AsRef<Array>], axis: i32) -> Result<Array> {
     let vector = Vector::of(arrays.iter().map(AsRef::as_ref))?;
-    let stream = Stream::current();
-    Array::try_from_op(|res| unsafe {
-        sys::mlx_concatenate_axis(res, vector.as_raw(), axis, stream.as_raw())
+    Array::on_stream("mlx_concatenate_axis", |res, s| unsafe {
+        sys::mlx_concatenate_axis(res, vector.as_raw(), axis, s)
     })
 }
 
 /// The arrays side by side along a new axis.
 pub fn stack(arrays: &[impl AsRef<Array>], axis: i32) -> Result<Array> {
     let vector = Vector::of(arrays.iter().map(AsRef::as_ref))?;
-    let stream = Stream::current();
-    Array::try_from_op(|res| unsafe { sys::mlx_stack_axis(res, vector.as_raw(), axis, stream.as_raw()) })
+    Array::on_stream("mlx_stack_axis", |res, s| unsafe { sys::mlx_stack_axis(res, vector.as_raw(), axis, s) })
 }
 
 pub mod indexing {
@@ -270,10 +252,9 @@ pub mod indexing {
             None => (Some(a.as_ref().reshape(&[-1])?), 0),
             Some(axis) => (None, axis),
         };
-        let a = flat.as_ref().unwrap_or(a.as_ref()).raw()?;
-        let at = indices.as_ref().raw()?;
-        let stream = Stream::current();
-        Array::try_from_op(|res| unsafe { sys::mlx_take_along_axis(res, a, at, axis, stream.as_raw()) })
+        let a = flat.as_ref().unwrap_or(a.as_ref()).as_raw();
+        let at = indices.as_ref().as_raw();
+        Array::on_stream("mlx_take_along_axis", |res, s| unsafe { sys::mlx_take_along_axis(res, a, at, axis, s) })
     }
 }
 
@@ -289,7 +270,7 @@ mod tests {
     }
 
     fn values(a: &Array) -> Vec<f32> {
-        a.contiguous().unwrap().as_slice::<f32>().to_vec()
+        a.contiguous().unwrap().as_slice::<f32>().unwrap().to_vec()
     }
 
     fn close(got: &[f32], want: &[f32]) {
@@ -302,14 +283,14 @@ mod tests {
     /// [[1, 2, 3], [4, 5, 6]]: small enough to check by hand, and not
     /// square, so an axis mistaken for the other shows.
     fn grid() -> Array {
-        Array::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
+        Array::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap()
     }
 
     #[test]
     fn the_unary_ops_are_the_functions_they_name() {
         let x = [0.25f32, 1.0, 4.0];
         let got = run(|| {
-            let a = Array::from_slice(&x, &[3]);
+            let a = Array::from_slice(&x, &[3])?;
             Ok([
                 values(&a.negative()?),
                 values(&a.negative()?.abs()?),
@@ -341,8 +322,8 @@ mod tests {
     #[test]
     fn the_binary_ops_broadcast_a_scalar_and_keep_their_order() {
         let got = run(|| {
-            let a = Array::from_slice(&[6.0f32, 8.0], &[2]);
-            let two = Array::from_f32(2.0);
+            let a = Array::from_slice(&[6.0f32, 8.0], &[2])?;
+            let two = Array::from_f32(2.0)?;
             Ok([
                 values(&a.add(&two)?),
                 values(&a.subtract(&two)?),
@@ -363,7 +344,7 @@ mod tests {
     #[test]
     fn matmul_is_rows_by_columns() {
         let (got, shape) = run(|| {
-            let identityish = Array::from_slice(&[1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0], &[3, 2]);
+            let identityish = Array::from_slice(&[1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0], &[3, 2])?;
             let product = grid().matmul(&identityish)?;
             Ok((values(&product), product.shape().to_vec()))
         });
@@ -453,8 +434,8 @@ mod tests {
     fn take_axis_selects_along_the_axis_it_is_given() {
         let got = run(|| {
             let g = grid();
-            let rows = g.take_axis(Array::from_slice(&[1i32, 0, 1], &[3]), 0)?;
-            let cols = g.take_axis(Array::from_slice(&[2i32], &[1]), -1)?;
+            let rows = g.take_axis(Array::from_slice(&[1i32, 0, 1], &[3])?, 0)?;
+            let cols = g.take_axis(Array::from_slice(&[2i32], &[1])?, -1)?;
             Ok([(rows.shape().to_vec(), values(&rows)), (cols.shape().to_vec(), values(&cols))])
         });
         assert_eq!(got[0], (vec![3, 3], vec![4.0, 5.0, 6.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
@@ -466,14 +447,14 @@ mod tests {
         let got = run(|| {
             let z = Array::zeros::<f32>(&[2, 2])?;
             let o = Array::ones::<i32>(&[3])?;
-            Ok((z.dtype(), values(&z), o.dtype(), o.as_slice::<i32>().to_vec()))
+            Ok((z.dtype(), values(&z), o.dtype(), o.as_slice::<i32>()?.to_vec()))
         });
         assert_eq!(got, (Dtype::Float32, vec![0.0; 4], Dtype::Int32, vec![1, 1, 1]));
     }
 
     #[test]
     fn a_strided_array_reads_in_order_once_contiguous() {
-        let got = run(|| Ok(grid().transpose_axes(&[1, 0])?.contiguous()?.as_slice::<f32>().to_vec()));
+        let got = run(|| Ok(grid().transpose_axes(&[1, 0])?.contiguous()?.as_slice::<f32>()?.to_vec()));
         assert_eq!(got, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
     }
 
