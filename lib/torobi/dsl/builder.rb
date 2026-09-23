@@ -10,11 +10,17 @@ module Torobi
     # handle. Layers apply immediately: `g.linear(x, 512, name: "wo")`
     # creates the parameters and the nodes in one call.
     class Builder
+      # What a graph is built with when nothing is adapted: every parameter
+      # trains as declared, and no linear gains anything. The same two
+      # questions a `LoRA` answers, so the builder asks them without first
+      # asking whether there is an adapter at all.
+      module NoAdapter
+        def self.trains?(_path) = true
+        def self.wraps?(_path) = false
+      end
+
       # `models` is the set an objective may read outputs from; a model
       # graph is built with none.
-      # The adapter in scope, if a caller put one there (`adapting`).
-      attr_reader :adapter
-
       def initialize(models: {})
         @models = models.to_h { |name, graph| [name.to_s, graph] }
         @inputs = []
@@ -24,6 +30,7 @@ module Torobi
         @scopes = []
         @sharing = 0
         @labels = []
+        @adapter = NoAdapter
       end
 
       # --- graph boundary ---
@@ -147,18 +154,12 @@ module Torobi
 
       def param(name, shape, init:, dtype: :f32, trainable: true)
         path = scoped(name)
-        # Inside an adapting block, what is trained is the adapter and
-        # nothing else. Said here rather than at each parameter, because
-        # a base model left trainable by an oversight is not a LoRA
-        # fine-tune, and no pattern anybody writes later can undo it: the
-        # window's `unfreeze!` moves within what the graph declared
-        # trainable, so this is the declaration that matters.
-        #
-        # Before the sharing lookup, so that a second application is
+        # Whether it trains is the adapter's to say (`LoRA#trains?`). Asked
+        # before the sharing lookup, so that a second application is
         # compared with what the first actually declared: an adapted base
         # weight is frozen, and asking whether it is the same parameter
         # has to ask about the same thing.
-        trainable &&= @adapter.adapted?(path) if @adapter
+        trainable &&= @adapter.trains?(path)
         if @sharing.positive? && (already = @parameters.find { |p| p.path == path })
           return shared(already, shape:, dtype:, init:, trainable:)
         end
@@ -241,7 +242,7 @@ module Torobi
         wt = emit("transpose", inputs: [w], attrs: { axes: [1, 0] })
         y = matmul(x, wt)
         y += param("#{name}.bias", [d_out], dtype: x.dtype, init: { "type" => "zeros" }) if bias
-        y += low_rank(x, d_in, d_out, name:) if @adapter&.wraps?(scoped(name))
+        y += @adapter.contribution(self, x, d_in:, d_out:, name:) if @adapter.wraps?(scoped(name))
         self.name(label, y)
       end
 
@@ -261,31 +262,14 @@ module Torobi
       # the same either way.
       def adapting(adapter)
         return yield if adapter.nil?
-        raise ConfigError, "an adapter is already in scope" if @adapter
+        raise ConfigError, "an adapter is already in scope" unless @adapter.equal?(NoAdapter)
 
         @adapter = adapter
         begin
           yield
         ensure
-          @adapter = nil
+          @adapter = NoAdapter
         end
-      end
-
-      # The adapter's own arithmetic: `x` through a narrow matrix and back
-      # out to the width the linear has, scaled.
-      #
-      # `B` starts at zero, so this contributes nothing until something
-      # has trained it. That is what makes an adapted model start as the
-      # model it adapts.
-      def low_rank(x, d_in, d_out, name:)
-        rank = @adapter.rank
-        a = param("#{name}.lora_A.weight", [rank, d_in], dtype: x.dtype,
-                                                         init: { "type" => "kaiming_uniform" })
-        b = param("#{name}.lora_B.weight", [d_out, rank], dtype: x.dtype,
-                                                          init: { "type" => "zeros" })
-        down = matmul(x, emit("transpose", inputs: [a], attrs: { axes: [1, 0] }))
-        up = matmul(down, emit("transpose", inputs: [b], attrs: { axes: [1, 0] }))
-        up * @adapter.scale
       end
 
       # The table, and the lookup into it.
