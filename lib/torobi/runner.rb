@@ -287,7 +287,7 @@ module Torobi
       # The process was ended rather than ending: a signal, which for this
       # library usually means MLX aborted. The last checkpoint still stands,
       # because a checkpoint is written atomically.
-      def crashed? = !@status.nil? && !@status.signaled?.nil? && @status.signaled?
+      def crashed? = @status&.signaled? == true
 
       def ok? = !@status.nil? && @status.success?
 

@@ -88,7 +88,8 @@ module Torobi
     # The positions in `parameters` that autodiff differentiates: trainable
     # parameters of trained models, and nothing else (docs/plan.md 5A.3).
     def argnums
-      parameters.each_index.select { |i| parameters[i].trained }
+      params = parameters
+      params.each_index.select { |i| params[i].trained }
     end
 
     def to_h

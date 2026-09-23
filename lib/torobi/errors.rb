@@ -9,6 +9,7 @@ module Torobi
   #       ├── StepError         the engine refused; the session is still yours
   #       │   └── Busy          it is serving another thread. Retry.
   #       ├── SessionPoisoned   the engine panicked under this session
+  #       ├── SessionClosed     the session was closed
   #       ├── RuntimePoisoned   it panicked holding MLX; no session here is usable
   #       └── EngineUnavailable MLX cannot run here at all
   #

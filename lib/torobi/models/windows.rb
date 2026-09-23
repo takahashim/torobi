@@ -22,6 +22,10 @@ module Torobi
     # Least recently used, because a run's lengths cluster: the sorted
     # batches of a mining pass walk through lengths in order and come back
     # to the long ones.
+    #
+    # Not synchronised. Batches are built on the thread that drives the
+    # session, and a session is one conversation, so there is one writer;
+    # sharing one of these across threads would need a lock.
     class Windows
       LIMIT = 8
 
