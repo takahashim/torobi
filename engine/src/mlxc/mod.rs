@@ -41,8 +41,6 @@ mod io;
 pub mod memory;
 pub mod nn;
 pub mod ops;
-#[cfg(test)]
-mod parity;
 pub mod random;
 pub mod transforms;
 

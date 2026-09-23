@@ -197,7 +197,8 @@ class CheckpointTest < Minitest::Test
     assert_equal config.digest, recorded.dig("config", "digest")
     assert_equal dataset, recorded.fetch("dataset")
     assert_equal RUBY_VERSION, recorded.dig("runtime", "ruby")
-    refute_empty recorded.dig("runtime", "engine", "mlx_rs")
+    refute_empty recorded.dig("runtime", "engine", "mlx")
+    refute_empty recorded.dig("runtime", "engine", "mlx_c")
   end
 
   def test_a_manifest_reads_without_a_session_to_read_it_into

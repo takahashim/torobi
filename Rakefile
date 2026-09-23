@@ -7,24 +7,19 @@ require "rb_sys/extensiontask"
 GEMSPEC = Gem::Specification.load("torobi.gemspec")
 
 # The pre-built MLX every cargo build here links, fetched once and checked
-# against a recorded digest and the mlx-sys generation it was built for
+# against a recorded digest and the mlx-c generation it was built for
 # (ext/torobi/mlx_prebuilt.rb). `rake compile` reaches it through
 # extconf.rb; the engine's own builds reach it here, and both share one
-# copy and one toolchain file.
+# copy.
 require_relative "ext/torobi/mlx_prebuilt"
 
-# Points cargo at that MLX: the toolchain file mlx-c is configured with,
-# where mlx-sys looks for the kernels, and the one link path upstream
-# cannot know about when MLX is a system package. Returns the prefix.
+# Points cargo at that MLX. engine/build.rs reads the prefix for everything
+# it needs: the headers it generates bindings from, the archives it links,
+# the manifest that says which MLX they are, and the metallib it puts
+# beside the test binaries. Returns the prefix.
 def with_mlx
   prefix = MlxPrebuilt.ensure!
-  # What engine/build.rs reads: the headers it generates bindings from and
-  # the archives it links.
   ENV["TOROBI_MLX_PREFIX"] = prefix
-  ENV["CMAKE_TOOLCHAIN_FILE"] = MlxPrebuilt.toolchain_file(prefix)
-  ENV["MLX_RS_METAL_PATH"] = MlxPrebuilt.link_dir(prefix) if MlxPrebuilt.metal?
-  flags = [ENV.fetch("RUSTFLAGS", nil), "-L", "native=#{MlxPrebuilt.link_dir(prefix)}"]
-  ENV["RUSTFLAGS"] = flags.compact.join(" ")
   prefix
 rescue MlxPrebuilt::Refused => e
   abort "torobi: #{e.message}"
@@ -286,7 +281,7 @@ namespace :mlx do
       write_pin(pin)
       # Through the same path an install takes, so the digest is checked
       # against the bytes rather than believed, and the generation is
-      # checked against what mlx-sys wants.
+      # checked against what the binding wants.
       MlxPrebuilt.ensure!(io: $stdout)
       said = MlxPrebuilt.manifest
       if said

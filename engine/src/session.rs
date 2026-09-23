@@ -1440,7 +1440,8 @@ mod checkpoint_tests {
         assert_eq!(m["semantics_version"], 3);
         assert_eq!(m["platform"]["os"], std::env::consts::OS);
         assert_eq!(m["platform"]["arch"], std::env::consts::ARCH);
-        assert!(m["build"]["mlx_rs"].is_string(), "{m}");
+        assert!(m["build"]["mlx"].is_string(), "{m}");
+        assert!(m["build"]["mlx_c"].is_string(), "{m}");
         assert_eq!(m["optimizer"]["kind"], "sgd");
     }
 

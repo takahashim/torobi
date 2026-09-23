@@ -34,15 +34,16 @@ answer is a `[patch.crates-io]` onto a fork, which is a bridge and not a
 destination - "The Linux patch, and when it goes" below says what has to
 become true for it to be deleted.
 
-**2026-09-23 - mlx-c bound here, and mlx-rs on its way out.** The patch
+**2026-09-23 - mlx-c bound here, and mlx-rs gone.** The patch
 above got the build scripts to Linux, and the Rust underneath still did
 not compile there: `mlx/c/half.h` declares the four half-precision
 accessors only on ARM, and `mlx-rs` calls them unconditionally. Fixing
 that in `mlx-rs` would make part of its public API exist on one platform
 and not another, which is not a change to ask of somebody else's crate.
 The engine uses two or three percent of `mlx-rs`, so it binds mlx-c
-itself instead - "mlx-c, bound here" below - and the patch's exit becomes
-removing `mlx-rs` rather than waiting for a release.
+itself instead - "mlx-c, bound here" below. The patch went with `mlx-rs`:
+its exit came by removal rather than by a release, and no fork is
+carried any more.
 
 The parts below headed "Which one is upstream", "Is the fork's mlx-rs the
 same", "What Apple publishes" and "Which mlx-c, and which MLX under it"
@@ -55,7 +56,7 @@ do not make it obvious which one is built. In order, top to bottom:
 
 | | what it is | where |
 |---|---|---|
-| **mlx-rs (upstream)** | the unofficial Rust bindings, by Minghua Wu and David Chavez, and what crates.io publishes. **This is what Torobi builds**, version `0.32.0`, whose `mlx-sys 0.6.0` pins mlx-c and MLX 0.32.2 | `github.com/oxiglade/mlx-rs`, formerly `github.com/oxideai/mlx-rs`. The old name redirects |
+| **mlx-rs (upstream)** | the unofficial Rust bindings, by Minghua Wu and David Chavez, and what crates.io publishes. **What Torobi built from 2026-09-21 to 2026-09-23**, version `0.32.0`, whose `mlx-sys 0.6.0` pins mlx-c and MLX 0.32.2 | `github.com/oxiglade/mlx-rs`, formerly `github.com/oxideai/mlx-rs`. The old name redirects |
 | **OminiX-MLX** | **the same repository, continued**, and what Torobi built from 2026-09-03 to 2026-09-21. Not a rewrite and not a vendored copy: the history is mlx-rs's own (534 commits, `init commit` at the bottom, 302 of them by upstream's main author), and on 2026-01-25 `753d289 refactor: Move original mlx-rs components into mlx-rs directory` moved it into a subdirectory to make room for model crates | `github.com/OminiX-ai/OminiX-MLX`, subtree `mlx-rs/` |
 | **mlx-c** | Apple's C API for MLX, a git submodule of `mlx-sys`. bindgen reads its headers | `github.com/ml-explore/mlx-c` |
 | **MLX** | the library itself. Not built here: a pre-built binary is downloaded at build time (below) | `github.com/ml-explore/mlx` |
@@ -179,7 +180,16 @@ The dependency is the crates.io crate now. It installs without Xcode
 because the MLX it is built against is provided as a system package
 (below), not because a fork reaches for one.
 
-## The Linux patch, and when it goes
+## The Linux patch, and how it went
+
+**Gone on 2026-09-23**, with `mlx-rs` itself: the engine binds mlx-c
+(below), so there is no crate left to patch, and `[patch.crates-io]` came
+out of the workspace manifest. The exit written here was "a published
+release carries the four fixes"; what happened instead was that a fifth
+blocker turned up underneath them (`mlx/c/half.h`, "mlx-c, bound here")
+which `mlx-rs` could only fix by changing its public API. The section is
+kept as the record of what stopped a Linux build and why.
+
 
 The crates on crates.io cannot be built for anything that is not Apple's.
 This matters because MLX itself can: `ml-explore/mlx` carries a CUDA
@@ -249,7 +259,19 @@ is **`mlx-rs 0.32.0` from crates.io, source commit `9c2fd72e`**
 (`oxiglade/mlx-rs`, the `.cargo_vcs_info.json` of the published crate);
 the patched build this project compiled at the time differs from it only
 in build scripts, manifests and the RNG's seed clock, none of which is copied. It
-is MIT OR Apache-2.0, so reading it and taking from it are both fine.
+is MIT OR Apache-2.0, so reading it and taking from it are both fine;
+what the shim takes beyond the API's shape is small (how an exception
+prints, the wording of the safetensors path refusals), and "Licences"
+below says what that asks of a redistributor.
+
+While both were linked, a test called the shim and `mlx-rs` on the same
+inputs and compared the results to the bit: the free functions, gelu in
+f32 and bf16, attention under each kind of mask and its gradient, and
+safetensors written by one and read by the other. It went with `mlx-rs`.
+What outlives it is the draws from seed 42, pinned as constants recorded
+through `mlx-rs`, and a before-and-after comparison on ruri-v3-130m (the
+same SHA-256 for a forward, three losses and the weights they leave)
+recorded in docs/plan.md section 15.75.
 
 **Where the shim deliberately differs**, each for a stated reason:
 
@@ -310,18 +332,18 @@ Every op runs on the default device's default stream, which is what
 
 | what | state |
 |---|---|
-| mlx-rs / mlx-sys | **crates.io, `mlx-rs = "=0.32.0"` with `mlx-sys = "=0.6.0"`.** `Cargo.lock` records the versions and the checksums. Both are exact while the move settles. Both are also **patched**, by revision, onto `takahashim/mlx-rs` so that a Linux build can exist at all; "The Linux patch, and when it goes" above says what the patch is and what deletes it. The versions are unchanged by it, which is what lets `=0.32.0` and `=0.6.0` keep meaning what they say. `Cargo.lock` shows **four** crates coming from the fork rather than the two named: `mlx-macros` and `mlx-internal-macros` follow because the patched `mlx-rs` takes its workspace siblings by path. Removing the patch returns all four at once |
-| mlx-c | the submodule inside `mlx-sys 0.6.0`, pinned there to `c74db530` (v0.6.0-7). bindgen reads its headers; nothing of ours fetches it separately |
-| MLX core | **not built from source here**: there is no Metal compiler on this machine, so a pre-built archive is used instead. `takahashim/mlx-prebuilt`, built from stated inputs on a runner with the toolchain rather than taken from a third party's release. It must carry the generation `mlx-sys 0.6.0` was generated for - **MLX 0.32.2 over mlx-c `c74db5307cc8`** - and `mlx_prebuilt.json`'s `requires` is what holds it to that. It names the mlx-c **commit**, not `v0.6.0`: the tag pins MLX 0.31.1 and seven later commits pin 0.32.2, and those commits change headers under `mlx/c/`, so a build from the tag is the wrong generation even though it says 0.6.0. The pin now names **`takahashim/mlx-prebuilt` `v0.6.0.0`** (MLX 0.32.2 / mlx-c `c74db530`, digest `09f634a1…`), which is what a build fetches |
-| mlx.metallib | 105 MB. MLX locates it through `dladdr`, i.e. **beside whichever library holds the MLX symbols**: the installed bundle, or `lib/torobi/` for a checkout. It comes from the prefix at `<prefix>/lib/mlx.metallib`; `ext/torobi/extconf.rb` installs it beside the bundle and `rake metallib` copies it into the checkout. Any distribution must ship it beside the bundle |
-| system MLX, how it is handed over | `mlx-c` is configured with `MLX_C_USE_SYSTEM_MLX=ON` and `CMAKE_PREFIX_PATH=<prefix>`, through a toolchain file `mlx_prebuilt.rb` writes into the cache and cargo is told about via `CMAKE_TOOLCHAIN_FILE`. MLX is then found, never fetched, and never compiled. The link path upstream does not emit for a system MLX is added with `RUSTFLAGS=-L native=<prefix>/lib` |
+| mlx-rs / mlx-sys | **not dependencies.** The engine binds mlx-c itself ("mlx-c, bound here"). `mlx-rs 0.32.0` (source commit `9c2fd72e`) is the reference the binding was written and checked against, and nothing of it is compiled. `Cargo.lock` holds no `mlx` crate |
+| mlx-c | **built into the pre-built archive** at commit `c74db5307cc8`, and bound by `engine/build.rs`: bindgen reads the headers in the prefix and the build links `libmlxc.a` from the same prefix, so what is declared is what is linked. Nothing compiles or fetches mlx-c here |
+| MLX core | **not built from source here**: there is no Metal compiler on this machine, so a pre-built archive is used instead. `takahashim/mlx-prebuilt`, built from stated inputs on a runner with the toolchain rather than taken from a third party's release. It must carry the generation the binding was written against - **MLX 0.32.2 over mlx-c `c74db5307cc8`** - and `mlx_prebuilt.json`'s `requires` is what holds it to that. It names the mlx-c **commit**, not `v0.6.0`: the tag pins MLX 0.31.1 and seven later commits pin 0.32.2, and those commits change headers under `mlx/c/`, so a build from the tag is the wrong generation even though it says 0.6.0. The pin names **`takahashim/mlx-prebuilt` `v0.6.0.0`** (MLX 0.32.2 / mlx-c `c74db530`, digest `09f634a1…`), which is what a build fetches. It holds the `macos-arm64` archive only: the `linux-x86_64` one has been built by that repository's CI and not yet released or pinned |
+| mlx.metallib | 105 MB. MLX locates it through `dladdr`, i.e. **beside whichever library holds the MLX symbols**: the installed bundle, or `lib/torobi/` for a checkout. It comes from the prefix at `<prefix>/lib/mlx.metallib`; `ext/torobi/extconf.rb` installs it beside the bundle, `rake metallib` copies it into the checkout, and `engine/build.rs` links it beside the engine's own binaries. Any distribution must ship it beside the bundle |
+| the prefix, how it is handed over | one variable, `TOROBI_MLX_PREFIX`, which `rake` and `extconf.rb` set to the checked prefix and `engine/build.rs` reads for headers, archives, `MANIFEST.txt` and the metallib. A caller who sets it themselves is left alone |
 
 ## Licences
 
 | | licence | holder |
 |---|---|---|
 | Torobi | MIT | this project |
-| mlx-rs (upstream, oxiglade) | MIT **or** Apache-2.0, at the user's choice | its authors |
+| mlx-rs (upstream, oxiglade): the reference the binding follows, not a dependency | MIT **or** Apache-2.0, at the user's choice | its authors |
 | mlx-c | MIT | ml-explore |
 | MLX | MIT | ml-explore |
 
@@ -333,11 +355,13 @@ same thing of a redistributor: carry the notice.
 
 **Torobi carries none of it today, and does not have to.** What the gem
 holds is `spec.files`: Ruby, the engine's own Rust, two manifests and the
-docs. No line of MLX or mlx-rs is in it. Cargo fetches mlx-rs from
-crates.io, and `ext/torobi/mlx_prebuilt.rb` fetches our own pre-built MLX
-from `takahashim/mlx-prebuilt`. Both arrive at the user's machine from
-their own authors, under their own licences; Torobi points, it does not
-ship.
+docs. No line of MLX or mlx-c is in it, and `mlx-rs` is neither in it nor
+fetched: the binding follows its API, and the few small pieces taken from
+it (how an exception prints, two refusal messages) are in the engine's
+source under its own MIT notice. `ext/torobi/mlx_prebuilt.rb` fetches our
+own pre-built MLX, mlx-c included, from `takahashim/mlx-prebuilt`; it
+arrives at the user's machine from its own authors, under their own
+licences. Torobi points, it does not ship.
 
 **One decision changes that.** If the distribution question
 (docs/plan.md section 11.4) lands on a **platform gem** (compiled, so that
@@ -348,7 +372,8 @@ What that costs, exactly:
 - ship MLX's MIT notice and copyright (ml-explore)
 - ship mlx-c's MIT notice (ml-explore)
 - ship mlx-rs's notice under whichever of MIT or Apache-2.0 is chosen
-  (MIT is the simpler pairing with this project's own licence)
+  (MIT is the simpler pairing with this project's own licence), for the
+  small pieces of the binding taken from it
 - say in the README what is inside the binary and under what terms
 
 Not hard, and not something to discover afterwards: it is written here so
@@ -369,13 +394,25 @@ What it gives up is local pruning and local patching. If a patch becomes
 necessary, the answer is a fork with its own pin, not a vendored copy.
 
 This was a pinned **git dependency on OminiX's fork** until 2026-09-21,
-because that fork tracked MLX 0.32 and reached for a pre-built MLX. Both
-of those are now true of the crates.io crate and of mlx-c's own
-`MLX_C_USE_SYSTEM_MLX`, so the fork is gone.
+because that fork tracked MLX 0.32 and reached for a pre-built MLX, and
+then the crates.io crate until 2026-09-23. Since then there is no Rust
+dependency on MLX to pin at all: the binding is the engine's own source,
+and what is pinned is the pre-built archive (`mlx_prebuilt.json`).
 
 ## How MLX is provided, and what OminiX did
 
-### Now: a system MLX, found through a toolchain file
+### Now: the prefix, read by `engine/build.rs`
+
+The pre-built archive is an MLX install prefix with mlx-c already built
+into it: headers under `include/`, `libmlx.a`, `libmlxc.a` and
+`libgguflib.a` under `lib/`, and `MANIFEST.txt` beside it naming the MLX
+release and the mlx-c commit. `engine/build.rs` runs bindgen over those
+headers, links those archives, reads the manifest into `build_info`, and
+on Apple links `lib/mlx.metallib` beside the test binaries. Nothing runs
+cmake, and the one thing a build is told is where the prefix is
+(`TOROBI_MLX_PREFIX`).
+
+### 2026-09-21 to 2026-09-23: a system MLX, found through a toolchain file
 
 Upstream `mlx-sys 0.6.0` always runs cmake on its vendored mlx-c. It has
 no branch for "use this MLX already on the machine", but mlx-c does:
@@ -566,22 +603,26 @@ still two faces of one decision.
 
 ## Updating the pin
 
-Two things move together, because they are one decision: the `mlx-rs` /
-`mlx-sys` versions in `engine/Cargo.toml`, and the MLX/mlx-c generation in
-`ext/torobi/mlx_prebuilt.json`. One version at a time, as its own change:
+One thing moves, the MLX/mlx-c generation, and it moves in two places
+that are one decision: the archive the pin names, and the binding that
+was written against it. One version at a time, as its own change:
 
-1. move `mlx-rs` (and with it `mlx-sys`) to the new version, `cargo update`,
-   and read what `mlx-sys`'s `CHANGELOG.md` and submodule now pin;
-2. set `requires` in `mlx_prebuilt.json` to that MLX/mlx-c generation;
-3. build and release a `takahashim/mlx-prebuilt` archive for it (bump
-   `MLX_C_REF` in its `build.sh` to the mlx-c commit `mlx-sys` pins), then
-   `rake mlx:pin[v<release>]`;
-4. rebuild, and run the differential, convergence, memory and installed-gem
-   tests (docs/plan.md section 12).
+1. pick the mlx-c commit, and read what MLX it pins and what changed
+   under `mlx/c/` since `c74db530`;
+2. build and release a `takahashim/mlx-prebuilt` archive for it (bump
+   `MLX_C_REF` in its `build.sh`), set `requires` in
+   `mlx_prebuilt.json` to that generation, and `rake mlx:pin[v<release>]`;
+3. rebuild. A header change that renames or removes a function fails at
+   compile time; one that keeps a name and changes what it means does not,
+   so read the header diff against "mlx-c, call by call" above and fix the
+   table with the code;
+4. run the differential, convergence, memory and installed-gem tests
+   (docs/plan.md section 12), and the seed-42 draws in
+   `engine/src/mlxc/random.rs`, which change if MLX's RNG does.
 
-`Torobi::Native.build_info` reports what a build was made from:
-`mlx_rs` and `mlx_sys` are the versions from `engine/Cargo.toml`, read at
-build time by `engine/build.rs`.
+`Torobi::Native.build_info` reports what a build was made from: `mlx` and
+`mlx_c` are the MLX release and the mlx-c commit from the archive's
+`MANIFEST.txt`, read at build time by `engine/build.rs`.
 
 ## What the installed-gem smoke test found
 

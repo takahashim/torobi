@@ -13,49 +13,20 @@ anyhow = "1"
 # the Ruby side hashed.
 sha2 = "0.10"
 
-# MLX through the upstream mlx-rs from crates.io (oxiglade/mlx-rs), pinned
-# to an exact version while the move off OminiX-MLX settles. Exact rather
-# than `0.32` so the lockfile is not the only thing saying which one this
-# is; docs/vendoring.md records why the move happened and what it costs.
-#
-# Upstream rather than OminiX's fork: the fork existed because upstream's
-# MLX was old and had no pre-built path, and neither is true any more. The
-# pre-built MLX is now handed to mlx-c through `MLX_C_USE_SYSTEM_MLX`
-# (docs/vendoring.md), which is upstream's own route rather than a fork's.
-#
-# Split by target because the backend is. mlx-rs's defaults are `metal`
-# and `accelerate`, which name frameworks that exist only on a Mac, so a
-# Linux build turns them off and asks for MLX's CUDA backend instead.
-# Which mlx-rs answers to `cuda` is the patched one the workspace manifest
-# names; docs/vendoring.md says why that patch is there and when it goes.
-#
-# The `safetensors` feature is what `Array::load_safetensors` and
-# `Array::save_safetensors` come from (engine/src/checkpoint.rs), and is
-# wanted on both.
-#
-# The memory metrics are mlx-c's rather than mlx-rs's, so the sys crate is
-# a direct dependency for those few calls (engine/src/memory.rs). It must
-# be the 0.6.0 that mlx-rs 0.32.0 itself pins, or the two would describe
-# different native code; the version is exact for that reason.
+# MLX is reached through mlx-c, bound in this crate (src/mlxc/) from the
+# headers and archives of the prefix build.rs is pointed at. No Rust crate
+# stands between the engine and mlx-c; docs/vendoring.md ("mlx-c, bound
+# here") says why.
 [target.'cfg(target_os = "macos")'.dependencies]
-mlx-rs = { version = "=0.32.0", features = ["safetensors"] }
-mlx-sys = "=0.6.0"
 # dladdr, for refusing a missing metallib before MLX aborts over it
-# (src/runtime.rs). Already in the tree through mlx-sys. Apple's alone:
-# there is no metallib to go missing anywhere else.
+# (src/runtime.rs). Apple's alone: there is no metallib to go missing
+# anywhere else.
 libc = "0.2"
-
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-mlx-rs = { version = "=0.32.0", default-features = false, features = [
-  "safetensors",
-  "cuda",
-] }
-mlx-sys = { version = "=0.6.0", default-features = false, features = ["cuda"] }
 
 [build-dependencies]
 # The bindings for mlx-c, generated from the headers in the prefix that is
-# linked. docs/vendoring.md says why they are generated here rather than
-# taken from mlx-sys.
+# linked. docs/vendoring.md ("mlx-c, bound here") says why they are
+# generated here.
 bindgen = "0.72"
 
 [dev-dependencies]
