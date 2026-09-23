@@ -6,8 +6,8 @@
 //! must reproduce. The arithmetic is MLX's; the update rule is ours.
 
 use anyhow::Result;
-use mlx_rs::ops::zeros_like;
-use mlx_rs::{Array, Dtype};
+use crate::mlxc::ops::zeros_like;
+use crate::mlxc::{Array, Dtype};
 use serde::{Deserialize, Serialize};
 
 /// How an optimizer is configured, as it appears in a journal, a manifest
@@ -76,15 +76,15 @@ pub fn global_norm(arrays: &[Array]) -> Result<f32> {
         });
     }
     let norm = match total {
-        None => Array::from_f32(0.0),
+        None => Array::from_f32(0.0)?,
         Some(so_far) => so_far.sqrt()?,
     };
-    Ok(norm.item_cast::<f32>())
+    Ok(norm.item::<f32>()?)
 }
 
 /// Every gradient multiplied by the same scalar, as a new slice.
 pub fn scaled(grads: &[Array], scale: f32) -> Result<Vec<Array>> {
-    let factor = Array::from_f32(scale);
+    let factor = Array::from_f32(scale)?;
     grads
         .iter()
         .map(|grad| Ok(grad.multiply(&factor)?))
@@ -125,14 +125,41 @@ impl Config {
     }
 }
 
-/// An optimizer and its slots. One slot set per differentiated parameter,
-/// in the order the config declared them.
+/// What a rule remembers between steps, per differentiated parameter, in
+/// the order the parameters are differentiated.
+#[derive(Clone)]
+pub enum Moments {
+    /// SGD remembers nothing.
+    None,
+    /// AdamW's first and second moments.
+    Adam { m: Vec<Array>, v: Vec<Array> },
+}
+
+impl Moments {
+    /// Every array held, first moments then second.
+    pub fn arrays(&self) -> impl Iterator<Item = &Array> {
+        let (m, v): (&[Array], &[Array]) = match self {
+            Moments::None => (&[], &[]),
+            Moments::Adam { m, v } => (m, v),
+        };
+        m.iter().chain(v)
+    }
+
+    /// How many parameters these are for (none for a rule with no state).
+    fn len(&self) -> usize {
+        match self {
+            Moments::None => 0,
+            Moments::Adam { m, .. } => m.len(),
+        }
+    }
+}
+
+/// An optimizer: its rule, what the rule remembers, and how many steps it
+/// has taken.
 #[derive(Clone)]
 pub struct Optimizer {
     config: Config,
-    /// AdamW's first and second moments. Empty for SGD.
-    m: Vec<Array>,
-    v: Vec<Array>,
+    moments: Moments,
     /// Steps taken, for the bias correction. Part of the state a checkpoint
     /// restores: resuming with t = 0 would take a wrong first step.
     t: u64,
@@ -146,25 +173,27 @@ impl std::fmt::Debug for Optimizer {
             f,
             "Optimizer({}, {} slots, {} steps)",
             self.config.name(),
-            self.m.len(),
+            self.moments.len(),
             self.t
         )
     }
 }
 
+/// Zeros shaped like each differentiated parameter: a moment's start.
+fn zeros_for(params: &[Array], argnums: &[i32]) -> Result<Vec<Array>> {
+    argnums.iter().map(|&i| Ok(zeros_like(&params[i as usize])?)).collect()
+}
+
 impl Optimizer {
     pub fn new(config: Config, params: &[Array], argnums: &[i32]) -> Result<Self> {
-        let slots = || -> Result<Vec<Array>> {
-            argnums
-                .iter()
-                .map(|&i| Ok(zeros_like(&params[i as usize])?))
-                .collect()
+        let moments = match config {
+            Config::Sgd { .. } => Moments::None,
+            Config::AdamW { .. } => Moments::Adam {
+                m: zeros_for(params, argnums)?,
+                v: zeros_for(params, argnums)?,
+            },
         };
-        let (m, v) = match config {
-            Config::Sgd { .. } => (Vec::new(), Vec::new()),
-            Config::AdamW { .. } => (slots()?, slots()?),
-        };
-        Ok(Self { config, m, v, t: 0 })
+        Ok(Self { config, moments, t: 0 })
     }
 
     pub fn config(&self) -> &Config {
@@ -179,9 +208,18 @@ impl Optimizer {
         self.t
     }
 
-    /// The moments, for a checkpoint. Empty for SGD, which has none.
-    pub fn slots(&self) -> (&[Array], &[Array]) {
-        (&self.m, &self.v)
+    /// The moments, for a checkpoint: `None` for a rule that keeps none.
+    pub fn slots(&self) -> Option<(&[Array], &[Array])> {
+        match &self.moments {
+            Moments::None => None,
+            Moments::Adam { m, v } => Some((m, v)),
+        }
+    }
+
+    /// Every array the optimizer holds, for evaluating it with the rest of
+    /// a step.
+    pub fn arrays(&self) -> impl Iterator<Item = &Array> {
+        self.moments.arrays()
     }
 
     /// Moves the slots to follow a change in what is differentiated:
@@ -191,39 +229,36 @@ impl Optimizer {
     /// The step count is not reset. A thawed parameter joins a run in
     /// progress, and its bias correction is that run's, not a new one's.
     pub fn refit(&mut self, was: &[i32], now: &[i32], params: &[Array]) -> Result<()> {
-        if !self.wants_slots() {
+        let Moments::Adam { m, v } = &self.moments else {
             return Ok(());
-        }
+        };
         anyhow::ensure!(
-            self.m.len() == was.len(),
+            m.len() == was.len(),
             "the optimizer has {} slots for {} parameters",
-            self.m.len(),
+            m.len(),
             was.len()
         );
-        let mut m = Vec::with_capacity(now.len());
-        let mut v = Vec::with_capacity(now.len());
+        let (mut next_m, mut next_v) = (Vec::with_capacity(now.len()), Vec::with_capacity(now.len()));
         for &i in now {
             match was.iter().position(|&w| w == i) {
                 Some(slot) => {
-                    m.push(self.m[slot].clone());
-                    v.push(self.v[slot].clone());
+                    next_m.push(m[slot].clone());
+                    next_v.push(v[slot].clone());
                 }
                 None => {
-                    m.push(zeros_like(&params[i as usize])?);
-                    v.push(zeros_like(&params[i as usize])?);
+                    next_m.push(zeros_like(&params[i as usize])?);
+                    next_v.push(zeros_like(&params[i as usize])?);
                 }
             }
         }
-        self.m = m;
-        self.v = v;
+        self.moments = Moments::Adam { m: next_m, v: next_v };
         Ok(())
     }
 
     /// Restores state a checkpoint held. The shapes are the caller's to
     /// have checked against the parameters.
-    pub fn restore(&mut self, m: Vec<Array>, v: Vec<Array>, t: u64) {
-        self.m = m;
-        self.v = v;
+    pub fn restore(&mut self, moments: Moments, t: u64) {
+        self.moments = moments;
         self.t = t;
     }
 
@@ -236,7 +271,7 @@ impl Optimizer {
 
     /// The optimizer after one update, and `params` written in place.
     /// Returns a new value rather than mutating, so the caller can evaluate
-    /// everything before committing to it (see `Session::update`).
+    /// everything before committing to it (see `TrainState::advance`).
     pub fn next(&self, params: &mut [Array], argnums: &[i32], grads: &[Array]) -> Result<Self> {
         let mut next = self.clone();
         next.apply(params, argnums, grads)?;
@@ -251,68 +286,72 @@ impl Optimizer {
             grads.len(),
             argnums.len()
         );
-        if self.wants_slots() {
-            anyhow::ensure!(
-                self.m.len() == argnums.len() && self.v.len() == argnums.len(),
-                "the optimizer has {} slots for {} differentiated parameters; \
-                 this state did not come from this session",
-                self.m.len(),
-                argnums.len()
-            );
-        }
+        anyhow::ensure!(
+            self.moments.len() == argnums.len() || matches!(self.moments, Moments::None),
+            "the optimizer has {} slots for {} differentiated parameters; \
+             this state did not come from this session",
+            self.moments.len(),
+            argnums.len()
+        );
         self.t += 1;
-        match self.config {
-            Config::Sgd { lr, .. } => {
-                let lr = Array::from_f32(lr);
+        match (self.config.clone(), &mut self.moments) {
+            (Config::Sgd { lr, .. }, _) => {
+                let lr = Array::from_f32(lr)?;
                 for (&i, grad) in argnums.iter().zip(grads) {
                     let i = i as usize;
                     params[i] = params[i].subtract(grad.multiply(&lr)?)?;
                 }
             }
-            Config::AdamW {
-                lr,
-                beta1,
-                beta2,
-                eps,
-                weight_decay,
-                ..
-            } => {
+            (
+                Config::AdamW {
+                    lr,
+                    beta1,
+                    beta2,
+                    eps,
+                    weight_decay,
+                    ..
+                },
+                Moments::Adam { m, v },
+            ) => {
                 // Bias correction from the step count, so a resumed run
                 // takes the step it would have taken.
                 let t = self.t as f32;
                 let bias1 = 1.0 - beta1.powf(t);
                 let bias2 = 1.0 - beta2.powf(t);
-                let (b1, b2) = (Array::from_f32(beta1), Array::from_f32(beta2));
+                let (b1, b2) = (Array::from_f32(beta1)?, Array::from_f32(beta2)?);
                 let (one_b1, one_b2) = (
-                    Array::from_f32(1.0 - beta1),
-                    Array::from_f32(1.0 - beta2),
+                    Array::from_f32(1.0 - beta1)?,
+                    Array::from_f32(1.0 - beta2)?,
                 );
-                let lr_a = Array::from_f32(lr);
-                let eps_a = Array::from_f32(eps);
-                let bias1_a = Array::from_f32(bias1);
-                let bias2_a = Array::from_f32(bias2);
+                let lr_a = Array::from_f32(lr)?;
+                let eps_a = Array::from_f32(eps)?;
+                let bias1_a = Array::from_f32(bias1)?;
+                let bias2_a = Array::from_f32(bias2)?;
 
                 for (slot, (&i, grad)) in argnums.iter().zip(grads).enumerate() {
                     let i = i as usize;
-                    self.m[slot] = self.m[slot]
+                    m[slot] = m[slot]
                         .multiply(&b1)?
                         .add(grad.multiply(&one_b1)?)?;
-                    self.v[slot] = self.v[slot]
+                    v[slot] = v[slot]
                         .multiply(&b2)?
                         .add(grad.square()?.multiply(&one_b2)?)?;
 
-                    let m_hat = self.m[slot].divide(&bias1_a)?;
-                    let v_hat = self.v[slot].divide(&bias2_a)?;
+                    let m_hat = m[slot].divide(&bias1_a)?;
+                    let v_hat = v[slot].divide(&bias2_a)?;
                     let denom = v_hat.sqrt()?.add(&eps_a)?;
                     let mut next = params[i].subtract(m_hat.divide(&denom)?.multiply(&lr_a)?)?;
                     if weight_decay != 0.0 {
                         // Decoupled: applied to the parameter, after the
                         // Adam step, and never through the moments.
-                        let decay = Array::from_f32(lr * weight_decay);
+                        let decay = Array::from_f32(lr * weight_decay)?;
                         next = next.subtract(params[i].multiply(&decay)?)?;
                     }
                     params[i] = next;
                 }
+            }
+            (Config::AdamW { .. }, Moments::None) => {
+                anyhow::bail!("adamw has no moments here; this state did not come from this session")
             }
         }
         Ok(())
@@ -322,15 +361,15 @@ impl Optimizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mlx_rs::transforms::eval;
+    use crate::mlxc::transforms::eval;
 
     fn array(values: &[f32]) -> Array {
-        Array::from_slice(values, &[values.len() as i32])
+        Array::from_slice(values, &[values.len() as i32]).unwrap()
     }
 
     fn read(array: &Array) -> Vec<f32> {
         eval(std::iter::once(array)).unwrap();
-        array.as_slice::<f32>().to_vec()
+        array.as_slice::<f32>().unwrap().to_vec()
     }
 
     fn close(got: &[f32], want: &[f32]) {
@@ -453,11 +492,9 @@ mod tests {
         let mut resumed = vec![array(&[0.0])];
         let mut a = Optimizer::new(ADAMW, &params0, &[0]).unwrap();
         a = a.next(&mut resumed, &[0], &grads).unwrap();
-        let (m, v) = a.slots();
-        let (m, v) = (m.to_vec(), v.to_vec());
         let t = a.steps_taken();
         let mut b = Optimizer::new(ADAMW, &params0, &[0]).unwrap();
-        b.restore(m, v, t);
+        b.restore(a.moments.clone(), t);
         for _ in 0..2 {
             b = b.next(&mut resumed, &[0], &grads).unwrap();
         }
@@ -481,10 +518,8 @@ mod tests {
         let mut wrong = vec![array(&[0.0])];
         let mut a = Optimizer::new(ADAMW, &params0, &[0]).unwrap();
         a = a.next(&mut wrong, &[0], &grads).unwrap();
-        let (m, v) = a.slots();
-        let (m, v) = (m.to_vec(), v.to_vec());
         let mut b = Optimizer::new(ADAMW, &params0, &[0]).unwrap();
-        b.restore(m, v, 0);
+        b.restore(a.moments.clone(), 0);
         b.next(&mut wrong, &[0], &grads).unwrap();
 
         let (want, got) = (read(&straight[0]), read(&wrong[0]));
@@ -508,7 +543,7 @@ mod tests {
         // Adam's own step is lr, and the decay is lr * wd * param.
         close(&read(&params[0]), &[2.0 - 0.1 - 0.1 * 0.5 * 2.0]);
         // The moment saw the gradient alone: 0.1 * 1.0.
-        close(&read(&next.slots().0[0]), &[0.1]);
+        close(&read(&next.slots().unwrap().0[0]), &[0.1]);
     }
 
     #[test]
@@ -519,12 +554,12 @@ mod tests {
         opt = opt
             .next(&mut copy, &[0, 1], &[array(&[1.0]), array(&[2.0])])
             .unwrap();
-        let before: Vec<Vec<f32>> = opt.slots().0.iter().map(read).collect();
+        let before: Vec<Vec<f32>> = opt.slots().unwrap().0.iter().map(read).collect();
         assert_eq!(before.len(), 2);
 
         // Freeze 0, thaw 2: parameter 1's slot follows it to the front.
         opt.refit(&[0, 1], &[1, 2], &params).unwrap();
-        let after: Vec<Vec<f32>> = opt.slots().0.iter().map(read).collect();
+        let after: Vec<Vec<f32>> = opt.slots().unwrap().0.iter().map(read).collect();
         assert_eq!(after.len(), 2);
         close(&after[0], &before[1]);
         close(&after[1], &[0.0]);
@@ -538,7 +573,7 @@ mod tests {
         let params = vec![array(&[0.0]), array(&[0.0])];
         let mut opt = Optimizer::new(Config::Sgd { lr: 0.1, clip: None }, &params, &[0]).unwrap();
         opt.refit(&[0], &[0, 1], &params).unwrap();
-        assert!(opt.slots().0.is_empty());
+        assert!(opt.slots().is_none());
         assert!(!opt.wants_slots());
     }
 
@@ -558,7 +593,7 @@ mod tests {
     fn slots_that_do_not_belong_to_this_run_are_refused_not_indexed_past() {
         let params = vec![array(&[0.0]), array(&[0.0])];
         let mut opt = Optimizer::new(ADAMW, &params, &[0, 1]).unwrap();
-        opt.restore(Vec::new(), Vec::new(), 7);
+        opt.restore(Moments::Adam { m: Vec::new(), v: Vec::new() }, 7);
         let mut copy = params.clone();
         let e = opt
             .next(&mut copy, &[0, 1], &[array(&[1.0]), array(&[1.0])])

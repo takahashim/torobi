@@ -12,7 +12,6 @@ use anyhow::{bail, Result};
 use torobi_engine::tensor::{Batch, Tensor, Values};
 use torobi_engine::{Session, Weights};
 
-use mlx_rs::Dtype;
 use serde::Deserialize;
 
 /// The CLI's own JSON shape for a batch. The library's boundary carries a
@@ -36,7 +35,6 @@ fn to_batch(inputs: std::collections::BTreeMap<String, JsonTensor>) -> Batch {
             (
                 name,
                 Tensor {
-                    dtype: Dtype::Float32,
                     shape: t.shape,
                     values: Values::F32(t.data),
                 },

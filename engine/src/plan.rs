@@ -14,8 +14,8 @@ use std::ops::Range;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use mlx_rs::transforms::eval;
-use mlx_rs::Array;
+use crate::mlxc::transforms::eval;
+use crate::mlxc::Array;
 use serde::Deserialize;
 
 use crate::graph::{GraphConfig, InputSpec, ParameterSpec};
@@ -113,6 +113,9 @@ pub struct Plan {
     /// Every name a tap could ask for.
     node_names: Vec<String>,
     output_names: Vec<String>,
+    /// What each parameter is declared as, parallel to `paths`: what the
+    /// parameters are made from when the plan is materialized.
+    specs: Vec<ParameterSpec>,
 }
 
 impl Plan {
@@ -136,32 +139,39 @@ impl Plan {
         weights: Weights<'_>,
         seed: u64,
     ) -> Result<(Self, Vec<Array>)> {
-        let config_digest = {
-            use sha2::{Digest, Sha256};
-            format!("{:x}", Sha256::digest(graph_json.as_bytes()))
-        };
-        let config: GraphConfig = serde_json::from_str(graph_json).context("parsing the graph")?;
-        anyhow::ensure!(!config.models.is_empty(), "the graph has no models");
+        let plan = Self::resolve(graph_json)?;
         let mut source = Source::read(weights)?;
         source.seed(seed)?;
+        let params = source.materialize(&plan)?;
+        // One evaluation for the lot: a file's arrays are lazy until asked.
+        eval(params.iter())?;
+        Ok((plan, params))
+    }
+
+    /// The description, resolved and checked, and nothing made: no file is
+    /// read and MLX is not reached. What the parameters will be is decided
+    /// here (their paths, which are trainable, what each is declared as);
+    /// making them is `Source::materialize`'s.
+    pub fn resolve(graph_json: &str) -> Result<Self> {
+        let config_digest = crate::graph::digest(graph_json);
+        let config: GraphConfig = serde_json::from_str(graph_json).context("parsing the graph")?;
+        anyhow::ensure!(!config.models.is_empty(), "the graph has no models");
 
         let mut models = Vec::new();
-        let mut params = Vec::new();
         let mut paths = Vec::new();
+        let mut specs = Vec::new();
         let mut candidates = Vec::new();
-        // BTreeMap iterates in name order, which is the declared order.
-        for (name, graph) in config.models {
+        for (name, mut graph) in config.models {
             let trained = config.train.contains(&name);
-            let start = params.len();
-            for spec in &graph.parameters {
-                let path = format!("{name}.{}", spec.path);
+            let start = paths.len();
+            for spec in std::mem::take(&mut graph.parameters) {
                 if trained && spec.trainable {
-                    candidates.push(params.len() as i32);
+                    candidates.push(paths.len() as i32);
                 }
-                params.push(source.parameter(&name, &path, spec)?);
-                paths.push(path);
+                paths.push(format!("{name}.{}", spec.path));
+                specs.push(spec);
             }
-            let slice = start..params.len();
+            let slice = start..paths.len();
             let program = Program::resolve(graph, slice.len(), &name)?;
             models.push(Model {
                 name,
@@ -179,14 +189,12 @@ impl Plan {
             "nothing to train: no model in {:?} has trainable parameters",
             config.train
         );
-        // One evaluation for the lot: a file's arrays are lazy until asked.
-        eval(params.iter())?;
 
         let objective = config
             .objective
             .map(|graph| Program::resolve(graph, 0, OBJECTIVE))
             .transpose()?;
-        let plan = Self {
+        Ok(Self {
             input_names: input_names(&models, objective.as_ref()),
             node_names: node_names(&models, objective.as_ref()),
             output_names: output_names(&models),
@@ -197,8 +205,8 @@ impl Plan {
             config_digest,
             graph_json: graph_json.to_string(),
             semantics_version: config.semantics_version,
-        };
-        Ok((plan, params))
+            specs,
+        })
     }
 
     /// Every program a run evaluates, models first.
@@ -338,9 +346,9 @@ fn bind_one(field: &str, spec: &InputSpec, given: &Tensor) -> Result<Array> {
     let declared = crate::tensor::dtype_named(&spec.dtype)
         .with_context(|| format!("input {field:?}: unknown dtype in the graph"))?;
     anyhow::ensure!(
-        given.dtype == declared,
+        given.dtype() == declared,
         "input {field:?}: given {:?}, declared {}",
-        given.dtype,
+        given.dtype(),
         spec.dtype
     );
     let expected: usize = given.shape.iter().map(|d| *d as usize).product();
@@ -350,7 +358,7 @@ fn bind_one(field: &str, spec: &InputSpec, given: &Tensor) -> Result<Array> {
         given.values.len(),
         given.shape
     );
-    Ok(given.to_array())
+    given.to_array()
 }
 
 /// Initial parameters, read and waiting to be matched to what the graph
@@ -363,7 +371,7 @@ enum Source {
     /// naming what is expected to come from an initializer instead.
     Pretrained {
         files: BTreeMap<String, std::collections::HashMap<String, Array>>,
-        fresh: Vec<String>,
+        fresh: Vec<Pattern>,
         /// Split per parameter as they are built, so what one draws does
         /// not depend on how many came before it.
         key: Option<Array>,
@@ -390,17 +398,27 @@ impl Source {
                         ))
                     })
                     .collect::<Result<_>>()?,
-                fresh: fresh.to_vec(),
+                fresh: fresh.iter().map(|p| Pattern::parse(p)).collect::<Result<_>>()?,
                 key: None,
             },
         })
+    }
+
+    /// Every parameter the plan declares, from this source, in the order
+    /// the plan names them.
+    fn materialize(&self, plan: &Plan) -> Result<Vec<Array>> {
+        plan.models
+            .iter()
+            .flat_map(|model| model.slice.clone().map(move |i| (model, i)))
+            .map(|(model, i)| self.parameter(&model.name, &plan.paths[i], &plan.specs[i]))
+            .collect()
     }
 
     /// Where the fresh parameters are drawn from.
     fn seed(&mut self, seed: u64) -> Result<()> {
         if let Source::Pretrained { key, fresh, .. } = self {
             if !fresh.is_empty() {
-                *key = Some(mlx_rs::random::key(seed)?);
+                *key = Some(crate::mlxc::random::key(seed)?);
             }
         }
         Ok(())
@@ -435,7 +453,7 @@ impl Source {
                     t.data.len(),
                     t.shape
                 );
-                Array::from_slice(&t.data, &t.shape)
+                Array::from_slice(&t.data, &t.shape)?
             }
             Source::File(arrays) => {
                 let array = arrays.get(path).with_context(|| {
@@ -449,14 +467,14 @@ impl Source {
                 shaped(array, path, spec)?
             }
             Source::Pretrained { files, fresh, key } => {
-                if let Some(pattern) = fresh.iter().find(|p| matches(p, path)) {
+                if let Some(pattern) = fresh.iter().find(|p| p.matches(path)) {
                     let key = key.as_ref().with_context(|| {
                         format!("parameter {path:?} matches {pattern:?} but no seed was set")
                     })?;
                     // Its own key, split from the run's by the path, so a
                     // parameter draws the same numbers wherever it sits in
                     // the declaration order.
-                    let (_, mine) = mlx_rs::random::split(key, 2)?;
+                    let (_, mine) = crate::mlxc::random::split(key, 2)?;
                     return crate::init::build(spec, &mine);
                 }
                 let arrays = files.get(model).with_context(|| {
@@ -557,51 +575,46 @@ fn shaped(array: &Array, path: &str, spec: &ParameterSpec) -> Result<Array> {
     Ok(array.clone())
 }
 
-/// Whether a pattern names this path, in the same small language freezing
-/// uses: an exact path, or a prefix ending in `*`.
-fn matches(pattern: &str, path: &str) -> bool {
-    match pattern.strip_suffix('*') {
-        Some(prefix) => path.starts_with(prefix),
-        None => pattern == path,
-    }
-}
-
-/// A freeze pattern: a path, or a prefix ending in `*`.
+/// A parameter pattern: a path, or a prefix ending in `*`. The one small
+/// language both freezing and a pretrained run's fresh parameters are named
+/// in.
 ///
 /// Deliberately small. A path names one parameter, `student.*` names a
 /// model's, `student.layers.3.*` names a block's; anything more expressive
 /// would be a query language nobody asked for.
 pub struct Pattern {
+    text: String,
     prefix: String,
     exact: bool,
-    pub matched_any: bool,
 }
 
 impl Pattern {
     pub fn parse(pattern: &str) -> Result<Self> {
-        anyhow::ensure!(!pattern.is_empty(), "a freeze pattern must not be empty");
-        Ok(match pattern.strip_suffix('*') {
-            Some(prefix) => Self {
-                prefix: prefix.to_string(),
-                exact: false,
-                matched_any: false,
-            },
-            None => Self {
-                prefix: pattern.to_string(),
-                exact: true,
-                matched_any: false,
-            },
+        anyhow::ensure!(!pattern.is_empty(), "a parameter pattern must not be empty");
+        let (prefix, exact) = match pattern.strip_suffix('*') {
+            Some(prefix) => (prefix, false),
+            None => (pattern, true),
+        };
+        Ok(Self {
+            text: pattern.to_string(),
+            prefix: prefix.to_string(),
+            exact,
         })
     }
 
-    pub fn matches(&mut self, path: &str) -> bool {
-        let hit = if self.exact {
+    pub fn matches(&self, path: &str) -> bool {
+        if self.exact {
             path == self.prefix
         } else {
             path.starts_with(&self.prefix)
-        };
-        self.matched_any |= hit;
-        hit
+        }
+    }
+}
+
+impl std::fmt::Debug for Pattern {
+    /// As it was written, which is how an error should quote it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.text)
     }
 }
 
@@ -610,7 +623,7 @@ mod tests {
     use super::*;
     use crate::fixtures;
     use crate::tensor::Values;
-    use mlx_rs::Dtype;
+    use crate::mlxc::Dtype;
     use serde_json::{json, Value};
 
     /// The common case in these tests: parameters as JSON.
@@ -734,15 +747,7 @@ mod tests {
     }
 
     fn tensor(shape: Vec<i32>, values: Values) -> Tensor {
-        let dtype = match values {
-            Values::F32(_) => Dtype::Float32,
-            Values::I32(_) => Dtype::Int32,
-        };
-        Tensor {
-            dtype,
-            shape,
-            values,
-        }
+        Tensor { shape, values }
     }
 
     fn plan_for_bind() -> Plan {
@@ -843,7 +848,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = write_parameters(
             dir.path(),
-            &[("m.w", Array::from_slice(&[5.0f32, 6.0], &[2]))],
+            &[("m.w", Array::from_slice(&[5.0f32, 6.0], &[2]).unwrap())],
         );
 
         let (config, _) = fixtures::scaled_mean();
@@ -857,7 +862,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = write_parameters(
             dir.path(),
-            &[("something.else", Array::from_slice(&[0.0f32, 0.0], &[2]))],
+            &[("something.else", Array::from_slice(&[0.0f32, 0.0], &[2]).unwrap())],
         );
 
         let (config, _) = fixtures::scaled_mean();
@@ -874,7 +879,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = write_parameters(
             dir.path(),
-            &[("m.w", Array::from_slice(&[1.0f32, 2.0, 3.0], &[3]))],
+            &[("m.w", Array::from_slice(&[1.0f32, 2.0, 3.0], &[3]).unwrap())],
         );
 
         let (config, _) = fixtures::scaled_mean();
@@ -890,7 +895,7 @@ mod tests {
         // Importing is starting somewhere, not resuming: a model published
         // in bf16 is a fine place to start an f32 run.
         let dir = tempfile::tempdir().unwrap();
-        let half = Array::from_slice(&[0.5f32, 2.0], &[2])
+        let half = Array::from_slice(&[0.5f32, 2.0], &[2]).unwrap()
             .as_dtype(Dtype::Bfloat16)
             .unwrap();
         let file = write_parameters(dir.path(), &[("m.w", half)]);
@@ -918,21 +923,31 @@ mod tests {
 
     #[test]
     fn a_pattern_is_a_path_or_a_prefix() {
-        let mut exact = Pattern::parse("a.b").unwrap();
+        let exact = Pattern::parse("a.b").unwrap();
         assert!(exact.matches("a.b"));
         assert!(!exact.matches("a.bc"));
         assert!(!exact.matches("a"));
-        assert!(exact.matched_any);
 
-        let mut prefix = Pattern::parse("a.*").unwrap();
+        let prefix = Pattern::parse("a.*").unwrap();
         assert!(prefix.matches("a.b"));
         assert!(prefix.matches("a.b.c"));
         assert!(!prefix.matches("ab.c"));
-
-        let mut nothing = Pattern::parse("z").unwrap();
-        assert!(!nothing.matches("a"));
-        assert!(!nothing.matched_any);
+        assert_eq!(format!("{prefix:?}"), r#""a.*""#);
 
         assert!(Pattern::parse("").is_err());
     }
+
+    /// A plan is the description alone: resolved and checked with no
+    /// weights to read and nothing made, which is what lets a graph be
+    /// checked before any file or device is involved.
+    #[test]
+    fn a_description_resolves_without_its_weights() {
+        let (config, _) = fixtures::scaled_mean();
+        let plan = Plan::resolve(&config).unwrap();
+        assert_eq!(plan.paths, vec!["m.w".to_string()]);
+        assert_eq!(plan.candidates, vec![0]);
+        assert_eq!(plan.specs[0].shape, vec![2]);
+        assert_eq!(plan.config_digest, crate::graph::digest(&config));
+    }
+
 }

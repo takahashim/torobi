@@ -62,7 +62,7 @@ torobi gem
         ▼
    torobi-engine(Rust crate)
         ├ GraphConfig を serde で解釈、step 実行・optimizer・checkpoint を所有
-        └ vendored mlx-rs → mlx-sys → mlx-c → MLX / Metal
+        └ 自前の mlx-c バインディング(engine/src/mlxc)→ mlx-c → MLX / Metal・CUDA
 ```
 
 設計の中心:
@@ -154,14 +154,14 @@ v3.1 は「native 境界は一度書いて閉じる有界な問題」と書い�
 限定的な eager API)を妨げない。ただし広げる際は §12「狭い腰の劣化」の審査
 (テンソル越境と callback の禁止を破らないか、関数数の増分に見合う価値か)を通す。
 
-## 5. 依存(v3.2 で方針変更: vendoring ではなく pinned git)
+## 5. 依存(v3.2 で pinned git、2026-09-23 に mlx-c の直接バインドへ)
 
-- torobi-engine は **OminiX の mlx-rs を rev 固定の git 依存**として使う。
-  v3.1 までは「選択的 vendoring(array / ops / fast / transforms / io を取り込み、
-  残りを刈る)」としていたが、**同じ目的をより安く達成できるため変更した**:
-  自分のツリーに 2.3 MB を抱えず、Cargo.lock が commit を強制し、どこででもビルドできる。
-  失うのは刈り込みとローカルパッチで、必要になったら fork に pin し直す。
-  経緯と実測は `docs/vendoring.md`。
+- torobi-engine は **mlx-c を自前でバインドする**(`engine/src/mlxc/`、§15.75)。
+  bindgen が prebuilt MLX の prefix にあるヘッダを読み、同じ prefix の静的ライブラリを
+  リンクする。Rust の依存として mlx-rs / mlx-sys は持たない。mlx-rs は、どの mlx-c 関数を
+  呼ぶかの参照実装として読むだけである。
+  それ以前の経緯(選択的 vendoring → OminiX の mlx-rs を rev 固定 → crates.io の mlx-rs に
+  パッチ)は §15.39、§15.73 と `docs/vendoring.md` に残す。
 - nn / optimizer はエンジン内で所有(mlx-rs は参考)。AdamW は oracle の数 step と照合する。
 - 依存台帳(rev、MLX / mlx-c の出所、metallib の配置制約)を維持し、
   `Torobi::Native.build_info` が報告する。更新は一版ずつの明示作業。
@@ -421,7 +421,7 @@ Ruby に住む。除外されるのは「経路を通らない実行」(Ruby コ
 - dataset / sampler の状態と、データ成果物の digest
 - optimizer の種別と設定、RNG state、step / epoch / batch position
 - Ruby 側 policy / hook のコード版(gem version と、ユーザーコードの digest)
-- runtime / build 情報(gem、Ruby、MLX、mlx-c、mlx-rs の revision、macOS / arch)
+- runtime / build 情報(gem、Ruby、MLX、mlx-c の revision、macOS / arch)
 - dtype、backend、compile signature
 - **窓で読んだ値**(metrics、tap)。v3.1 は「読み取りは journal 不要」としたが、
   **読んだ値から Ruby が判断する以上、判断の入力は記録が要る**。訂正する。
@@ -514,7 +514,7 @@ checkpoint/000003/
 ```
 
 `manifest.json` に持つもの: checkpoint schema version、GraphConfig digest、semantics
-version、gem / Ruby / MLX / mlx-c / mlx-rs の version と revision、macOS と arch、
+version、gem / Ruby / MLX / mlx-c の version と revision、macOS と arch、
 step / epoch / batch position、optimizer の種別と設定、dataset sampler の metadata、
 parameter の path・shape・dtype の inventory。
 
@@ -533,9 +533,9 @@ engine は中身を解釈しない。Ruby 側の `checkpoint!(dir, at:)` が pos
 持つ provenance(config digest、dataset、gem / Ruby / engine の版)を合わせて詰める。
 session を開かずに読む口が `Torobi::Checkpoint`(manifest / graph_json / position / exist?)。
 
-残る欠けは checkpoint 側ではなく調達側にある: MLX と mlx-c の exact revision が
-OminiX のビルド済みバイナリ由来で不明なこと(docs/vendoring.md)。mlx-rs の rev は
-`build.mlx_rs` に入っている。
+MLX と mlx-c の revision は、prebuilt の `MANIFEST.txt` から build.rs が読み、
+`build.mlx` と `build.mlx_c` に入る。以前は OminiX のビルド済みバイナリ由来で不明だった
+欠けが、これで閉じた(§15.75)。
 
 ### 11.3 メモリ
 
@@ -587,7 +587,7 @@ Ruby へ返すのは loss・metrics・明示的に copy したテンソルに限
 
 | Risk | 対処 |
 |---|---|
-| mlx-rs / MLX の追従 | exact rev pin(Cargo.lock が強制)+ 依存台帳 + 一版ずつの upgrade(全スイート) |
+| MLX / mlx-c の追従 | prebuilt の digest と `requires` の pin(`mlx_prebuilt.json`)+ 依存台帳 + 一版ずつの upgrade(全スイート)。mlx-c が変わればバインディングの対応表(docs/vendoring.md)を見直す |
 | 狭い腰の劣化(関数が増え広い binding 化する) | セッション API の関数数を計測対象にする。テンソル越境と callback の禁止を review 基準に |
 | IR と engine の意味ずれ | 単一 manifest から両面生成、differential test |
 | resume / replay 非再現 | TrainState(乱数込み)の明示管理、resume=連続・replay=再演のテスト |
@@ -3683,6 +3683,38 @@ step 境界で走るので、そこが正しい呼び場所)。frozen も数え�
 設定が serde で往復すること、param norm が全重みのもので step で動くこと)+ Ruby 3 件
 (clipping 後の step が `lr * clip` のノルムを持つこと、`grad_norm` が読めて clip が journal に
 残ること、`param_norm` が全重みのもので step で動くこと)。Rust 138 / Ruby 351 が通る。
+
+### 15.75 mlx-c を直接バインドした(2026-09-23)
+
+Linux + NVIDIA で学習を回すために crates.io の mlx-rs へパッチを当てた(§15.73 の続き)が、
+ビルドスクリプトを直しても Rust 側が x86_64 でコンパイルできなかった。`mlx/c/half.h` が
+`float16_t` / `bfloat16_t` を ARM でしか定義せず、それに依存する 4 関数
+(`mlx_array_{item,data}_{float16,bfloat16}`)が x86_64 に存在しない。mlx-rs はこれらを
+無条件に使う。mlx-rs 側で直すと `ArrayElement for f16` がプラットフォームで有無の変わる
+公開 API になり、他人のクレートに求める変更ではない。engine が使っていたのは mlx-rs の
+2〜3% だったので、mlx-c を engine 自身がバインドすることにした
+(`notes/plan-mlxc-migration.md`)。
+
+- `engine/build.rs` が prefix のヘッダから bindgen で生成し、同じ prefix の `libmlx.a` /
+  `libmlxc.a` / `libgguflib.a` をリンクする。アーキテクチャ依存の 2 型 4 関数は blocklist で
+  外すので、生成物は両プラットフォームで同じ。cmake も mlx-c のソースも要らない
+- `engine/src/mlxc/` は mlx-rs と同じ名前・引数順・モジュールパスにした。engine 側の変更は
+  `mlx_rs::` を `crate::mlxc::` に置き換えただけ。どの mlx-c 関数を呼ぶかの対応表は
+  `docs/vendoring.md` の「mlx-c, call by call」
+- エラーハンドラはシムが自分で登録する(mlx-c の既定は `exit`)。クロージャのパニックは
+  Rust 側で元の payload のまま再開するので、runtime の gate が poison される規則は変わらない
+- mlx-rs と挙動を変えたのは、鍵の無い乱数を受けない、空配列の `as_slice` が空を返す、
+  `gelu_approximate` を compile しない、の 3 点
+- `build_info` は `mlx_rs` / `mlx_sys` の版ではなく、prebuilt の `MANIFEST.txt` が名指す
+  MLX の版と mlx-c のコミット(`mlx`、`mlx_c`)を報告する
+- workspace の `[patch.crates-io]`、`takahashim/mlx-rs` の fork への依存、toolchain file、
+  `CMAKE_TOOLCHAIN_FILE`・`MLX_RS_METAL_PATH`・`RUSTFLAGS -L` の受け渡しは全て消えた
+
+検証。mlx-rs がリンクされている間、同じ入力で両方を呼んでビット単位で比べた(自由関数、
+f32 と bf16 の gelu、3 種のマスクの SDPA とその勾配、safetensors の相互読み書き)。seed 42 の
+乱数は mlx-rs で引いた値をテストに固定した。差し替えの前後で、閉形式チェックの出力が同一、
+ruri-v3-130m の 302 トークンの forward・3 step の損失・3 step 後の重みの SHA-256 が一致した。
+Rust 174 / Ruby 373 が通る。
 
 ### 15.12 レビューの残りを片付ける(2026-09-03)
 

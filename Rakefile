@@ -7,21 +7,19 @@ require "rb_sys/extensiontask"
 GEMSPEC = Gem::Specification.load("torobi.gemspec")
 
 # The pre-built MLX every cargo build here links, fetched once and checked
-# against a recorded digest and the mlx-sys generation it was built for
+# against a recorded digest and the mlx-c generation it was built for
 # (ext/torobi/mlx_prebuilt.rb). `rake compile` reaches it through
 # extconf.rb; the engine's own builds reach it here, and both share one
-# copy and one toolchain file.
+# copy.
 require_relative "ext/torobi/mlx_prebuilt"
 
-# Points cargo at that MLX: the toolchain file mlx-c is configured with,
-# where mlx-sys looks for the kernels, and the one link path upstream
-# cannot know about when MLX is a system package. Returns the prefix.
+# Points cargo at that MLX. engine/build.rs reads the prefix for everything
+# it needs: the headers it generates bindings from, the archives it links,
+# the manifest that says which MLX they are, and the metallib it puts
+# beside the test binaries. Returns the prefix.
 def with_mlx
   prefix = MlxPrebuilt.ensure!
-  ENV["CMAKE_TOOLCHAIN_FILE"] = MlxPrebuilt.toolchain_file(prefix)
-  ENV["MLX_RS_METAL_PATH"] = MlxPrebuilt.link_dir(prefix) if MlxPrebuilt.metal?
-  flags = [ENV.fetch("RUSTFLAGS", nil), "-L", "native=#{MlxPrebuilt.link_dir(prefix)}"]
-  ENV["RUSTFLAGS"] = flags.compact.join(" ")
+  ENV["TOROBI_MLX_PREFIX"] = prefix
   prefix
 rescue MlxPrebuilt::Refused => e
   abort "torobi: #{e.message}"
@@ -259,12 +257,21 @@ namespace :mlx do
     release = JSON.parse(fetch_json(api))
     # Only this machine's archive: the digest is checked against the bytes,
     # and only these bytes can be fetched and run here.
+    #
+    # The assets are read from the release's own list rather than from the
+    # copy the tag lookup embeds: on 2026-09-23 that copy said a release had
+    # no assets while its list held four.
+    #
+    # The platform key is coarse on purpose (mlx_prebuilt.rb), and an
+    # archive may name a variant after it: `-linux-x86_64-cuda12.tar.gz` is
+    # the `linux-x86_64` archive.
     platform = MlxPrebuilt.platform
-    asset = release.fetch("assets")
-                   .find { |a| a.fetch("name").end_with?("-#{platform}.tar.gz") }
+    assets = JSON.parse(fetch_json(release.fetch("assets_url")))
+    named = /-#{Regexp.escape(platform)}(-[a-z0-9]+)?\.tar\.gz\z/
+    asset = assets.find { |a| a.fetch("name").match?(named) }
     unless asset
       abort "#{release["tag_name"]} has no .tar.gz asset for #{platform}; it holds " \
-            "#{release.fetch("assets").map { |a| a["name"] }.join(", ")}"
+            "#{assets.map { |a| a["name"] }.join(", ")}"
     end
     digest = asset["digest"].to_s.delete_prefix("sha256:")
     abort "#{asset["name"]} carries no sha256 digest" if digest.empty?
@@ -283,7 +290,7 @@ namespace :mlx do
       write_pin(pin)
       # Through the same path an install takes, so the digest is checked
       # against the bytes rather than believed, and the generation is
-      # checked against what mlx-sys wants.
+      # checked against what the binding wants.
       MlxPrebuilt.ensure!(io: $stdout)
       said = MlxPrebuilt.manifest
       if said

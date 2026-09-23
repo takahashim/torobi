@@ -36,7 +36,8 @@ class JournalTest < Minitest::Test
 
     assert_equal Torobi::VERSION, info.fetch("torobi_engine")
     assert_includes %w[debug release], info.fetch("profile")
-    refute_empty info.fetch("mlx_rs")
+    refute_empty info.fetch("mlx")
+    refute_empty info.fetch("mlx_c")
   end
 
   def test_entries_carry_their_kind_and_step

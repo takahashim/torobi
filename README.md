@@ -13,8 +13,7 @@ A Rust engine (via MLX) owns the execution, and the boundary between them is abo
 - Ruby 3.2 or newer
 - Rust toolchain
 - no Metal toolchain: a pre-built MLX is fetched and checked at build time
-  (`ext/torobi/mlx_prebuilt.rb`); the Rust side is the upstream mlx-rs from
-  crates.io
+  (`ext/torobi/mlx_prebuilt.rb`), and the engine binds its mlx-c directly
 
 ## Install
 
@@ -238,10 +237,10 @@ The version is 0.0.1 and the API still moves.
 
 [MIT](./LICENSE).
 
-The engine builds against MLX (MIT, ml-explore) through the mlx-rs on
-crates.io (MIT or Apache-2.0) and mlx-c (MIT, ml-explore). The gem ships
-none of their code: cargo fetches mlx-rs from crates.io, and the pre-built
-MLX comes from `takahashim/mlx-prebuilt`, fetched and digest-checked at
-build time. `docs/vendoring.md` names all of them, with their licences and
+The engine builds against MLX (MIT, ml-explore) through mlx-c (MIT,
+ml-explore), which it binds itself; the binding was written with mlx-rs
+(MIT or Apache-2.0) as its reference. The gem ships none of their code:
+the pre-built MLX, mlx-c included, comes from `takahashim/mlx-prebuilt`,
+fetched and digest-checked at build time. `docs/vendoring.md` names all of them, with their licences and
 with what would have to be carried if Torobi were ever distributed as a
 compiled gem.

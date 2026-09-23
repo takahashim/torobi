@@ -1,6 +1,7 @@
 # torobi-engine
 
-Torobi's execution engine: interprets a GraphConfig on MLX (via mlx-rs).
+Torobi's execution engine: interprets a GraphConfig on MLX, through its
+own binding of mlx-c (`src/mlxc/`).
 It runs what `Torobi::Models` describes, ModernBERT included, and it is
 what the Ruby extension holds.
 
@@ -17,5 +18,6 @@ The Ruby extension is built separately, through `rake compile` at the
 repository root; `cargo build` alone cannot link it (it needs Ruby's
 linker flags).
 
-The dependency on mlx-rs is a pinned path dependency for now; see
+`cargo` needs `TOROBI_MLX_PREFIX` pointed at an MLX install prefix that
+holds mlx-c; `rake` sets it to the pre-built one it fetches. See
 ../docs/vendoring.md.

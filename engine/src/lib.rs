@@ -22,12 +22,14 @@
 // manifest.
 pub mod checkpoint;
 pub(crate) mod executor;
+pub(crate) mod export;
 #[cfg(test)]
 mod fixtures;
 pub(crate) mod graph;
 pub mod init;
 pub(crate) mod interp;
 pub mod memory;
+pub(crate) mod mlxc;
 pub(crate) mod op;
 pub(crate) mod optimizer;
 pub(crate) mod plan;
@@ -44,26 +46,17 @@ pub use session::Session;
 /// What this engine was built from. The vendoring ledger (docs/vendoring.md)
 /// says every artifact must be able to report its revisions; a journal
 /// records this so a run can say which build produced it.
+///
+/// The MLX release and the mlx-c commit, as the pre-built archive's
+/// manifest names them (read by build.rs). Those two are the whole of the
+/// native code under the engine now that no Rust crate stands between it
+/// and mlx-c.
 pub fn build_info() -> serde_json::Value {
     serde_json::json!({
         "torobi_engine": env!("CARGO_PKG_VERSION"),
-        "mlx_rs": mlx_rs_version(),
-        "mlx_sys": mlx_sys_version(),
+        "mlx": env!("TOROBI_MLX_VERSION"),
+        "mlx_c": env!("TOROBI_MLX_C_REVISION"),
         "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
         "target": std::env::consts::ARCH,
     })
-}
-
-/// The mlx-rs version this was built against, read from the dependency
-/// pin at build time (see build.rs and docs/vendoring.md). The commit it
-/// resolves to is the one Cargo.lock records.
-fn mlx_rs_version() -> &'static str {
-    option_env!("TOROBI_MLX_RS_VERSION").unwrap_or("unknown, see docs/vendoring.md")
-}
-
-/// The mlx-sys version, which pins the mlx-c and MLX the bindings were
-/// generated from. A Torobi build that used a different one would be
-/// describing different native code, so a run records it.
-fn mlx_sys_version() -> &'static str {
-    option_env!("TOROBI_MLX_SYS_VERSION").unwrap_or("unknown, see docs/vendoring.md")
 }

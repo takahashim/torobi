@@ -66,3 +66,67 @@ jobs:
           restore-keys: cargo-${{ matrix.ruby }}-
 
       - run: bundle exec rake
+
+  linux:
+    # Linux with CUDA, and no GPU. What this holds is that the engine binds
+    # and links there: bindgen over the Linux prefix, and every binary the
+    # engine has linked against MLX's archives, the CUDA toolkit, cuDNN and
+    # OpenBLAS. A link line is exactly the kind of thing that is right on
+    # the machine it was written on and wrong everywhere else.
+    #
+    # Nothing that reaches a device runs: GitHub's GPU runners are for
+    # organizations, and a CUDA MLX needs a card. Training on one is the
+    # manual session in notes/gpu-session-checklist.md.
+    #
+    # It needs a Linux archive in ext/torobi/mlx_prebuilt.json, and until
+    # one is pinned it fails saying so, rather than skipping: a check that
+    # quietly does not happen reads as a pass.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    env:
+      CUDA_HOME: /usr/local/cuda-12.9
+    steps:
+      - uses: actions/checkout@v7
+
+      # Only to fetch and check the archive: mlx_prebuilt.rb is plain Ruby.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+
+      - name: Install the CUDA toolkit, cuDNN and OpenBLAS
+        # The packages takahashim/mlx-prebuilt built the archive with, from
+        # NVIDIA's own repository, and libclang for bindgen. The driver's
+        # libcuda comes from the toolkit's stubs, which is all a link needs.
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cuda-libraries-dev-12-9 libcudnn9-dev-cuda-12 libopenblas-dev \
+            libclang-dev
+
+      - name: Cache the prebuilt MLX
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/torobi/mlx-prebuilt
+          key: mlx-linux-${{ hashFiles('ext/torobi/mlx_prebuilt.json') }}
+
+      - name: Cache what cargo builds
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-linux-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-linux-
+
+      - name: Fetch and check the pinned MLX
+        run: |
+          prefix=$(ruby -r./ext/torobi/mlx_prebuilt -e 'print MlxPrebuilt.ensure!')
+          echo "TOROBI_MLX_PREFIX=$prefix" >> "$GITHUB_ENV"
+
+      - name: Bind and link the engine
+        run: |
+          cargo test -p torobi-engine --locked --no-run
+          cargo build -p torobi-engine --locked --bin torobi-engine

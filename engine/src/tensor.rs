@@ -7,22 +7,30 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use mlx_rs::transforms::eval;
-use mlx_rs::{Array, Dtype};
+use crate::mlxc::transforms::eval;
+use crate::mlxc::Array;
+/// MLX's dtypes, which a [`Tensor`] is labelled with. Re-exported because
+/// the binding that defines it is the engine's own and not public.
+pub use crate::mlxc::Dtype;
 
 /// A tensor as it crosses the boundary: a dtype, a shape, and the values.
 /// Always a copy, never a handle.
 ///
 /// The dtype travels because a graph can declare an i32 input - which is
 /// what an embedding reads - and a boundary that assumed f32 could not
-/// carry one (docs/plan.md section 5A.2).
+/// carry one (docs/plan.md section 5A.2). It travels *as* the payload's
+/// kind ([`Tensor::dtype`]) rather than beside it, so a label and the
+/// numbers cannot disagree.
+///
+/// `Clone` copies the numbers; nothing here is a handle.
+#[derive(Clone)]
 pub struct Tensor {
-    pub dtype: Dtype,
     pub shape: Vec<i32>,
     pub values: Values,
 }
 
 /// The payload, in the only two forms the boundary carries.
+#[derive(Clone)]
 pub enum Values {
     F32(Vec<f32>),
     I32(Vec<i32>),
@@ -49,7 +57,7 @@ impl std::fmt::Debug for Tensor {
         write!(
             f,
             "Tensor({:?} {:?}, {} values)",
-            self.dtype,
+            self.dtype(),
             self.shape,
             self.values.len()
         )
@@ -57,11 +65,19 @@ impl std::fmt::Debug for Tensor {
 }
 
 impl Tensor {
-    pub fn to_array(&self) -> Array {
-        match &self.values {
-            Values::F32(data) => Array::from_slice(data, &self.shape),
-            Values::I32(data) => Array::from_slice(data, &self.shape),
+    /// What the payload is: f32 or i32, the two the boundary carries.
+    pub fn dtype(&self) -> Dtype {
+        match self.values {
+            Values::F32(_) => Dtype::Float32,
+            Values::I32(_) => Dtype::Int32,
         }
+    }
+
+    pub fn to_array(&self) -> Result<Array> {
+        Ok(match &self.values {
+            Values::F32(data) => Array::from_slice(data, &self.shape)?,
+            Values::I32(data) => Array::from_slice(data, &self.shape)?,
+        })
     }
 
     /// From the bytes the boundary carries: native-endian, four to a value.
@@ -79,22 +95,12 @@ impl Tensor {
             bytes.len()
         );
         let words = bytes.chunks_exact(4).map(|b| [b[0], b[1], b[2], b[3]]);
-        let (dtype, values) = match dtype {
-            "f32" => (
-                Dtype::Float32,
-                Values::F32(words.map(f32::from_ne_bytes).collect()),
-            ),
-            "i32" => (
-                Dtype::Int32,
-                Values::I32(words.map(i32::from_ne_bytes).collect()),
-            ),
+        let values = match dtype {
+            "f32" => Values::F32(words.map(f32::from_ne_bytes).collect()),
+            "i32" => Values::I32(words.map(i32::from_ne_bytes).collect()),
             other => anyhow::bail!("input {name:?}: dtype {other:?} does not cross the boundary"),
         };
-        Ok(Self {
-            dtype,
-            shape,
-            values,
-        })
+        Ok(Self { shape, values })
     }
 
     /// The same tensor as the boundary carries it: the dtype spelled the
@@ -110,8 +116,8 @@ impl Tensor {
     /// it somewhere (into a Ruby String, say) and 200 MB is worth not
     /// doing twice.
     pub fn as_bytes(&self) -> Result<(&'static str, &[u8])> {
-        let spelling = dtype_spelling(self.dtype)
-            .with_context(|| format!("{:?} is not a dtype the boundary carries", self.dtype))?;
+        let spelling = dtype_spelling(self.dtype())
+            .with_context(|| format!("{:?} is not a dtype the boundary carries", self.dtype()))?;
         // Safety: any f32 or i32 is a valid sequence of bytes, and u8
         // needs no alignment beyond what the source already has. This is
         // what bytemuck's cast_slice does, without the dependency.
@@ -171,15 +177,11 @@ pub fn to_tensor(array: &Array) -> Result<Tensor> {
     // here is f32 numbers: they are the numbers it holds, Ruby has no
     // bf16 to put them in, and a label that disagreed with the bytes
     // would be a trap for whoever unpacked them.
-    let (dtype, values) = match array.dtype() {
-        Dtype::Int32 => (Dtype::Int32, Values::I32(array.as_slice::<i32>().to_vec())),
-        _ => (
-            Dtype::Float32,
-            Values::F32(array.as_dtype(Dtype::Float32)?.as_slice::<f32>().to_vec()),
-        ),
+    let values = match array.dtype() {
+        Dtype::Int32 => Values::I32(array.as_slice::<i32>()?.to_vec()),
+        _ => Values::F32(array.as_dtype(Dtype::Float32)?.as_slice::<f32>()?.to_vec()),
     };
     Ok(Tensor {
-        dtype,
         shape: array.shape().to_vec(),
         values,
     })
@@ -207,7 +209,7 @@ mod tests {
     fn reads_f32_in_native_order() {
         let bytes = bytes_of([1.5f32, -2.0], f32::to_ne_bytes);
         let t = Tensor::from_bytes("f32", vec![2], &bytes, "x").unwrap();
-        assert_eq!(t.dtype, Dtype::Float32);
+        assert_eq!(t.dtype(), Dtype::Float32);
         assert_eq!(t.shape, vec![2]);
         match t.values {
             Values::F32(v) => assert_eq!(v, vec![1.5, -2.0]),
@@ -219,7 +221,7 @@ mod tests {
     fn reads_i32_because_an_embedding_reads_ids() {
         let bytes = bytes_of([7i32, 0], i32::to_ne_bytes);
         let t = Tensor::from_bytes("i32", vec![2], &bytes, "ids").unwrap();
-        assert_eq!(t.dtype, Dtype::Int32);
+        assert_eq!(t.dtype(), Dtype::Int32);
         match t.values {
             Values::I32(v) => assert_eq!(v, vec![7, 0]),
             _ => panic!("i32 came back as something else"),
@@ -255,7 +257,7 @@ mod tests {
     fn a_strided_array_comes_back_in_reading_order() {
         // A gradient can arrive through a transpose. Reading it out needs
         // contiguous memory, so to_tensor must not hand back the strides.
-        let a = Array::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let a = Array::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
         let t = to_tensor(&a.transpose_axes(&[1, 0]).unwrap()).unwrap();
         assert_eq!(t.shape, vec![3, 2]);
         match t.values {
@@ -269,18 +271,18 @@ mod tests {
     /// with the bytes would be a trap for whoever unpacked them.
     #[test]
     fn the_boundary_carries_i32_or_f32_and_says_which() {
-        let ids = to_tensor(&Array::from_slice(&[3i32, 4], &[2])).unwrap();
-        assert_eq!(ids.dtype, Dtype::Int32);
+        let ids = to_tensor(&Array::from_slice(&[3i32, 4], &[2]).unwrap()).unwrap();
+        assert_eq!(ids.dtype(), Dtype::Int32);
         assert!(matches!(ids.values, Values::I32(_)));
 
         for other in [
-            Array::from_slice(&[true, false], &[2]),
-            Array::from_slice(&[1.0f32, 0.0], &[2])
+            Array::from_slice(&[true, false], &[2]).unwrap(),
+            Array::from_slice(&[1.0f32, 0.0], &[2]).unwrap()
                 .as_dtype(Dtype::Bfloat16)
                 .unwrap(),
         ] {
             let crossed = to_tensor(&other).unwrap();
-            assert_eq!(crossed.dtype, Dtype::Float32);
+            assert_eq!(crossed.dtype(), Dtype::Float32);
             match crossed.values {
                 Values::F32(v) => assert_eq!(v, vec![1.0, 0.0]),
                 _ => panic!("it should convert, not be reinterpreted"),
@@ -292,18 +294,16 @@ mod tests {
     fn to_array_round_trips_both_payloads() {
         for t in [
             Tensor {
-                dtype: Dtype::Float32,
                 shape: vec![2, 1],
                 values: Values::F32(vec![1.0, 2.0]),
             },
             Tensor {
-                dtype: Dtype::Int32,
                 shape: vec![2, 1],
                 values: Values::I32(vec![1, 2]),
             },
         ] {
-            let back = to_tensor(&t.to_array()).unwrap();
-            assert_eq!(back.dtype, t.dtype);
+            let back = to_tensor(&t.to_array().unwrap()).unwrap();
+            assert_eq!(back.dtype(), t.dtype());
             assert_eq!(back.shape, t.shape);
         }
     }

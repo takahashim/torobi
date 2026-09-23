@@ -82,6 +82,15 @@ pub struct NodeSpec {
 }
 
 /// "input:3" -> (Input, 3); "node:7" -> (Node, 7).
+/// The digest a run is known by: SHA-256 of the description's bytes, as
+/// the Ruby side sent them. One function, because a plan records it and a
+/// checkpoint is checked against it, and the two must never disagree about
+/// which bytes they hashed.
+pub fn digest(graph_json: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(graph_json.as_bytes()))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Ref {
     Input(usize),
