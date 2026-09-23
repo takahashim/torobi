@@ -58,6 +58,9 @@ fn bind_mlx_c() {
         .clang_arg(format!("-I{}", include.display()))
         .allowlist_item("mlx_.*")
         .allowlist_item("MLX_.*")
+        // The layout queries mlx-c marks private with a leading underscore.
+        // `as_slice` needs `_mlx_array_is_row_contiguous`, as mlx-rs does.
+        .allowlist_item("_mlx_array_.*")
         .layout_tests(false)
         .generate_comments(false);
     for name in APPLE_ONLY {
