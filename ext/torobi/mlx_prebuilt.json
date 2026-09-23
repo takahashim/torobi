@@ -11,6 +11,10 @@
     "macos-arm64": {
       "asset": "mlx-v0.32.2-mlxc-c74db5307cc8ce122f48d97ef951b30578674e7f-macos-arm64.tar.gz",
       "digest": "b21fd96d2d62f712b1818e38f8bb8e2420e7c7dacd81dff52eab6728da4d732f"
+    },
+    "linux-x86_64": {
+      "asset": "mlx-v0.32.2-mlxc-c74db5307cc8ce122f48d97ef951b30578674e7f-linux-x86_64-cuda12.tar.gz",
+      "digest": "699f50efb3908fb6f0d7916d6bccc6870044152f38ac7617b1886420834372da"
     }
   }
 }
