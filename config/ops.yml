@@ -44,6 +44,13 @@
   inputs: 1
   attributes: { value: number }
   shape_rule: same_as_input
+# The number divided by the value: what `2.0 / x` is. Its own op because
+# the number cannot be made a graph value of x's shape from x without
+# multiplying x by zero, which is NaN where x is infinite.
+- name: rdiv_scalar
+  inputs: 1
+  attributes: { value: number }
+  shape_rule: same_as_input
 
 - name: neg
   inputs: 1

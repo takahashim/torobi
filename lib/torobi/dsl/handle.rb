@@ -66,23 +66,17 @@ module Torobi
         def *(other) = other * @value
 
         # Subtraction and division do, so these are the reversed forms:
-        # `1.0 - x` is `-(x - 1.0)`, and `1.0 / x` needs the graph to
-        # divide the other way round.
+        # `1.0 - x` is `-(x - 1.0)`, and `1.0 / x` is its own op
+        # (`rdiv_scalar`), since spreading the number to x's shape through
+        # x itself would be NaN wherever x is infinite.
         def -(other) = (other - @value) * -1.0
-        def /(other) = @handle.builder.emit("div", inputs: [filled(other), other])
+
+        def /(other)
+          @handle.builder.emit("rdiv_scalar", inputs: [other], attrs: { value: @value })
+        end
 
         def inspect = "#<Torobi::DSL::Handle::Scalar #{@value}>"
         alias to_s inspect
-
-        private
-
-        # The number as a graph value of the same shape, so `div` has two
-        # sides. Made from the handle rather than beside it, because a
-        # scalar has no shape of its own.
-        def filled(other)
-          ones = @handle.builder.emit("mul_scalar", inputs: [other], attrs: { "value" => 0.0 })
-          @handle.builder.emit("add_scalar", inputs: [ones], attrs: { "value" => @value })
-        end
       end
 
       # The same numbers, read as `count` heads instead of one wide row:
