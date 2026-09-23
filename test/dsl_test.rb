@@ -366,6 +366,12 @@ class DslTest < Minitest::Test
 
     assert_empty Torobi::Shape::RULES - asked_for,
                  "Shape implements rules no op names"
+    # And every rule named is one Inference answers, since it is reached
+    # by that name.
+    Torobi::Shape::RULES.each do |rule|
+      assert Torobi::Shape::Inference.private_method_defined?(rule),
+             "Shape::RULES names #{rule}, and Inference has no such rule"
+    end
     Torobi::Ops.handle_ops.each do |spec|
       assert Torobi::DSL::Handle.method_defined?(spec.name),
              "manifest marks #{spec.name} as a handle op, but Handle does not define it"
