@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "dsl/handle"
+require_relative "dsl/layers"
 require_relative "dsl/builder"
 
 module Torobi

@@ -10,6 +10,8 @@ module Torobi
     # handle. Layers apply immediately: `g.linear(x, 512, name: "wo")`
     # creates the parameters and the nodes in one call.
     class Builder
+      include Layers
+
       # What a graph is built with when nothing is adapted: every parameter
       # trains as declared, and no linear gains anything. The same two
       # questions a `LoRA` answers, so the builder asks them without first
@@ -170,6 +172,32 @@ module Torobi
         emit("parameter", params: [spec.id])
       end
 
+      # Builds a graph with an adapter in scope, so that every linear it
+      # names is trained through a pair of small matrices instead of
+      # being moved itself (`Torobi::LoRA`).
+      #
+      # A block rather than a keyword on `linear`, because what is being
+      # adapted is decided once, by whoever is doing the fine-tune, and a
+      # model description should not have to be rewritten to be adapted:
+      #
+      #   Torobi.graph do |g|
+      #     g.adapting(adapter) { ... the model ... }
+      #   end
+      #
+      # `nil` adapts nothing, so a builder that always writes this reads
+      # the same either way.
+      def adapting(adapter)
+        return yield if adapter.nil?
+        raise ConfigError, "an adapter is already in scope" unless @adapter.equal?(NoAdapter)
+
+        @adapter = adapter
+        begin
+          yield
+        ensure
+          @adapter = NoAdapter
+        end
+      end
+
       # --- primitive joins ---
 
       def matmul(a, b) = emit("matmul", inputs: [a, b])
@@ -231,93 +259,7 @@ module Torobi
         emit("cross_entropy", inputs: [logits, targets])
       end
 
-      # --- layers: parameters plus their application, in one call ---
-
-      def linear(x, d_out, name:, bias: true)
-        label = name
-        d_in = concrete_last_dim!(x, "linear #{scoped(name).inspect}")
-        # PyTorch layout [d_out, d_in], so pretrained checkpoints map 1:1.
-        w = param("#{name}.weight", [d_out, d_in], dtype: x.dtype,
-                  init: { "type" => "kaiming_uniform" })
-        wt = emit("transpose", inputs: [w], attrs: { axes: [1, 0] })
-        y = matmul(x, wt)
-        y += param("#{name}.bias", [d_out], dtype: x.dtype, init: { "type" => "zeros" }) if bias
-        y += @adapter.contribution(self, x, d_in:, d_out:, name:) if @adapter.wraps?(scoped(name))
-        self.name(label, y)
-      end
-
-      # Builds a graph with an adapter in scope, so that every linear it
-      # names is trained through a pair of small matrices instead of
-      # being moved itself (`Torobi::LoRA`).
-      #
-      # A block rather than a keyword on `linear`, because what is being
-      # adapted is decided once, by whoever is doing the fine-tune, and a
-      # model description should not have to be rewritten to be adapted:
-      #
-      #   Torobi.graph do |g|
-      #     g.adapting(adapter) { ... the model ... }
-      #   end
-      #
-      # `nil` adapts nothing, so a builder that always writes this reads
-      # the same either way.
-      def adapting(adapter)
-        return yield if adapter.nil?
-        raise ConfigError, "an adapter is already in scope" unless @adapter.equal?(NoAdapter)
-
-        @adapter = adapter
-        begin
-          yield
-        ensure
-          @adapter = NoAdapter
-        end
-      end
-
-      # The table, and the lookup into it.
-      #
-      # `dtype:` is where a model's precision is decided: everything
-      # downstream takes its dtype from what it is given (`linear` and the
-      # norms use `x.dtype`), so a bf16 table makes a bf16 model.
-      def embedding(ids, vocab:, dim:, name:, dtype: :f32)
-        table = param("#{name}.weight", [vocab, dim], dtype:,
-                      init: { "type" => "normal", "std" => 0.02 })
-        emit("take", inputs: [table, ids])
-      end
-
-      def layer_norm(x, name:, bias: false, eps: 1.0e-5)
-        d = concrete_last_dim!(x, "layer_norm #{scoped(name).inspect}")
-        w = param("#{name}.weight", [d], dtype: x.dtype, init: { "type" => "ones" })
-        inputs = [x, w]
-        inputs << param("#{name}.bias", [d], dtype: x.dtype, init: { "type" => "zeros" }) if bias
-        emit("layer_norm", inputs:, attrs: { eps: })
-      end
-
-      # `offset:` is added to the learned weight before it scales.
-      #
-      # Gemma stores its norms as `w` and applies `(1 + w)`, so its
-      # weights sit around zero where everyone else's sit around one.
-      # The op is the same op; what differs is what is handed to it, and
-      # that is a fact about the checkpoint rather than about norms.
-      def rms_norm(x, name:, eps: 1.0e-5, offset: 0.0)
-        d = concrete_last_dim!(x, "rms_norm #{scoped(name).inspect}")
-        w = param("#{name}.weight", [d], dtype: x.dtype,
-                                         init: { "type" => offset.zero? ? "ones" : "zeros" })
-        w += offset unless offset.zero?
-        emit("rms_norm", inputs: [x, w], attrs: { eps: })
-      end
-
-      # GeGLU as ModernBERT uses it: one projection producing act and gate,
-      # gelu on the act half, a projection back down.
-      def geglu(x, d_hidden, name:)
-        d_in = concrete_last_dim!(x, "geglu #{scoped(name).inspect}")
-        scope name do
-          a, gate = linear(x, d_hidden * 2, name: "wi", bias: false).split(2, axis: -1)
-          linear(a.gelu * gate, d_in, name: "wo", bias: false)
-        end
-      end
-
-      # --- objective vocabulary ---
-
-      def mse(a, b) = mean((a - b).square)
+      # --- values that do not train ---
 
       # Values whose gradient does not flow back. A teacher's output goes
       # through this (docs/plan.md section 5A.3).
@@ -411,6 +353,10 @@ module Torobi
       end
 
       def scoped(name) = (@scopes + [name.to_s]).join(".")
+
+      # The adapter in scope (`NoAdapter` when there is none), for a layer
+      # that may be adapted.
+      attr_reader :adapter
 
       def own!(handle, where:)
         unless handle.is_a?(Handle)
