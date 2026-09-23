@@ -212,7 +212,6 @@ pub fn field(name: &str, shape: &[i32], data: &[f32]) -> (String, crate::tensor:
     (
         name.to_string(),
         crate::tensor::Tensor {
-            dtype: crate::mlxc::Dtype::Float32,
             shape: shape.to_vec(),
             values: crate::tensor::Values::F32(data.to_vec()),
         },
@@ -225,7 +224,6 @@ pub fn batch_x(rows: &[f32]) -> crate::tensor::Batch {
     [(
         "x".to_string(),
         crate::tensor::Tensor {
-            dtype: crate::mlxc::Dtype::Float32,
             shape: vec![n, 2],
             values: crate::tensor::Values::F32(rows.to_vec()),
         },

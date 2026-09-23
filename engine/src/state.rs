@@ -874,7 +874,6 @@ mod tests {
     fn put_writes_a_parameter_and_refuses_a_mismatch() {
         let (plan, mut state) = open(fixtures::scaled_mean(), sgd(0.1));
         let good = Tensor {
-            dtype: crate::mlxc::Dtype::Float32,
             shape: vec![2],
             values: Values::F32(vec![9.0, 9.0]),
         };
@@ -882,7 +881,6 @@ mod tests {
         assert_eq!(values(&state.fetch(&plan, "m.w").unwrap()), vec![9.0, 9.0]);
 
         let wrong_shape = Tensor {
-            dtype: crate::mlxc::Dtype::Float32,
             shape: vec![3],
             values: Values::F32(vec![0.0; 3]),
         };
@@ -898,7 +896,6 @@ mod tests {
         // the parameter holds rather than refused: what a caller can say
         // is the numbers, and the width is the graph's.
         let integers = Tensor {
-            dtype: crate::mlxc::Dtype::Int32,
             shape: vec![2],
             values: Values::I32(vec![7, 8]),
         };

@@ -30,7 +30,7 @@ use crate::optimizer::Config as OptimizerConfig;
 use crate::plan::{Plan, Weights};
 use crate::runtime::{runtime, RuntimeError};
 use crate::state::TrainState;
-use crate::tensor::{to_tensor, Batch, Tensor, Values};
+use crate::tensor::{to_tensor, Batch, Tensor};
 
 /// What a caller gets back: either the value, or which layer refused.
 pub type Outcome<T> = std::result::Result<T, RuntimeError>;
@@ -168,22 +168,7 @@ impl SessionCore {
     /// gets its own. A `full` tap therefore costs the tensor again here,
     /// which is the other half of why a standing tap should reduce.
     pub(crate) fn tapped(&self) -> Vec<(String, Tensor)> {
-        self.tapped
-            .iter()
-            .map(|(name, tensor)| {
-                (
-                    name.clone(),
-                    Tensor {
-                        dtype: tensor.dtype,
-                        shape: tensor.shape.clone(),
-                        values: match &tensor.values {
-                            Values::F32(v) => Values::F32(v.clone()),
-                            Values::I32(v) => Values::I32(v.clone()),
-                        },
-                    },
-                )
-            })
-            .collect()
+        self.tapped.iter().map(|(name, tensor)| (name.clone(), tensor.clone())).collect()
     }
 
     /// Which parameters are currently differentiated, by qualified path.
@@ -812,7 +797,6 @@ mod tests {
                 (
                     name.clone(),
                     Tensor {
-                        dtype: tensor.dtype,
                         shape: tensor.shape.clone(),
                         values,
                     },
@@ -1228,6 +1212,7 @@ mod tests {
 mod evaluation_tests {
     use super::tests::*;
     use super::*;
+    use crate::tensor::Values;
     use crate::fixtures;
 
     #[test]
@@ -1260,7 +1245,6 @@ mod evaluation_tests {
             .put(
                 "m.w",
                 &Tensor {
-                    dtype: crate::mlxc::Dtype::Float32,
                     shape: vec![2],
                     values: Values::F32(vec![1.0, 1.0]),
                 },

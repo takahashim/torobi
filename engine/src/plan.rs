@@ -335,9 +335,9 @@ fn bind_one(field: &str, spec: &InputSpec, given: &Tensor) -> Result<Array> {
     let declared = crate::tensor::dtype_named(&spec.dtype)
         .with_context(|| format!("input {field:?}: unknown dtype in the graph"))?;
     anyhow::ensure!(
-        given.dtype == declared,
+        given.dtype() == declared,
         "input {field:?}: given {:?}, declared {}",
-        given.dtype,
+        given.dtype(),
         spec.dtype
     );
     let expected: usize = given.shape.iter().map(|d| *d as usize).product();
@@ -726,15 +726,7 @@ mod tests {
     }
 
     fn tensor(shape: Vec<i32>, values: Values) -> Tensor {
-        let dtype = match values {
-            Values::F32(_) => Dtype::Float32,
-            Values::I32(_) => Dtype::Int32,
-        };
-        Tensor {
-            dtype,
-            shape,
-            values,
-        }
+        Tensor { shape, values }
     }
 
     fn plan_for_bind() -> Plan {
