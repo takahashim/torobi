@@ -215,9 +215,9 @@ comes out of the workspace manifest and `engine/Cargo.toml` goes back to
 naming versions alone. Nothing else in the tree depends on the fork, which
 is what keeps that a deletion rather than a migration.
 
-Until then the fork is `takahashim/mlx-rs`, branch `linux-cuda`, pinned by
-revision rather than by branch: a branch is a name that moves, and what is
-compiled here should be a thing that does not. The four commits are one
+Until it went, the fork was `takahashim/mlx-rs`, branch `linux-cuda`,
+pinned by revision rather than by branch: a branch is a name that moves,
+and what is compiled here should be a thing that does not. The four commits are one
 per row of the table above, and each leaves macOS behaviour alone - which
 is checkable, and was checked, by building and testing this project
 against the patch on a Mac before anything else was done with it.
