@@ -78,13 +78,26 @@ class JournalTest < Minitest::Test
     assert_match(/not a journal entry kind/, e.message)
   end
 
+  # Another schema is refused rather than read: before 3 a span's digest
+  # named field names, so replaying one under this version's meaning would
+  # report the data as changed when it had not.
+  def test_a_journal_of_another_schema_is_refused
+    text = <<~JSONL
+      {"schema_version":2,"provenance":{"config":{},"runtime":{}}}
+      {"kind":"span","step":1,"loss":0.5,"batches_digest":"d"}
+    JSONL
+
+    e = assert_raises(ArgumentError) { Torobi::Journal.read(text) }
+    assert_match(/schema 2/, e.message)
+  end
+
   # Every kind reads back as what was written, so a writer and a reader
   # agree by construction. A knob set to nil is a decision (`clip: nil`
   # lifts the cap) and is held rather than dropped.
   def test_every_kind_round_trips
     journal = Torobi::Journal.new(Torobi::Provenance.of(config))
     journal.span(step: 1, loss: 0.5, batches_digest: "d")
-    journal.accumulate(step: 1, parts: 2, loss: 0.25)
+    journal.accumulate(step: 1, parts: 2, loss: 0.25, batches_digest: "f")
     journal.span(step: 2, loss: 0.25, parts: 2)
     journal.adjust(step: 2, lr: 0.1, clip: nil)
     journal.freezing(step: 2, pattern: "m.*", frozen: true, moved: ["m.w"])
@@ -154,7 +167,7 @@ class JournalTest < Minitest::Test
   # leaves a readable file" is the promise the flushing is for.
   def test_a_truncated_last_line_is_dropped_and_the_rest_reads
     whole = <<~JSONL
-      {"schema_version":2,"provenance":{"config":{},"runtime":{}}}
+      {"schema_version":3,"provenance":{"config":{},"runtime":{}}}
       {"kind":"span","step":1,"loss":0.5}
     JSONL
     text = "#{whole}{\"kind\":\"span\",\"step\":2,\"lo"
@@ -169,7 +182,7 @@ class JournalTest < Minitest::Test
   # it would be inventing a record.
   def test_a_broken_line_in_the_middle_is_an_error
     text = <<~JSONL
-      {"schema_version":2,"provenance":{"config":{},"runtime":{}}}
+      {"schema_version":3,"provenance":{"config":{},"runtime":{}}}
       {"kind":"span","ste
       {"kind":"span","step":2,"loss":0.4}
     JSONL

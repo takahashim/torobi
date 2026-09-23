@@ -18,9 +18,12 @@ module Torobi
   #                        Ruby that drove the run.
   #
   # Neither replays the data: a journal names batches by digest rather
-  # than holding them, so the caller supplies them and the digests say
-  # whether they are the same ones. Both open the session the way the run
-  # was opened, with the optimizer and seed its provenance recorded.
+  # than holding them, so the caller supplies them. Action replay holds
+  # each one to the digest that was recorded (`Batch#digest`); a rerun
+  # holds the run to the observations instead, and the losses those
+  # observations came from move if the data did. Both open the session
+  # the way the run was opened, with the optimizer and seed its
+  # provenance recorded.
   module Replay
     # One place the replay and the record disagree.
     Divergence = Data.define(:step, :expected, :actual, :why)
@@ -119,13 +122,32 @@ module Torobi
         when Journal::Freezing
           entry.frozen ? session.freeze!(entry.pattern) : session.unfreeze!(entry.pattern)
         when Journal::Accumulate
-          session.accumulate(next_batch)
+          session.accumulate(checked(entry, next_batch))
         when Journal::Span
-          loss = entry.accumulated? ? session.apply! : session.step!(next_batch)
-          compare(entry, loss)
+          if entry.accumulated?
+            compare(entry, session.apply!)
+          else
+            compare(entry, session.step!(checked(entry, next_batch)))
+          end
         end
         # A put's value is not in the journal, only its digest; observations
         # and notes change nothing.
+      end
+
+      # The batch to feed, after holding it to the digest the journal
+      # recorded. It is fed either way: a mismatch is reported and the
+      # replay goes on, so the losses can be compared too.
+      def checked(entry, batch)
+        batch = Batch.of(batch)
+        recorded = entry.batches_digest
+        return batch if recorded.nil?
+
+        actual = batch.digest
+        return batch if actual == recorded
+
+        diverged(step: entry.step, expected: recorded, actual:,
+                 why: "the batch differs from the one that was recorded")
+        batch
       end
 
       def compare(entry, loss)

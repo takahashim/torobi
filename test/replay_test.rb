@@ -97,6 +97,50 @@ class ReplayTest < Minitest::Test
     assert_match(/divergence/, result.to_s)
   end
 
+  # The digest names the data, not only the shape of the batch, so a
+  # replay can tell one batch from another and the record is not a lie.
+  def test_a_batch_digest_depends_on_the_data
+    one = Torobi::Batch.of(x: { shape: [1, DIM], data: [1.0, 2.0] })
+    same = Torobi::Batch.of(x: { shape: [1, DIM], data: [1.0, 2.0] })
+    other = Torobi::Batch.of(x: { shape: [1, DIM], data: [1.0, 2.5] })
+
+    assert_equal one.digest, same.digest
+    refute_equal one.digest, other.digest
+  end
+
+  # Other data is caught by the digest the journal recorded, not only by
+  # whatever loss it happens to produce.
+  def test_action_replay_checks_the_batch_digest
+    data = batches
+    journal = record(data)
+    other = batches(8, seed: 99)
+
+    result = Torobi::Replay.action(journal, config:, weights:, batches: other)
+
+    divergence = result.divergences.find { |d| d.why =~ /batch differs/ }
+
+    refute_nil divergence, result.to_s
+    assert_equal 1, divergence.step
+  end
+
+  def test_action_replay_checks_the_accumulated_part_digest
+    data = batches(6)
+    program = lambda do |session, all|
+      all.each_slice(3) do |parts|
+        parts.each { |part| session.accumulate(part) }
+        session.apply!
+      end
+    end
+    io = StringIO.new
+    Torobi::Session.open(config, weights: weights, io:, optimizer:) { |s| program.call(s, data) }
+
+    result = Torobi::Replay.action(io.string, config:, weights:, batches: batches(6, seed: 99))
+
+    data_divergences = result.divergences.select { |d| d.why =~ /batch differs/ }
+
+    refute_empty(data_divergences, result.to_s)
+  end
+
   def test_too_few_batches_is_refused_by_count
     data = batches
     journal = record(data)

@@ -178,8 +178,7 @@ module Torobi
       batch = Batch.of(batch)
       loss = atomically do
         value = @native.run_step(batch.to_native)
-        @journal&.span(step: @native.step, loss: value,
-                       batches_digest: Provenance.digest_of(batch.names))
+        @journal&.span(step: @native.step, loss: value, batches_digest: batch.digest)
         value
       end
       # Outside the fence: a hook runs the caller's own code, and that
@@ -209,9 +208,11 @@ module Torobi
     # one moves what a gradient is for and the other does not hold them.
     def accumulate(batch)
       needs_loss!("accumulating")
+      batch = Batch.of(batch)
       atomically do
-        loss = @native.accumulate(Batch.of(batch).to_native)
-        @journal&.accumulate(step: @native.step, parts: @native.accumulated, loss:)
+        loss = @native.accumulate(batch.to_native)
+        @journal&.accumulate(step: @native.step, parts: @native.accumulated, loss:,
+                             batches_digest: batch.digest)
         loss
       end
     end

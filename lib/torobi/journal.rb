@@ -28,7 +28,10 @@ module Torobi
   # one and the replay that reads it back agree by construction rather than
   # by string keys.
   class Journal
-    SCHEMA_VERSION = 2
+    # 3: `batches_digest` names the data a batch held rather than only its
+    # field names, and an accumulation carries one too, so a replay can
+    # tell whether the batches it is handed are the ones that ran.
+    SCHEMA_VERSION = 3
 
     def self.now = Time.now.utc.iso8601
 
@@ -67,7 +70,8 @@ module Torobi
     end
 
     # A step was taken: on one batch, or on the `parts` accumulated before
-    # it. `batches_digest` names the batch without holding it.
+    # it. `batches_digest` (`Batch#digest`) is nil when it took the parts,
+    # which have their own `Accumulate` entries.
     Span = Data.define(:step, :at, :steps, :loss, :parts, :batches_digest) do
       include Entry
 
@@ -88,14 +92,21 @@ module Torobi
       end
     end
 
-    # One batch's gradients were added to what is waiting; `parts` is how
-    # many are waiting now.
-    Accumulate = Data.define(:step, :at, :parts, :loss) do
+    # One batch's gradients were added to what is waiting. `batches_digest`
+    # names that part's data, so a replay can check the parts it is handed.
+    Accumulate = Data.define(:step, :at, :parts, :loss, :batches_digest) do
       include Entry
 
-      def self.read(h, step:, at:) = new(step:, at:, parts: h.fetch("parts"), loss: h["loss"])
+      def self.read(h, step:, at:)
+        new(step:, at:, parts: h.fetch("parts"), loss: h["loss"],
+            batches_digest: h["batches_digest"])
+      end
 
-      def payload = { "parts" => parts, "loss" => loss }
+      def initialize(step:, parts:, loss: nil, batches_digest: nil, at: nil)
+        super
+      end
+
+      def payload = { "parts" => parts, "loss" => loss, "batches_digest" => batches_digest }.compact
     end
 
     # Knobs turned, by name, to the value the window set. A knob set to nil
@@ -222,7 +233,9 @@ module Torobi
       add(Span.new(step:, loss:, parts:, batches_digest:))
     end
 
-    def accumulate(step:, parts:, loss:) = add(Accumulate.new(step:, parts:, loss:))
+    def accumulate(step:, parts:, loss:, batches_digest: nil)
+      add(Accumulate.new(step:, parts:, loss:, batches_digest:))
+    end
 
     # The value is what the window set, not what it was.
     def adjust(step:, **knobs) = add(Adjust.new(step:, knobs:))
@@ -261,7 +274,19 @@ module Torobi
       lines = text.lines
       lines.pop if lines.last && !lines.last.end_with?("\n")
       header, *entries = lines.reject { |line| line.strip.empty? }.map { |line| JSON.parse(line) }
-      Record.new(header: Header.from_h(header), entries: entries.map { |h| Entry.from_h(h) })
+      header = Header.from_h(header)
+      # Refused rather than read: an entry does not mean the same thing
+      # across a schema change (before 3, `batches_digest` named a batch's
+      # field names rather than its data), and a replay of one under the
+      # other's meaning would report the data as changed when it had not.
+      unless header.schema_version == SCHEMA_VERSION
+        raise ArgumentError,
+              "this journal is schema #{header.schema_version}, and this version reads " \
+              "schema #{SCHEMA_VERSION}; what its entries mean is not the same across a " \
+              "schema change, so it is refused rather than read"
+      end
+
+      Record.new(header:, entries: entries.map { |h| Entry.from_h(h) })
     end
 
     private

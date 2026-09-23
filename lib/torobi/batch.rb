@@ -35,6 +35,20 @@ module Torobi
 
     def fetch(name) = @fields.fetch(name.to_s)
 
+    # A digest of the data, so a journal can name the batch it was fed
+    # without holding it (`Provenance.digest_of`), and a replay can say
+    # whether the data it is given is the data that was recorded.
+    #
+    # Reading the whole payload makes this a per-step cost proportional to
+    # the batch. It is paid only where a journal is written: `Session`
+    # computes it as the argument to a `&.` call, and a run that records
+    # nothing computes nothing.
+    def digest
+      Provenance.digest_of(*@fields.sort.flat_map do |name, tensor|
+        [name, tensor.dtype.to_s, tensor.shape, tensor.bytes]
+      end)
+    end
+
     # What the engine is handed: {name => [dtype, shape, bytes]}.
     def to_native = @fields.transform_values(&:to_native)
   end

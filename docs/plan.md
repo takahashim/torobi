@@ -425,6 +425,10 @@ Ruby に住む。除外されるのは「経路を通らない実行」(Ruby コ
 - dtype、backend、compile signature
 - **窓で読んだ値**(metrics、tap)。v3.1 は「読み取りは journal 不要」としたが、
   **読んだ値から Ruby が判断する以上、判断の入力は記録が要る**。訂正する。
+- **step が読んだ batch のデータ**。値の digest(`Batch#digest`)で名指しし、action replay が
+  照合する。payload 全体を読むため step あたりのコストは batch サイズに比例するが、journal を
+  書くときだけ払う。スキーマは 3 で、それ以前の digest はフィールド名を指していたため、
+  別スキーマの journal は読まずに拒否する(fail closed)。
 
 ### 8.6 replay の 2 モード(v3.1 の「決定的に再演」の精密化)
 
