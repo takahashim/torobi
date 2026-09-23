@@ -175,11 +175,11 @@ module Torobi
     # proceed.
     def step!(batch)
       needs_loss!("a step")
-      packed = Batch.pack(batch)
+      batch = Batch.of(batch)
       loss = atomically do
-        value = @native.run_step(packed)
+        value = @native.run_step(batch.to_native)
         @journal&.span(step: @native.step, loss: value,
-                       batches_digest: Provenance.digest_of(batch.keys.map(&:to_s)))
+                       batches_digest: Provenance.digest_of(batch.names))
         value
       end
       # Outside the fence: a hook runs the caller's own code, and that
@@ -210,7 +210,7 @@ module Torobi
     def accumulate(batch)
       needs_loss!("accumulating")
       atomically do
-        loss = @native.accumulate(Batch.pack(batch))
+        loss = @native.accumulate(Batch.of(batch).to_native)
         @journal&.accumulate(step: @native.step, parts: @native.accumulated, loss:)
         loss
       end
@@ -283,7 +283,7 @@ module Torobi
     # to apply; `observe` is how a decision made on one gets recorded.
     def evaluate(batch)
       needs_loss!("evaluate")
-      @native.evaluate(Batch.pack(batch))
+      @native.evaluate(Batch.of(batch).to_native)
     end
 
     # What the models produce for `batch`, by qualified output name.
@@ -322,7 +322,7 @@ module Torobi
       end
 
       wanted = Array(outputs).map(&:to_s)
-      values_of(@native.forward(Batch.pack(batch), wanted))
+      values_of(@native.forward(Batch.of(batch).to_native, wanted))
     end
 
     # The same batch for `steps` steps. For fixed-data spikes and tests;
@@ -516,10 +516,11 @@ module Torobi
     # window's writing half, and recorded by digest rather than by value -
     # a journal names what was written without holding it.
     def put(path, tensor)
-      packed = Batch.pack({ path.to_s => tensor }).fetch(path.to_s)
+      tensor = TensorData.from(tensor, where: path.to_s)
       atomically do
-        @native.put(path.to_s, packed)
-        @journal&.put(step: @native.step, path: path.to_s, digest: Provenance.digest_of(packed[2]))
+        @native.put(path.to_s, tensor.to_native)
+        @journal&.put(step: @native.step, path: path.to_s,
+                      digest: Provenance.digest_of(tensor.bytes))
       end
       self
     end
@@ -584,8 +585,7 @@ module Torobi
     # and was 600 MB of resident memory as a Ruby Array, for a value most
     # callers save or compare rather than read.
     def fetch(path)
-      dtype, shape, bytes = @native.fetch(path.to_s)
-      TensorData.new(shape, bytes, dtype: dtype.to_sym)
+      TensorData.from_native(*@native.fetch(path.to_s))
     end
 
     # The gradients of the loss with respect to named batch fields, by
@@ -604,13 +604,13 @@ module Torobi
     def field_gradients(batch, of:)
       needs_loss!("a gradient")
       names = Array(of).map(&:to_s)
-      values_of(@native.field_gradients(Batch.pack(batch), names))
+      values_of(@native.field_gradients(Batch.of(batch).to_native, names))
     end
 
     # The gradients for `batch`, by parameter path. Does not update anything.
     def gradients(batch)
       needs_loss!("a gradient")
-      values_of(@native.gradients(Batch.pack(batch)))
+      values_of(@native.gradients(Batch.of(batch).to_native))
     end
 
     private
@@ -622,7 +622,7 @@ module Torobi
     # payload packed. How to read that is one fact and lives once.
     def values_of(answered)
       answered.to_h do |name, dtype, shape, bytes|
-        [name, TensorData.new(shape, bytes, dtype: dtype.to_sym)]
+        [name, TensorData.from_native(dtype, shape, bytes)]
       end
     end
 

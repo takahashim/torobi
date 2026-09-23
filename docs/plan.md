@@ -246,7 +246,7 @@ payload は native-endian の 4 byte 値。dtype が渡るのは、graph が i32
 
 512 行の step が 5.3 倍速くなった。encoding は依然として大きな batch では step の
 半分強を占めるので、次に効くのは「呼び出し側が最初から packed で持つ」ことである
-(`Torobi::Batch.pack` は String をそのまま通す)。**投入キューは引き続き不要**。
+(`TensorData.from` は packed 済みの String をそのまま通す)。**投入キューは引き続き不要**。
 
 ### 5A.3 model graph と objective graph の接続
 

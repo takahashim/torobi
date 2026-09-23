@@ -24,25 +24,62 @@ module Torobi
     attr_reader :dtype, :shape, :bytes
 
     # Already-packed bytes, native-endian. The form the boundary carries,
-    # so this is the constructor the others end at.
-    def initialize(shape, bytes, dtype: :f32)
+    # so this is the constructor the others end at. `where` names the
+    # tensor in a refusal, when the caller knows it by a name.
+    def initialize(shape, bytes, dtype: :f32, where: nil)
+      TensorData.format(dtype)
       @dtype = dtype.to_sym
       @shape = shape.map { Integer(_1) }.freeze
       @bytes = bytes.b.freeze
-      format!
-      expected = size * FORMATS.fetch(@dtype).last
+      expected = size * value_size
       unless @bytes.bytesize == expected
         raise ArgumentError,
-              "#{@shape.inspect} of #{@dtype} wants #{expected} bytes, got #{@bytes.bytesize}"
+              "#{"#{where}: " if where}#{@shape.inspect} of #{@dtype} wants #{expected} " \
+              "bytes, got #{@bytes.bytesize}"
       end
       freeze
     end
 
     class << self
+      # The [pack directive, bytes per value] a dtype crosses as, or an
+      # ArgumentError naming the ones that can.
+      def format(dtype)
+        FORMATS.fetch(dtype.to_sym) do
+          raise ArgumentError,
+                "dtype #{dtype.inspect} does not cross the boundary (#{FORMATS.keys.join(", ")})"
+        end
+      end
+
+      # Whatever a caller wrote a tensor as: a TensorData, or the
+      # {shape:, data:, dtype:} Hash whose data is a flat Array of numbers
+      # or an already-packed String. `where` names it in a refusal.
+      def from(value, where: "a tensor")
+        return value if value.is_a?(TensorData)
+
+        unless value.is_a?(Hash)
+          raise ArgumentError, "#{where} is a #{value.class}; a tensor is a TensorData " \
+                               "or {shape:, data:, dtype:}"
+        end
+        field = ->(key) { value.fetch(key) { value.fetch(key.to_s) } }
+        dtype = value[:dtype] || value["dtype"] || :f32
+        unless FORMATS.key?(dtype.to_sym)
+          raise ArgumentError, "#{where}: dtype #{dtype.inspect} does not cross the boundary " \
+                               "(#{FORMATS.keys.join(", ")})"
+        end
+        data = field.call(:data)
+        shape = field.call(:shape)
+        bytes = data.is_a?(String) ? data : data.pack("#{format(dtype).first}*")
+        new(shape, bytes, dtype:, where:)
+      end
+
+      # What the engine answers with: the dtype and shape readable, the
+      # payload packed.
+      def from_native(dtype, shape, bytes) = new(shape, bytes, dtype: dtype.to_sym)
+
       # From a flat Array of numbers. The plain way, and the expensive one:
       # every element exists in Ruby before any of it is packed.
       def from_a(shape, data, dtype: :f32)
-        directive, = FORMATS.fetch(dtype.to_sym) { unknown!(dtype) }
+        directive, = format(dtype)
         new(shape, data.pack("#{directive}*"), dtype:)
       end
 
@@ -89,14 +126,8 @@ module Torobi
 
       # One value as its bytes.
       def one(value, dtype)
-        directive, = FORMATS.fetch(dtype.to_sym) { unknown!(dtype) }
+        directive, = format(dtype)
         [value].pack(directive)
-      end
-
-      def unknown!(dtype)
-        raise ArgumentError,
-              "dtype #{dtype.inspect} does not cross the boundary " \
-              "(#{FORMATS.keys.join(", ")})"
       end
     end
 
@@ -111,6 +142,13 @@ module Torobi
     def size = shape.inject(1, :*)
 
     def bytesize = bytes.bytesize
+
+    # How many bytes one value takes.
+    def value_size = FORMATS.fetch(dtype).last
+
+    # What the engine is handed: the dtype and shape readable, the payload
+    # packed.
+    def to_native = [dtype.to_s, shape, bytes]
 
     # The numbers, when a caller wants to look at them. Builds the Array
     # this class exists to avoid, so it is a question rather than a habit.
@@ -136,15 +174,5 @@ module Torobi
 
     def inspect = "#<Torobi::TensorData #{dtype}#{shape.inspect} #{bytesize} bytes>"
     alias to_s inspect
-
-    private
-
-    def format!
-      FORMATS.fetch(dtype) do
-        raise ArgumentError,
-              "dtype #{dtype.inspect} does not cross the boundary " \
-              "(#{FORMATS.keys.join(", ")})"
-      end
-    end
   end
 end
