@@ -121,20 +121,20 @@ class AccumulateTest < Minitest::Test
     end
   end
 
-  # The record follows the same rule as everything else in the window: what
-  # happened is in the journal, and what was read is an observation.
+  # What happened is in the journal, as its own kind: an accumulated part
+  # is not an observation, so a rerun is not held to it as one.
   def test_the_journal_holds_the_parts_and_the_step
     io = StringIO.new
     Torobi::Session.open(config, weights:, optimizer: { kind: :sgd, lr: 0.1 }, io:) do |s|
       2.times { s.accumulate(batch) }
       s.apply!
     end
-    entries = io.string.lines.drop(1).map { |line| JSON.parse(line) }
-    observed = entries.select { |e| e["kind"] == "observe" }
-    span = entries.find { |e| e["kind"] == "span" }
+    record = Torobi::Journal.read(io.string)
+    span = record.of(Torobi::Journal::Span).first
 
-    assert_equal([1, 2], observed.map { |e| e["accumulated"] })
-    assert_equal 2, span.fetch("parts")
-    assert_equal 1, span.fetch("steps")
+    assert_equal([1, 2], record.of(Torobi::Journal::Accumulate).map(&:parts))
+    assert_empty record.of(Torobi::Journal::Observe)
+    assert_equal 2, span.parts
+    assert_equal 1, span.steps
   end
 end

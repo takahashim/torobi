@@ -117,12 +117,11 @@ module Torobi
       # Gathered whether or not anything is journalling: a checkpoint
       # records it too, so that what it holds can be identified later
       # (docs/plan.md section 11.2).
-      provenance = Provenance.of(config, dataset:,
-                                 extra: { "optimizer" => optimizer, "seed" => seed })
+      provenance = Provenance.of(config, dataset:, optimizer:, seed:)
       journal ||= Journal.new(provenance, io:) if io
       session = new(native, journal:, provenance:, loss: config.loss?)
-      journal&.note(step: 0, event: "opened", seed:,
-                    optimizer: optimizer.transform_keys(&:to_s))
+      # What it was opened with is the header's provenance; this marks when.
+      journal&.note(step: 0, event: "opened")
       return session unless block_given?
 
       begin
@@ -176,11 +175,11 @@ module Torobi
     # proceed.
     def step!(batch)
       needs_loss!("a step")
-      packed = Batch.pack(batch)
+      batch = Batch.of(batch)
       loss = atomically do
-        value = @native.run_step(packed)
-        @journal&.span(steps: 1, loss: value, step: @native.step,
-                       batches_digest: Provenance.digest_of(batch.keys.map(&:to_s)))
+        value = @native.run_step(batch.to_native)
+        @journal&.span(step: @native.step, loss: value,
+                       batches_digest: Provenance.digest_of(batch.names))
         value
       end
       # Outside the fence: a hook runs the caller's own code, and that
@@ -211,8 +210,8 @@ module Torobi
     def accumulate(batch)
       needs_loss!("accumulating")
       atomically do
-        loss = @native.accumulate(Batch.pack(batch))
-        @journal&.observe(step: @native.step, accumulated: @native.accumulated, loss:)
+        loss = @native.accumulate(Batch.of(batch).to_native)
+        @journal&.accumulate(step: @native.step, parts: @native.accumulated, loss:)
         loss
       end
     end
@@ -223,8 +222,7 @@ module Torobi
       parts = @native.accumulated
       loss = atomically do
         value = @native.apply
-        @journal&.span(steps: 1, loss: value, step: @native.step, parts:,
-                       batches_digest: nil)
+        @journal&.span(step: @native.step, loss: value, parts:)
         value
       end
       @hooks.fire(:step, step: @native.step, loss:)
@@ -285,7 +283,7 @@ module Torobi
     # to apply; `observe` is how a decision made on one gets recorded.
     def evaluate(batch)
       needs_loss!("evaluate")
-      @native.evaluate(Batch.pack(batch))
+      @native.evaluate(Batch.of(batch).to_native)
     end
 
     # What the models produce for `batch`, by qualified output name.
@@ -324,7 +322,7 @@ module Torobi
       end
 
       wanted = Array(outputs).map(&:to_s)
-      values_of(@native.forward(Batch.pack(batch), wanted))
+      values_of(@native.forward(Batch.of(batch).to_native, wanted))
     end
 
     # The same batch for `steps` steps. For fixed-data spikes and tests;
@@ -430,7 +428,7 @@ module Torobi
       merged!(model)
       atomically do
         written = @native.export_model(model.to_s, dir.to_s)
-        carried = Export.publish(dir.to_s, from:, pooling:, pooling_dim:)
+        carried = Export.new(dir, from:, pooling:, pooling_dim:).publish
         # Last, so that a record of an export is a record of one that is
         # on disk whole.
         @journal&.note(step: @native.step, event: "exported", model: model.to_s,
@@ -441,8 +439,8 @@ module Torobi
 
     # Writes the run's state to `dir`, atomically: parameters, optimizer
     # slots, the step counts, the description they belong to, and this
-    # run's provenance. Returns the path. Interrupting it leaves no
-    # half-checkpoint.
+    # run's provenance. Returns the `Torobi::Checkpoint` written.
+    # Interrupting it leaves no half-checkpoint.
     #
     # `at:` is where in the data the run is - epoch, batch, whatever a
     # sampler needs to carry on. Torobi is handed batches and never fetches
@@ -451,14 +449,14 @@ module Torobi
     #
     #   s.checkpoint!("run/000200", at: { epoch: 2, batch: 1_400 })
     def checkpoint!(dir, at: nil)
-      record = { "provenance" => @provenance, "position" => stringify(at) }.compact
-      path = atomically do
-        written = @native.save(dir.to_s, JSON.generate(record))
-        @journal&.checkpoint(path: written, step: @native.step)
-        written
+      record = { "provenance" => @provenance&.to_h, "position" => stringify(at) }.compact
+      written = atomically do
+        path = @native.save(dir.to_s, JSON.generate(record))
+        @journal&.checkpoint(path:, step: @native.step)
+        Checkpoint.new(path)
       end
       @hooks.fire(:checkpoint_written, step: @native.step, loss: @native.loss)
-      path
+      written
     end
 
     # Restores what `checkpoint!` wrote. Refuses a checkpoint from another
@@ -467,7 +465,7 @@ module Torobi
     #
     # Returns the position that was recorded with it (or nil), so that
     # whoever owns the data can put its sampler back where it was. The
-    # whole record, provenance included, is `Torobi::Checkpoint.manifest`.
+    # whole record, provenance included, is `Torobi::Checkpoint#manifest`.
     def restore(dir)
       recorded = atomically do
         state = JSON.parse(@native.restore(dir.to_s))
@@ -506,22 +504,10 @@ module Torobi
     # differentiates, so the optimizer's slots follow - kept for what
     # stays, dropped for what freezes, started at zero for what thaws. It
     # takes effect from the next step, like every knob, and is recorded.
-    def freeze!(pattern)
-      atomically do
-        moved = @native.set_frozen(pattern.to_s, true)
-        @journal&.adjust(step: @native.step, freeze: pattern.to_s, moved:) unless moved.empty?
-        moved
-      end
-    end
+    def freeze!(pattern) = set_frozen(pattern, true)
 
     # The reverse: gradual unfreezing is the usual reason.
-    def unfreeze!(pattern)
-      atomically do
-        moved = @native.set_frozen(pattern.to_s, false)
-        @journal&.adjust(step: @native.step, unfreeze: pattern.to_s, moved:) unless moved.empty?
-        moved
-      end
-    end
+    def unfreeze!(pattern) = set_frozen(pattern, false)
 
     # What is being trained right now, by qualified path.
     def trainable = @native.trainable
@@ -530,10 +516,11 @@ module Torobi
     # window's writing half, and recorded by digest rather than by value -
     # a journal names what was written without holding it.
     def put(path, tensor)
-      packed = Batch.pack({ path.to_s => tensor }).fetch(path.to_s)
+      tensor = TensorData.from(tensor, where: path.to_s)
       atomically do
-        @native.put(path.to_s, packed)
-        @journal&.put(path: path.to_s, digest: Provenance.digest_of(packed[2]))
+        @native.put(path.to_s, tensor.to_native)
+        @journal&.put(step: @native.step, path: path.to_s,
+                      digest: Provenance.digest_of(tensor.bytes))
       end
       self
     end
@@ -598,8 +585,7 @@ module Torobi
     # and was 600 MB of resident memory as a Ruby Array, for a value most
     # callers save or compare rather than read.
     def fetch(path)
-      dtype, shape, bytes = @native.fetch(path.to_s)
-      TensorData.new(shape, bytes, dtype: dtype.to_sym)
+      TensorData.from_native(*@native.fetch(path.to_s))
     end
 
     # The gradients of the loss with respect to named batch fields, by
@@ -618,13 +604,13 @@ module Torobi
     def field_gradients(batch, of:)
       needs_loss!("a gradient")
       names = Array(of).map(&:to_s)
-      values_of(@native.field_gradients(Batch.pack(batch), names))
+      values_of(@native.field_gradients(Batch.of(batch).to_native, names))
     end
 
     # The gradients for `batch`, by parameter path. Does not update anything.
     def gradients(batch)
       needs_loss!("a gradient")
-      values_of(@native.gradients(Batch.pack(batch)))
+      values_of(@native.gradients(Batch.of(batch).to_native))
     end
 
     private
@@ -636,7 +622,7 @@ module Torobi
     # payload packed. How to read that is one fact and lives once.
     def values_of(answered)
       answered.to_h do |name, dtype, shape, bytes|
-        [name, TensorData.new(shape, bytes, dtype: dtype.to_sym)]
+        [name, TensorData.from_native(dtype, shape, bytes)]
       end
     end
 
@@ -705,6 +691,15 @@ module Torobi
     # granularity a span is interruptible at anyway.
     def atomically(&)
       Thread.handle_interrupt(Object => :never, &)
+    end
+
+    def set_frozen(pattern, frozen)
+      pattern = pattern.to_s
+      atomically do
+        moved = @native.set_frozen(pattern, frozen)
+        @journal&.freezing(step: @native.step, pattern:, frozen:, moved:) unless moved.empty?
+        moved
+      end
     end
 
     # A position travels as JSON, so its keys are strings by the time it

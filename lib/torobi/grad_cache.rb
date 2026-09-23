@@ -129,7 +129,7 @@ module Torobi
     # `height` rows of `data`, starting at `at`. The same fact the other
     # way round.
     def slice(data, at, height)
-      stride = data.shape.last * 4
+      stride = data.shape.last * data.value_size
       TensorData.new([height, data.shape.last],
                      data.bytes.byteslice(at * stride, height * stride), dtype: data.dtype)
     end

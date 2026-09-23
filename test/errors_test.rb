@@ -117,9 +117,11 @@ class ErrorsTest < Minitest::Test
   # this one. Once per process: the answer is memoized.
   def test_the_device_is_probed_where_an_abort_is_survivable
     skip "extension not compiled" unless defined?(Torobi::Session)
-    Torobi::Preflight.forget_probe!
+    Torobi::Preflight::Probe.forget!
 
-    assert Torobi::Preflight.probe!, "MLX should start on this machine"
+    probe = Torobi::Preflight::Probe.run
+
+    assert_predicate probe, :ok?, "MLX should start on this machine: #{probe.reason}"
 
     first = elapsed { Torobi::Preflight.check! }
     second = elapsed { Torobi::Preflight.check! }

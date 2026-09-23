@@ -196,10 +196,12 @@ class SessionTest < Minitest::Test
       e = assert_raises(Torobi::StepError) { s.step!(wrong) }
       assert_match(/dimension 1 is 3, declared 2/, e.message)
 
+      # Data that does not fill its own shape is malformed before the
+      # graph is asked anything, so it is refused here, as a TensorData is.
       short = batch(2)
       short[:x] = { shape: [2, 2], data: [0.0] }
-      e = assert_raises(Torobi::StepError) { s.step!(short) }
-      assert_match(/1 values for shape/, e.message)
+      e = assert_raises(ArgumentError) { s.step!(short) }
+      assert_match(/input x: \[2, 2\] of f32 wants 16 bytes, got 4/, e.message)
     end
   end
 end

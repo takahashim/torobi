@@ -125,11 +125,9 @@ class HooksTest < Minitest::Test
         s.run([batch] * 6)
       end
 
-      assert_path_exists best.path
+      assert_predicate best.checkpoint, :exist?
       assert_operator best.best, :<, 1.0
-      manifest = JSON.parse(File.read(File.join(best.path, "manifest.json")))
-
-      assert_operator manifest.fetch("step"), :<=, 6
+      assert_operator best.checkpoint.step, :<=, 6
     end
   end
 
@@ -203,11 +201,11 @@ class HooksTest < Minitest::Test
       s.use(Torobi::Policies::LrOnPlateau.new(factor: 0.5, patience: 3, by: 1e-3))
       s.run([batch] * 30)
     end
-    entries = Torobi::Journal.read(io.string)
-    adjusts = entries.select { |e| e["kind"] == "adjust" && e.key?("lr") }
+    record = Torobi::Journal.read(io.string)
+    adjusts = record.of(Torobi::Journal::Adjust).select { |e| e.knobs.key?("lr") }
 
     refute_empty adjusts, "the policy's adjustment should be recorded"
-    observes = entries.select { |e| e["kind"] == "observe" && e.key?("plateau_at") }
+    observes = record.of(Torobi::Journal::Observe).select { |e| e.values.key?("plateau_at") }
 
     refute_empty observes, "and so should what it decided on"
   end

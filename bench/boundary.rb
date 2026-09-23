@@ -61,7 +61,7 @@ puts "    rows       json       pack       step       span"
   batches = Array.new(STEPS) { batch(rows, DIM, rng) }
 
   json = elapsed { batches.each { |b| JSON.generate(b) } } / STEPS
-  pack = elapsed { batches.each { |b| Torobi::Batch.pack(b) } } / STEPS
+  pack = elapsed { batches.each { |b| Torobi::Batch.new(b).to_native } } / STEPS
 
   per_step = Torobi::Session.open(config, weights(DIM)) do |s|
     s.adjust(lr: 0.01)

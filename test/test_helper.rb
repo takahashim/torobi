@@ -21,8 +21,10 @@ module Torobi
                               initializer: { "type" => "zeros" }, trainable: false)
       ]
       nodes = [
-        IR::NodeSpec.new(id: 0, op: "matmul", inputs: [IR::Ref.input(0)], parameters: [0]),
-        IR::NodeSpec.new(id: 1, op: "add", inputs: [IR::Ref.node(0)], parameters: [1]),
+        IR::NodeSpec.new(id: 0, op: "matmul", inputs: [IR::Ref.input(0)], parameters: [0],
+                         shape: [nil, 2], dtype: :f32),
+        IR::NodeSpec.new(id: 1, op: "add", inputs: [IR::Ref.node(0)], parameters: [1],
+                         shape: [nil, 2], dtype: :f32),
         # A config without an objective takes the model's single output as
         # the loss, so it has to be a scalar (GraphConfig::LOSS).
         IR::NodeSpec.new(id: 2, op: "mean", inputs: [IR::Ref.node(1)],

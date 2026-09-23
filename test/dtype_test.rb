@@ -73,19 +73,26 @@ class DtypeTest < Minitest::Test
 
   def test_an_unknown_dtype_is_refused_where_it_is_written
     e = assert_raises(ArgumentError) do
-      Torobi::Batch.pack({ x: { shape: [1], data: [1], dtype: :i64 } })
+      Torobi::Batch.new({ x: { shape: [1], data: [1], dtype: :i64 } })
     end
-    assert_match(/dtype "i64" does not cross the boundary/, e.message)
+    assert_match(/input x: dtype :i64 does not cross the boundary/, e.message)
   end
 
   def test_packing_round_trips_for_both_dtypes
-    packed = Torobi::Batch.pack({
+    batch = Torobi::Batch.new({
       a: { shape: [3], data: [1.5, -2.5, 0.0] },
       b: { shape: [3], data: [1, -2, 300], dtype: :i32 }
     })
 
-    assert_equal %w[f32 i32], packed.values.map(&:first)
-    assert_equal [1.5, -2.5, 0.0], Torobi::Batch.unpack(packed.fetch("a")[2])
-    assert_equal [1, -2, 300], Torobi::Batch.unpack(packed.fetch("b")[2], dtype: :i32)
+    assert_equal %w[f32 i32], batch.to_native.values.map(&:first)
+    assert_equal [1.5, -2.5, 0.0], batch.fetch(:a).to_a
+    assert_equal [1, -2, 300], batch.fetch(:b).to_a
+  end
+
+  # A Hash is checked where it is written, as a TensorData is: bytes that
+  # do not fill the shape are refused here, not by the engine.
+  def test_a_hash_whose_data_does_not_fill_its_shape_is_refused
+    e = assert_raises(ArgumentError) { Torobi::Batch.new({ x: { shape: [2], data: [1.0] } }) }
+    assert_match(/\[2\] of f32 wants 8 bytes, got 4/, e.message)
   end
 end

@@ -164,7 +164,7 @@ class LifecycleTest < Minitest::Test
 
       assert_equal 4, s.step
       assert_equal 4, fired
-      spans = s.journal.entries.count { |e| e["kind"] == "span" }
+      spans = s.journal.entries.grep(Torobi::Journal::Span).size
 
       assert_equal 4, spans, "one entry per step"
     end

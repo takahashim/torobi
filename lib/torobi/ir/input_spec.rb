@@ -9,34 +9,30 @@ module Torobi
         name = name.to_s
         raise ConfigError, "input #{id}: name must not be empty" if name.empty?
 
-        shape = check_shape(id, shape)
-        Dtype.check!(dtype, where: "input #{name.inspect}")
-        source = Source.check!(source || Source.batch(name), where: "input #{name.inspect}")
+        where = "input #{name.inspect}"
+        shape = Dimensions.check!(shape, where:, symbolic: true)
+        Dtype.check!(dtype, where:)
+        source ||= Source.batch(name)
+        unless source.is_a?(Source::Batch) || source.is_a?(Source::ModelOutput)
+          raise ConfigError, "#{where}: source is a #{source.class}, expected an IR::Source"
+        end
+
         super(id: Integer(id), name: -name, source:, shape:, dtype:)
       end
 
-      def from_batch? = Source.batch?(source)
-      def from_model? = Source.model?(source)
+      def from_batch? = source.is_a?(Source::Batch)
+      def from_model? = source.is_a?(Source::ModelOutput)
 
       def to_h
-        { "id" => id, "name" => name, "source" => source, "shape" => shape,
+        { "id" => id, "name" => name, "source" => source.to_h, "shape" => shape,
           "dtype" => dtype.to_s }
       end
 
       def self.from_h(h)
-        new(id: h.fetch("id"), name: h.fetch("name"), source: h["source"],
+        where = "input #{h["name"].inspect}"
+        new(id: h.fetch("id"), name: h.fetch("name"),
+            source: h["source"]&.then { |s| Source.from_h(s, where:) },
             shape: h.fetch("shape"), dtype: h.fetch("dtype").to_sym)
-      end
-
-      private
-
-      def check_shape(id, shape)
-        unless shape.is_a?(Array) && shape.all? { |d| d.nil? || (d.is_a?(Integer) && d.positive?) }
-          raise ConfigError,
-                "input #{id}: shape must be an array of positive integers or nil " \
-                "(symbolic), got #{shape.inspect}"
-        end
-        Freeze.deep(shape.dup)
       end
     end
   end

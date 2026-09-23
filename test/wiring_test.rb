@@ -34,12 +34,12 @@ class WiringTest < Minitest::Test
 
     assert_equal %w[student.logits teacher.logits], inputs.map(&:name)
     assert(inputs.all?(&:from_model?))
-    assert_equal({ "model" => "student", "output" => "logits" }, inputs.first.source)
+    assert_equal Torobi::IR::Source.model_output("student", "logits"), inputs.first.source
     # The shape came from the model's declaration, not from a guess.
     assert_equal [nil, 1], inputs.first.shape
     # stop_gradient, then mse lowered to sub / square / mean.
     assert_equal %w[stop_gradient sub square mean], config.objective.nodes.map(&:op)
-    assert_equal({ "loss" => "node:3" }, config.objective.outputs)
+    assert_equal({ "loss" => Torobi::IR::Ref.node(3) }, config.objective.outputs)
   end
 
   # The two halves are written separately, so a config that arrives from
@@ -56,6 +56,17 @@ class WiringTest < Minitest::Test
 
     assert_match(/expects i32/, e.message, "what the objective asked for")
     assert_match(/which is f32/, e.message, "and what the model declares")
+  end
+
+  # Reading another model is what an objective is for; a model graph that
+  # did it would be wired by nothing, so the config refuses it.
+  def test_a_model_reads_only_from_the_batch
+    raw = distillation.to_h
+    raw.fetch("models").fetch("student")["inputs"].first["source"] =
+      { "model" => "teacher", "output" => "logits" }
+    e = assert_raises(Torobi::ConfigError) { Torobi::GraphConfig.from_h(raw) }
+
+    assert_match(/model "student" input "x" reads teacher.logits/, e.message)
   end
 
   def test_parameters_are_namespaced_and_only_the_trained_are_differentiated
@@ -194,6 +205,6 @@ class WiringTest < Minitest::Test
     # It sits between the teacher's output and the loss.
     node = config.objective.nodes.find { |n| n.op == "stop_gradient" }
 
-    assert_equal ["input:1"], node.inputs
+    assert_equal [Torobi::IR::Ref.input(1)], node.inputs
   end
 end

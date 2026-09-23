@@ -44,8 +44,8 @@ class RunnerTest < Minitest::Test
 
     assert_predicate outcome, :finished?, outcome.to_s
     refute_predicate outcome, :crashed?
-    assert_equal 20, r.progress.fetch(:step)
-    assert_equal 20, r.checkpoint_manifest.fetch("step")
+    assert_equal 20, r.progress.step
+    assert_equal 20, r.checkpoint.step
   end
 
   # The parent reads the journal rather than asking the child, so progress
@@ -64,7 +64,7 @@ class RunnerTest < Minitest::Test
     end
     r.stop
 
-    reported = seen.compact.map { _1[:step] }
+    reported = seen.compact.map(&:step)
 
     refute_empty reported, "the parent should have seen the run move"
     assert_equal reported.sort, reported, "progress only goes forward"
@@ -82,19 +82,19 @@ class RunnerTest < Minitest::Test
     assert_nil r.progress, "an empty directory has no progress to report"
     write.call(1)
 
-    assert_equal 1, r.progress.fetch(:step)
+    assert_equal 1, r.progress.step
     write.call(2)
 
-    assert_equal 2, r.progress.fetch(:step)
+    assert_equal 2, r.progress.step
 
     # A poll can land between an entry and its newline. The half-written
     # line is held rather than skipped, so the entry is not lost.
     File.open(path, "a") { |f| f.write(JSON.generate(kind: "span", step: 3)) }
 
-    assert_equal 2, r.progress.fetch(:step), "an unfinished line is not an entry yet"
+    assert_equal 2, r.progress.step, "an unfinished line is not an entry yet"
     File.open(path, "a", &:puts)
 
-    assert_equal 3, r.progress.fetch(:step)
+    assert_equal 3, r.progress.step
   end
 
   # A journal is only ever appended to, so a file that got shorter is a
@@ -106,11 +106,11 @@ class RunnerTest < Minitest::Test
       3.times { |i| f.puts JSON.generate(kind: "span", step: 100 + i) }
     end
 
-    assert_equal 102, r.progress.fetch(:step)
+    assert_equal 102, r.progress.step
 
     File.write(r.journal_path, "#{JSON.generate(kind: "span", step: 7)}\n")
 
-    assert_equal 7, r.progress.fetch(:step)
+    assert_equal 7, r.progress.step
   end
 
   # TERM asks; it does not insist. The child finishes the step it is in,
@@ -122,7 +122,7 @@ class RunnerTest < Minitest::Test
 
     assert_predicate outcome, :stopped?, outcome.to_s
     refute_predicate outcome, :crashed?
-    manifest = r.checkpoint_manifest
+    manifest = r.checkpoint.manifest
 
     refute_nil manifest, "a stopped run leaves the state it reached"
     assert_operator manifest.fetch("step"), :>, 0
@@ -152,7 +152,7 @@ class RunnerTest < Minitest::Test
     refute_predicate outcome, :failed?, "a signal is not an exit status"
     assert_match(/SIGABRT/, outcome.to_s)
 
-    manifest = r.checkpoint_manifest
+    manifest = r.checkpoint.manifest
 
     refute_nil manifest, "the checkpoint written before the crash is still there"
     assert_operator manifest.fetch("step"), :>, 0
@@ -167,12 +167,12 @@ class RunnerTest < Minitest::Test
     first = runner("STEPS" => "20").start.wait
 
     assert_predicate first, :finished?, first.to_s
-    reached = Torobi::Checkpoint.manifest(File.join(@dir, "checkpoint")).fetch("step")
+    reached = Torobi::Checkpoint.new(File.join(@dir, "checkpoint")).step
 
     second = runner("STEPS" => "20").start
 
     assert_predicate second.wait, :finished?, second.outcome.to_s
-    assert_equal reached + 20, second.checkpoint_manifest.fetch("step"),
+    assert_equal reached + 20, second.checkpoint.step,
                  "the second run carried on from the first"
   end
 

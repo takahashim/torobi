@@ -92,8 +92,8 @@ class ReplayTest < Minitest::Test
     result = Torobi::Replay.action(journal, config:, weights:, batches: other)
 
     refute_predicate result, :agrees?
-    assert_equal 1, result.divergences.first.fetch(:step), "it should diverge at the first step"
-    assert_match(/differs/, result.divergences.first.fetch(:why))
+    assert_equal 1, result.divergences.first.step, "it should diverge at the first step"
+    assert_match(/differs/, result.divergences.first.why)
     assert_match(/divergence/, result.to_s)
   end
 
@@ -148,7 +148,7 @@ class ReplayTest < Minitest::Test
     result = Torobi::Replay.rerun(io.string, config:, weights:, batches: data, &changed)
 
     refute_predicate result, :agrees?
-    assert_match(/differs on loss/, result.divergences.first.fetch(:why))
+    assert_match(/differs on loss/, result.divergences.first.why)
   end
 
   def test_a_rerun_notices_a_policy_that_stopped_observing
@@ -163,7 +163,7 @@ class ReplayTest < Minitest::Test
 
     refute_predicate result, :agrees?
     assert_equal data.size, result.divergences.size
-    assert_match(/observed nothing/, result.divergences.first.fetch(:why))
+    assert_match(/observed nothing/, result.divergences.first.why)
   end
 
   def test_a_journal_is_accepted_as_an_object_its_jsonl_or_its_entries
@@ -191,5 +191,57 @@ class ReplayTest < Minitest::Test
     result = Torobi::Replay.action(io.string, config:, weights:, batches: data)
 
     assert_predicate result, :agrees?, result.to_s
+  end
+
+  # A cap lifted partway (`clip: nil`) is a decision the replay has to
+  # make again, not a knob it may skip.
+  def test_action_replay_turns_the_clip_as_the_run_did
+    data = batches(6)
+    io = StringIO.new
+    # SGD, whose step is as long as the gradient: AdamW's would hardly
+    # notice a cap, and the test would pass with the clip ignored.
+    Torobi::Session.open(config, weights: weights, io:, optimizer: { kind: :sgd, lr: 0.5 }) do |s|
+      s.adjust(clip: 1e-3)
+      s.run(data.first(3))
+      s.adjust(clip: nil)
+      s.run(data.drop(3))
+    end
+    result = Torobi::Replay.action(io.string, config:, weights:, batches: data)
+
+    assert_predicate result, :agrees?, result.to_s
+  end
+
+  # Accumulated parts are fed and applied as they were, and they are not
+  # observations: the same program over the same data agrees with itself.
+  def test_accumulated_steps_replay_and_rerun
+    data = batches(6)
+    program = lambda do |session, all|
+      all.each_slice(3) do |parts|
+        parts.each { |part| session.accumulate(part) }
+        session.observe(loss: session.apply!)
+      end
+    end
+    io = StringIO.new
+    Torobi::Session.open(config, weights: weights, io:, optimizer:) { |s| program.call(s, data) }
+
+    action = Torobi::Replay.action(io.string, config:, weights:, batches: data)
+    rerun = Torobi::Replay.rerun(io.string, config:, weights:, batches: data, &program)
+
+    assert_predicate action, :agrees?, action.to_s
+    assert_equal 2, action.steps
+    assert_predicate rerun, :agrees?, rerun.to_s
+  end
+
+  # The seed a run was opened with is in its provenance, so a replay opens
+  # with it rather than with the default.
+  def test_the_replay_takes_the_seed_from_the_journal
+    data = batches(2)
+    io = StringIO.new
+    Torobi::Session.open(config, weights: weights, io:, optimizer:, seed: 42) { |s| s.run(data) }
+    replayed = nil
+    Torobi::Replay::Action.new(io.string, config:, weights:, tolerance: :bitwise)
+                          .send(:open) { |s| replayed = s.seed }
+
+    assert_equal 42, replayed
   end
 end

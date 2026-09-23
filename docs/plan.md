@@ -246,7 +246,7 @@ payload は native-endian の 4 byte 値。dtype が渡るのは、graph が i32
 
 512 行の step が 5.3 倍速くなった。encoding は依然として大きな batch では step の
 半分強を占めるので、次に効くのは「呼び出し側が最初から packed で持つ」ことである
-(`Torobi::Batch.pack` は String をそのまま通す)。**投入キューは引き続き不要**。
+(`TensorData.from` は packed 済みの String をそのまま通す)。**投入キューは引き続き不要**。
 
 ### 5A.3 model graph と objective graph の接続
 
@@ -629,7 +629,7 @@ M0 と M1 の一部(§9.1 の M1 のうち single-step とその境界の初期�
 | batch 経路 | **済**。`step!(batch)` / `run(batches)`、packed encoding(§5A.2.1) |
 | 接続の型 | **済**。名前つき output、`Source`(batch / model output)、`stop_gradient`、model 名の名前空間、`train` 集合と argnums 規則 |
 | エラー 3 分類 | **済**。`ConfigError` / `StepError` / `EngineUnavailable`(§5A.4)。4 つ目(abort)は文書とテストで固定 |
-| journal スキーマ | **済**。`Torobi::Journal`(JSONL、6 種の entry)と `Provenance`。観測も記録する(§8.5 の訂正どおり) |
+| journal スキーマ | **済**。`Torobi::Journal`(JSONL、8 種の entry を種類ごとの値として持つ)と `Provenance`。観測も記録する(§8.5 の訂正どおり) |
 
 ### 15.2 M1 の進捗(2026-09-03)
 

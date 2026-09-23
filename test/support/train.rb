@@ -24,7 +24,7 @@ Torobi::Runner.child! do |run|
   batch = { x: { shape: [64, DIM], data: Array.new(64 * DIM, 1.0) } }
 
   Torobi::Session.open(config, weights: weights, io: run.journal) do |s|
-    s.restore(run.checkpoint) if Torobi::Checkpoint.exist?(run.checkpoint)
+    s.restore(run.checkpoint) if run.checkpoint.exist?
     s.run(Array.new(STEPS) { batch }) do
       s.checkpoint!(run.checkpoint, at: { step: s.step }) if (s.step % EVERY).zero?
       # Stands in for MLX ending the process: no rescue sees this, which is

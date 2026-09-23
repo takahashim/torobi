@@ -13,11 +13,12 @@ module Torobi
         path = path.to_s
         raise ConfigError, "parameter #{id}: path must not be empty" if path.empty?
 
-        shape = check_shape(path, shape)
-        Dtype.check!(dtype, where: "parameter #{path.inspect}")
-        initializer = check_initializer(path, initializer)
+        where = "parameter #{path.inspect}"
+        shape = check_shape(shape, where:)
+        Dtype.check!(dtype, where:)
+        initializer = check_initializer(initializer, where:)
         unless [true, false].include?(trainable)
-          raise ConfigError, "parameter #{path.inspect}: trainable must be true or false"
+          raise ConfigError, "#{where}: trainable must be true or false"
         end
 
         super(id: Integer(id), path: -path, shape:, dtype:, initializer:, trainable:)
@@ -38,25 +39,28 @@ module Torobi
 
       private
 
-      # Parameters are storage: every dimension must be concrete.
-      def check_shape(path, shape)
-        unless shape.is_a?(Array) && !shape.empty? &&
-               shape.all? { |d| d.is_a?(Integer) && d.positive? }
-          raise ConfigError,
-                "parameter #{path.inspect}: shape must be a non-empty array of " \
-                "positive integers, got #{shape.inspect}"
-        end
-        Freeze.deep(shape.dup)
+      # Parameters are storage: every dimension must be concrete, and there
+      # is at least one.
+      def check_shape(shape, where:)
+        raise ConfigError, "#{where}: shape must not be empty (a scalar)" if shape == []
+
+        Dimensions.check!(shape, where:, symbolic: false)
       end
 
-      def check_initializer(path, initializer)
-        unless initializer.is_a?(Hash) && (initializer["type"] || initializer[:type])
-          raise ConfigError,
-                "parameter #{path.inspect}: initializer must be a Hash with a \"type\" key, " \
-                "got #{initializer.inspect}"
+      # The top level is keyed like keyword arguments, so `{type: "zeros"}`
+      # reads as `{"type" => "zeros"}`; below it an initializer is JSON
+      # data like any other, and a symbol key there is refused.
+      def check_initializer(initializer, where:)
+        unless initializer.is_a?(Hash)
+          raise ConfigError, "#{where}: initializer must be a Hash, got #{initializer.inspect}"
         end
-        Freeze.deep(Json.primitive!(initializer.transform_keys(&:to_s),
-                                    where: "parameter #{path.inspect} initializer"))
+
+        initializer = initializer.transform_keys(&:to_s)
+        unless initializer["type"]
+          raise ConfigError,
+                "#{where}: initializer must have a \"type\" key, got #{initializer.inspect}"
+        end
+        Freeze.deep(Json.primitive!(initializer, where: "#{where} initializer"))
       end
     end
   end

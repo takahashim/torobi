@@ -138,11 +138,11 @@ class CheckpointTest < Minitest::Test
 
     # Not only the digest: the GraphConfig itself, so the checkpoint can be
     # read by someone who does not have the run that wrote it.
-    assert_equal config.canonical_json, Torobi::Checkpoint.graph_json(written)
+    assert_equal config.canonical_json, written.graph_json
     assert_equal config.digest,
-                 Torobi::Checkpoint.manifest(written).fetch("config_digest")
+                 written.manifest.fetch("config_digest")
     assert_equal config.semantics_version,
-                 Torobi::Checkpoint.manifest(written).fetch("semantics_version")
+                 written.manifest.fetch("semantics_version")
   end
 
   def test_a_checkpoint_inventories_shapes_and_dtypes
@@ -150,7 +150,7 @@ class CheckpointTest < Minitest::Test
       s.run(batches(1))
       s.checkpoint!(File.join(@dir, "c"))
     end
-    entries = Torobi::Checkpoint.manifest(written).fetch("parameters")
+    entries = written.manifest.fetch("parameters")
 
     assert_equal(%w[m.l.weight m.l.bias], entries.map { _1["path"] })
     assert_equal([[1, 2], [1]], entries.map { _1["shape"] })
@@ -168,7 +168,7 @@ class CheckpointTest < Minitest::Test
 
     assert_equal({ "epoch" => 3, "batch" => 1400,
                    "sampler" => { "kind" => "shuffled", "seed" => 9 } },
-                 Torobi::Checkpoint.position(written))
+                 written.position)
 
     resumed = Torobi::Session.open(config, weights: weights) { |s| s.restore(written) }
 
@@ -182,7 +182,7 @@ class CheckpointTest < Minitest::Test
       s.checkpoint!(File.join(@dir, "c"))
     end
 
-    assert_nil Torobi::Checkpoint.position(written)
+    assert_nil written.position
     assert_nil Torobi::Session.open(config, weights: weights) { |s| s.restore(written) }
   end
 
@@ -192,7 +192,7 @@ class CheckpointTest < Minitest::Test
       s.run(batches(1))
       s.checkpoint!(File.join(@dir, "c"))
     end
-    recorded = Torobi::Checkpoint.manifest(written).dig("run", "provenance")
+    recorded = written.manifest.dig("run", "provenance")
 
     assert_equal config.digest, recorded.dig("config", "digest")
     assert_equal dataset, recorded.fetch("dataset")
@@ -207,9 +207,9 @@ class CheckpointTest < Minitest::Test
       s.checkpoint!(File.join(@dir, "c"), at: { epoch: 1 })
     end
 
-    assert Torobi::Checkpoint.exist?(written)
-    refute Torobi::Checkpoint.exist?(File.join(@dir, "nowhere"))
-    manifest = Torobi::Checkpoint.manifest(written)
+    assert_predicate written, :exist?
+    refute_predicate Torobi::Checkpoint.new(File.join(@dir, "nowhere")), :exist?
+    manifest = written.manifest
 
     assert_equal 2, manifest.fetch("step")
     # Rust's names for these, not Ruby's: the engine wrote them, and a
@@ -223,7 +223,7 @@ class CheckpointTest < Minitest::Test
       s.run(batches(1))
       s.checkpoint!(File.join(@dir, "c"))
     end
-    File.write(File.join(written, "graph.json"), "{}")
+    File.write(File.join(written.dir, "graph.json"), "{}")
 
     error = assert_raises(Torobi::StepError) do
       Torobi::Session.open(config, weights: weights) { |s| s.restore(written) }
@@ -240,7 +240,7 @@ class CheckpointTest < Minitest::Test
         s.checkpoint!(File.join(@dir, "c"), at: { at: Float::NAN })
       end
     end
-    refute Torobi::Checkpoint.exist?(File.join(@dir, "c"))
+    refute_predicate Torobi::Checkpoint.new(File.join(@dir, "c")), :exist?
   end
 
   def test_a_checkpoint_says_what_it_belongs_to
