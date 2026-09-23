@@ -1,10 +1,5 @@
 # frozen_string_literal: true
 
-# For Time#iso8601 in the note a child writes on its way out. The child
-# has loaded this library and nothing else, which is the whole point of
-# running it in a process of its own.
-require "time"
-
 require "json"
 
 module Torobi
@@ -25,7 +20,7 @@ module Torobi
   #
   #   runner = Torobi::Runner.new(["ruby", "train.rb"], dir: "runs/001")
   #   runner.start
-  #   runner.progress          # => {step: 1400, loss: 0.21, at: "..."}
+  #   runner.progress          # => the last Journal::Span (step, loss, at)
   #   runner.stop              # asks it to stop at the next step boundary
   #   runner.wait.finished?    # => true
   #
@@ -123,18 +118,14 @@ module Torobi
       false
     end
 
-    # What the child has written down so far: the last step it recorded,
-    # and what that step cost. Nil before the first one.
+    # What the child has written down so far: the last step it recorded
+    # (a `Journal::Span`, with its step, loss and time). Nil before the
+    # first one.
     #
     # Read from the journal rather than asked of the child, because the
     # child may be inside a step, or gone. A record on disk answers either
     # way (the journal flushes per entry for exactly this).
-    def progress
-      last = last_entry("span")
-      return nil unless last
-
-      { step: last["step"], loss: last["loss"], at: last["at"] }
-    end
+    def progress = last_entry(Journal::Span)
 
     # Whether a checkpoint is there to resume from, and what it says.
     def checkpoint_manifest
@@ -175,7 +166,7 @@ module Torobi
 
     # The child has ended; read what it said on the way out.
     def reap(status)
-      @outcome = Outcome.new(status:, note: last_entry("note"))
+      @outcome = Outcome.new(status:, note: last_entry(Journal::Note))
     end
 
     def signal(name)
@@ -210,7 +201,8 @@ module Torobi
         @last = {}
       end
 
-      # The last entry of `kind` the journal holds, or nil.
+      # The last entry of `kind` (a `Journal` entry class) the journal
+      # holds, or nil.
       def last(kind)
         catch_up
         @last[kind]
@@ -253,13 +245,22 @@ module Torobi
         lines = @partial.split("\n", -1)
         @partial = lines.pop || +""
         lines.each do |line|
-          entry = begin
+          h = begin
             JSON.parse(line)
           rescue JSON::ParserError
             next
           end
-          kind = entry["kind"]
-          @last[kind] = entry if kind
+          # The header has no kind, and is not an entry.
+          next unless h["kind"]
+
+          entry = begin
+            Journal::Entry.from_h(h)
+          rescue KeyError, ArgumentError
+            # A kind or a shape this version does not know: another
+            # writer's line, which says nothing about this run's progress.
+            next
+          end
+          @last[entry.class] = entry
         end
       end
     end
@@ -293,9 +294,9 @@ module Torobi
       def ok? = !@status.nil? && @status.success?
 
       # What the run said as it ended, if it said anything.
-      def message = @note && @note["message"]
+      def message = @note&.[]("message")
 
-      def event = @note && @note["event"]
+      def event = @note&.event
 
       def to_s
         return "not started" if @status.nil?
@@ -409,9 +410,8 @@ module Torobi
       # already be closed by the time a run ends, and this has to be the
       # last line either way.
       def finish(run, event, message = nil)
-        entry = { "kind" => "note", "step" => nil, "at" => Time.now.utc.iso8601,
-                  "event" => event, "message" => message }.compact
-        run.journal.puts(JSON.generate(entry))
+        note = Journal::Note.new(event:, details: { message: }.compact)
+        run.journal.puts(note.to_json)
         run.journal.flush
       rescue IOError, Errno::EBADF
         nil

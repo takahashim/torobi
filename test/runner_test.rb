@@ -44,7 +44,7 @@ class RunnerTest < Minitest::Test
 
     assert_predicate outcome, :finished?, outcome.to_s
     refute_predicate outcome, :crashed?
-    assert_equal 20, r.progress.fetch(:step)
+    assert_equal 20, r.progress.step
     assert_equal 20, r.checkpoint_manifest.fetch("step")
   end
 
@@ -64,7 +64,7 @@ class RunnerTest < Minitest::Test
     end
     r.stop
 
-    reported = seen.compact.map { _1[:step] }
+    reported = seen.compact.map(&:step)
 
     refute_empty reported, "the parent should have seen the run move"
     assert_equal reported.sort, reported, "progress only goes forward"
@@ -82,19 +82,19 @@ class RunnerTest < Minitest::Test
     assert_nil r.progress, "an empty directory has no progress to report"
     write.call(1)
 
-    assert_equal 1, r.progress.fetch(:step)
+    assert_equal 1, r.progress.step
     write.call(2)
 
-    assert_equal 2, r.progress.fetch(:step)
+    assert_equal 2, r.progress.step
 
     # A poll can land between an entry and its newline. The half-written
     # line is held rather than skipped, so the entry is not lost.
     File.open(path, "a") { |f| f.write(JSON.generate(kind: "span", step: 3)) }
 
-    assert_equal 2, r.progress.fetch(:step), "an unfinished line is not an entry yet"
+    assert_equal 2, r.progress.step, "an unfinished line is not an entry yet"
     File.open(path, "a", &:puts)
 
-    assert_equal 3, r.progress.fetch(:step)
+    assert_equal 3, r.progress.step
   end
 
   # A journal is only ever appended to, so a file that got shorter is a
@@ -106,11 +106,11 @@ class RunnerTest < Minitest::Test
       3.times { |i| f.puts JSON.generate(kind: "span", step: 100 + i) }
     end
 
-    assert_equal 102, r.progress.fetch(:step)
+    assert_equal 102, r.progress.step
 
     File.write(r.journal_path, "#{JSON.generate(kind: "span", step: 7)}\n")
 
-    assert_equal 7, r.progress.fetch(:step)
+    assert_equal 7, r.progress.step
   end
 
   # TERM asks; it does not insist. The child finishes the step it is in,

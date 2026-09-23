@@ -123,35 +123,34 @@ class WindowTest < Minitest::Test
       s.run([batch])
     end
 
-    entries = Torobi::Journal.read(io.string)
-    header = entries.first
+    record = Torobi::Journal.read(io.string)
+    header = record.header
 
-    assert_equal Torobi::Journal::SCHEMA_VERSION, header.fetch("schema_version")
-    assert_equal config.digest, header.dig("provenance", "config", "digest")
-    assert_equal({ "digest" => "abc" }, header.dig("provenance", "dataset"))
+    assert_equal Torobi::Journal::SCHEMA_VERSION, header.schema_version
+    assert_equal config.digest, header.provenance.config.fetch("digest")
+    assert_equal({ "digest" => "abc" }, header.provenance.dataset)
 
-    kinds = entries.drop(1).map { |e| e["kind"] }
+    assert_equal %w[note adjust span span note observe freeze put span note note],
+                 record.entries.map(&:kind)
 
-    assert_equal %w[note adjust span span note observe adjust put span note note], kinds
+    assert_in_delta(0.25, record.of(Torobi::Journal::Adjust).first.knobs.fetch("lr"))
+    frozen = record.of(Torobi::Journal::Freezing).first
 
-    adjusts = entries.select { |e| e["kind"] == "adjust" }
-
-    assert_in_delta(0.25, adjusts.first.fetch("lr"))
-    assert_equal "m.first.*", adjusts.last.fetch("freeze")
-    assert_equal %w[m.first.weight m.first.bias], adjusts.last.fetch("moved")
+    assert_equal "m.first.*", frozen.pattern
+    assert frozen.frozen
+    assert_equal %w[m.first.weight m.first.bias], frozen.moved
 
     # A put names what was written without holding it.
-    put = entries.find { |e| e["kind"] == "put" }
+    put = record.of(Torobi::Journal::Put).first
 
-    assert_equal "m.second.bias", put.fetch("path")
-    assert_match(/\A[0-9a-f]{64}\z/, put.fetch("digest"))
+    assert_equal "m.second.bias", put.path
+    assert_match(/\A[0-9a-f]{64}\z/, put.digest)
 
     # And what the window read is there, because a policy reading it would
     # have decided on it.
-    observed = entries.find { |e| e["kind"] == "observe" }
+    observed = record.of(Torobi::Journal::Observe).first
 
-    assert_in_delta entries.select { |e| e["kind"] == "span" }[1].fetch("loss"),
-                    observed.fetch("loss"), 1e-9
+    assert_in_delta record.of(Torobi::Journal::Span)[1].loss, observed.values.fetch("loss"), 1e-9
   end
 
   def test_a_session_without_a_journal_records_nothing_and_still_runs
@@ -173,12 +172,12 @@ class WindowTest < Minitest::Test
           s.run([batch] * 2)
           # Readable before the session closes, because each entry is
           # flushed as it is written.
-          assert_operator Torobi::Journal.read(File.read(path)).size, :>=, 3
+          assert_operator Torobi::Journal.read(File.read(path)).entries.size, :>=, 2
         end
       end
-      entries = Torobi::Journal.read(File.read(path))
+      entries = Torobi::Journal.read(File.read(path)).entries
 
-      assert_equal "closed", entries.last.fetch("event")
+      assert_equal "closed", entries.last.event
     end
   end
 

@@ -16,18 +16,23 @@ class JournalTest < Minitest::Test
 
   def test_the_header_says_what_the_run_was
     c = config
-    journal = Torobi::Journal.new(Torobi::Provenance.of(c, dataset: { "digest" => "abc" }))
-    provenance = journal.header.fetch("provenance")
+    provenance = Torobi::Provenance.of(c, dataset: { "digest" => "abc" },
+                                          optimizer: { kind: :sgd, lr: 0.1 }, seed: 7)
+    journal = Torobi::Journal.new(provenance)
 
+    assert_same provenance, journal.header.provenance
     # Which description was trained, exactly.
-    assert_equal c.digest, provenance.dig("config", "digest")
-    assert_equal ["m"], provenance.dig("config", "models")
-    assert_equal %w[m.l.weight m.l.bias], provenance.dig("config", "parameters")
+    assert_equal c.digest, provenance.config.fetch("digest")
+    assert_equal ["m"], provenance.config.fetch("models")
+    assert_equal %w[m.l.weight m.l.bias], provenance.config.fetch("parameters")
     # On what.
-    assert_equal({ "digest" => "abc" }, provenance.fetch("dataset"))
+    assert_equal({ "digest" => "abc" }, provenance.dataset)
     # By which build.
-    assert_equal Torobi::VERSION, provenance.dig("runtime", "torobi")
-    assert_equal RUBY_PLATFORM, provenance.dig("runtime", "platform")
+    assert_equal Torobi::VERSION, provenance.runtime.fetch("torobi")
+    assert_equal RUBY_PLATFORM, provenance.runtime.fetch("platform")
+    # With what, and from where.
+    assert_equal({ "kind" => "sgd", "lr" => 0.1 }, provenance.optimizer)
+    assert_equal 7, provenance.seed
   end
 
   def test_the_engine_reports_what_it_was_built_from
@@ -42,17 +47,15 @@ class JournalTest < Minitest::Test
 
   def test_entries_carry_their_kind_and_step
     journal = Torobi::Journal.new(Torobi::Provenance.of(config))
-    journal.span(steps: 100, loss: 0.5, step: 100)
+    journal.span(loss: 0.5, step: 100)
     journal.observe(step: 100, loss: 0.5, grad_norm: 1.25)
     journal.adjust(step: 100, lr: 0.05)
     journal.checkpoint(path: "checkpoint/000001", step: 100)
 
-    kinds = journal.entries.map { |e| e["kind"] }
-
-    assert_equal %w[span observe adjust checkpoint], kinds
-    assert(journal.entries.all? { |e| e["step"] == 100 })
-    assert(journal.entries.all? { |e| e.key?("at") })
-    assert_in_delta(0.05, journal.entries[2].fetch("lr"))
+    assert_equal %w[span observe adjust checkpoint], journal.entries.map(&:kind)
+    assert(journal.entries.all? { |e| e.step == 100 })
+    assert(journal.entries.all?(&:at))
+    assert_in_delta(0.05, journal.entries[2].knobs.fetch("lr"))
   end
 
   # An observation is recorded because a policy that reads and then decides
@@ -62,30 +65,53 @@ class JournalTest < Minitest::Test
     journal.observe(step: 10, loss: 0.9)
     journal.adjust(step: 10, lr: 0.01)
 
-    read = journal.entries.find { |e| e["kind"] == "observe" }
-    decided = journal.entries.find { |e| e["kind"] == "adjust" }
+    read, decided = journal.entries
 
-    assert_in_delta(0.9, read.fetch("loss"))
-    assert_equal read["step"], decided["step"], "the decision and its input are at the same step"
+    assert_in_delta(0.9, read.values.fetch("loss"))
+    assert_equal read.step, decided.step, "the decision and its input are at the same step"
   end
 
-  def test_an_unknown_kind_is_refused
+  def test_an_unknown_kind_is_refused_when_read
+    e = assert_raises(ArgumentError) do
+      Torobi::Journal::Entry.from_h({ "kind" => "improvise", "step" => 1 })
+    end
+    assert_match(/not a journal entry kind/, e.message)
+  end
+
+  # Every kind reads back as what was written, so a writer and a reader
+  # agree by construction. A knob set to nil is a decision (`clip: nil`
+  # lifts the cap) and is held rather than dropped.
+  def test_every_kind_round_trips
     journal = Torobi::Journal.new(Torobi::Provenance.of(config))
-    assert_raises(ArgumentError) { journal.send(:record, :improvise, whatever: 1) }
+    journal.span(step: 1, loss: 0.5, batches_digest: "d")
+    journal.accumulate(step: 1, parts: 2, loss: 0.25)
+    journal.span(step: 2, loss: 0.25, parts: 2)
+    journal.adjust(step: 2, lr: 0.1, clip: nil)
+    journal.freezing(step: 2, pattern: "m.*", frozen: true, moved: ["m.w"])
+    journal.observe(step: 2, loss: 0.25)
+    journal.put(step: 2, path: "m.w", digest: "e")
+    journal.checkpoint(step: 2, path: "c")
+    journal.note(step: 2, event: "exported", model: "m")
+
+    read = Torobi::Journal.read(journal.to_jsonl)
+
+    assert_equal journal.entries, read.entries
+    assert_equal({ "lr" => 0.1, "clip" => nil }, read.entries[3].knobs)
+    assert_equal Torobi::Journal::KINDS.keys.sort, read.entries.map(&:kind).uniq.sort
   end
 
   # Written as it goes, so an interrupted run leaves a readable file.
   def test_it_streams_and_round_trips
     io = StringIO.new
     journal = Torobi::Journal.new(Torobi::Provenance.of(config), io:)
-    journal.span(steps: 5, loss: 1.0, step: 5)
+    journal.span(loss: 1.0, step: 5)
     journal.close
 
-    lines = Torobi::Journal.read(io.string)
+    record = Torobi::Journal.read(io.string)
 
-    assert_equal journal.to_a, lines
-    assert_equal 1, lines.first.fetch("schema_version")
-    assert_equal "span", lines.last.fetch("kind")
+    assert_equal journal.to_record, record
+    assert_equal Torobi::Journal::SCHEMA_VERSION, record.header.schema_version
+    assert_equal "span", record.entries.last.kind
     assert_equal journal.to_jsonl, io.string
   end
 
@@ -116,10 +142,10 @@ class JournalTest < Minitest::Test
 
   def test_entries_cannot_be_changed_after_they_are_written
     journal = Torobi::Journal.new(Torobi::Provenance.of(config))
-    journal.note(detail: { "nested" => [1, 2] })
+    journal.note(event: "x", detail: { "nested" => [1, 2] })
     entry = journal.entries.last
-    assert_raises(FrozenError) { entry["kind"] = "other" }
-    assert_raises(FrozenError) { entry.fetch("detail")["nested"] << 3 }
+    assert_raises(FrozenError) { entry.details["other"] = 1 }
+    assert_raises(FrozenError) { entry["detail"]["nested"] << 3 }
   end
 
   # A run that was killed leaves whole lines and, possibly, a last one that
@@ -128,22 +154,22 @@ class JournalTest < Minitest::Test
   # leaves a readable file" is the promise the flushing is for.
   def test_a_truncated_last_line_is_dropped_and_the_rest_reads
     whole = <<~JSONL
-      {"schema_version":1,"provenance":{}}
+      {"schema_version":2,"provenance":{"config":{},"runtime":{}}}
       {"kind":"span","step":1,"loss":0.5}
     JSONL
     text = "#{whole}{\"kind\":\"span\",\"step\":2,\"lo"
 
-    entries = Torobi::Journal.read(text)
+    entries = Torobi::Journal.read(text).entries
 
-    assert_equal 2, entries.size
-    assert_equal 1, entries.last["step"]
+    assert_equal 1, entries.size
+    assert_equal 1, entries.last.step
   end
 
   # A broken line in the middle is damage, not truncation, and reading past
   # it would be inventing a record.
   def test_a_broken_line_in_the_middle_is_an_error
     text = <<~JSONL
-      {"schema_version":1,"provenance":{}}
+      {"schema_version":2,"provenance":{"config":{},"runtime":{}}}
       {"kind":"span","ste
       {"kind":"span","step":2,"loss":0.4}
     JSONL
@@ -152,10 +178,10 @@ class JournalTest < Minitest::Test
   end
 
   def test_a_complete_file_is_unaffected
-    journal = Torobi::Journal.new({ "config" => {} })
-    journal.span(steps: 1, loss: 0.5, step: 1)
+    journal = Torobi::Journal.new(Torobi::Provenance.new(config: {}, runtime: {}))
+    journal.span(loss: 0.5, step: 1)
 
-    assert_equal journal.to_a, Torobi::Journal.read(journal.to_jsonl)
+    assert_equal journal.to_record, Torobi::Journal.read(journal.to_jsonl)
   end
 
   # A file asks for what it uses.

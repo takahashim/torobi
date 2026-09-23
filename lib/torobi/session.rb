@@ -117,12 +117,11 @@ module Torobi
       # Gathered whether or not anything is journalling: a checkpoint
       # records it too, so that what it holds can be identified later
       # (docs/plan.md section 11.2).
-      provenance = Provenance.of(config, dataset:,
-                                 extra: { "optimizer" => optimizer, "seed" => seed })
+      provenance = Provenance.of(config, dataset:, optimizer:, seed:)
       journal ||= Journal.new(provenance, io:) if io
       session = new(native, journal:, provenance:, loss: config.loss?)
-      journal&.note(step: 0, event: "opened", seed:,
-                    optimizer: optimizer.transform_keys(&:to_s))
+      # What it was opened with is the header's provenance; this marks when.
+      journal&.note(step: 0, event: "opened")
       return session unless block_given?
 
       begin
@@ -179,7 +178,7 @@ module Torobi
       packed = Batch.pack(batch)
       loss = atomically do
         value = @native.run_step(packed)
-        @journal&.span(steps: 1, loss: value, step: @native.step,
+        @journal&.span(step: @native.step, loss: value,
                        batches_digest: Provenance.digest_of(batch.keys.map(&:to_s)))
         value
       end
@@ -212,7 +211,7 @@ module Torobi
       needs_loss!("accumulating")
       atomically do
         loss = @native.accumulate(Batch.pack(batch))
-        @journal&.observe(step: @native.step, accumulated: @native.accumulated, loss:)
+        @journal&.accumulate(step: @native.step, parts: @native.accumulated, loss:)
         loss
       end
     end
@@ -223,8 +222,7 @@ module Torobi
       parts = @native.accumulated
       loss = atomically do
         value = @native.apply
-        @journal&.span(steps: 1, loss: value, step: @native.step, parts:,
-                       batches_digest: nil)
+        @journal&.span(step: @native.step, loss: value, parts:)
         value
       end
       @hooks.fire(:step, step: @native.step, loss:)
@@ -451,7 +449,7 @@ module Torobi
     #
     #   s.checkpoint!("run/000200", at: { epoch: 2, batch: 1_400 })
     def checkpoint!(dir, at: nil)
-      record = { "provenance" => @provenance, "position" => stringify(at) }.compact
+      record = { "provenance" => @provenance&.to_h, "position" => stringify(at) }.compact
       path = atomically do
         written = @native.save(dir.to_s, JSON.generate(record))
         @journal&.checkpoint(path: written, step: @native.step)
@@ -506,22 +504,10 @@ module Torobi
     # differentiates, so the optimizer's slots follow - kept for what
     # stays, dropped for what freezes, started at zero for what thaws. It
     # takes effect from the next step, like every knob, and is recorded.
-    def freeze!(pattern)
-      atomically do
-        moved = @native.set_frozen(pattern.to_s, true)
-        @journal&.adjust(step: @native.step, freeze: pattern.to_s, moved:) unless moved.empty?
-        moved
-      end
-    end
+    def freeze!(pattern) = set_frozen(pattern, true)
 
     # The reverse: gradual unfreezing is the usual reason.
-    def unfreeze!(pattern)
-      atomically do
-        moved = @native.set_frozen(pattern.to_s, false)
-        @journal&.adjust(step: @native.step, unfreeze: pattern.to_s, moved:) unless moved.empty?
-        moved
-      end
-    end
+    def unfreeze!(pattern) = set_frozen(pattern, false)
 
     # What is being trained right now, by qualified path.
     def trainable = @native.trainable
@@ -533,7 +519,7 @@ module Torobi
       packed = Batch.pack({ path.to_s => tensor }).fetch(path.to_s)
       atomically do
         @native.put(path.to_s, packed)
-        @journal&.put(path: path.to_s, digest: Provenance.digest_of(packed[2]))
+        @journal&.put(step: @native.step, path: path.to_s, digest: Provenance.digest_of(packed[2]))
       end
       self
     end
@@ -705,6 +691,15 @@ module Torobi
     # granularity a span is interruptible at anyway.
     def atomically(&)
       Thread.handle_interrupt(Object => :never, &)
+    end
+
+    def set_frozen(pattern, frozen)
+      pattern = pattern.to_s
+      atomically do
+        moved = @native.set_frozen(pattern, frozen)
+        @journal&.freezing(step: @native.step, pattern:, frozen:, moved:) unless moved.empty?
+        moved
+      end
     end
 
     # A position travels as JSON, so its keys are strings by the time it

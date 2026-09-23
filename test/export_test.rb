@@ -228,8 +228,8 @@ class ExportTest < Minitest::Test
     Torobi::Session.open(config, weights:, io:) do |s|
       s.export_model!(File.join(@dir, "out"), from: source)
     end
-    note = io.string.lines.map { |line| JSON.parse(line) }
-             .find { |entry| entry["event"] == "exported" }
+    note = Torobi::Journal.read(io.string).of(Torobi::Journal::Note)
+                          .find { |entry| entry.event == "exported" }
 
     assert_equal "student", note["model"]
     assert_equal %w[l.bias l.weight], note["paths"].sort

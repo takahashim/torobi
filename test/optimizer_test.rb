@@ -215,10 +215,10 @@ class OptimizerTest < Minitest::Test
       assert_nil session.clip
     end
 
-    adjusted = Torobi::Journal.read(io.string).select { |entry| entry["kind"] == "adjust" }
+    adjusted = Torobi::Journal.read(io.string).of(Torobi::Journal::Adjust)
 
-    assert_equal [1.0, nil], adjusted.map { |entry| entry["clip"] },
-                 "the knob and its removal are both recorded"
+    assert_equal [{ "clip" => 1.0 }, { "clip" => nil }], adjusted.map(&:knobs),
+                 "the knob and its removal are both recorded, the removal as nil"
   end
 
   def test_the_parameter_norm_is_over_every_weight

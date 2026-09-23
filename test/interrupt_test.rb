@@ -98,12 +98,12 @@ class InterruptTest < Minitest::Test
     session = Torobi::Session.open(config, weights: weights, io:)
     assert_raises(Timeout::Error) { Timeout.timeout(0.3) { session.run(endless) } }
 
-    spans = session.journal.entries.select { |e| e["kind"] == "span" }
+    spans = session.journal.entries.grep(Torobi::Journal::Span)
 
     refute_empty spans, "the interrupted span should have recorded its steps"
 
     assert_equal session.step, spans.size, "one entry per step the engine took"
-    assert_equal session.step, spans.last["step"]
+    assert_equal session.step, spans.last.step
     session.close
   end
 

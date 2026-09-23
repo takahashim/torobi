@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "json"
-
 module Torobi
   # Running a journal again.
   #
@@ -21,8 +19,12 @@ module Torobi
   #
   # Neither replays the data: a journal names batches by digest rather
   # than holding them, so the caller supplies them and the digests say
-  # whether they are the same ones.
+  # whether they are the same ones. Both open the session the way the run
+  # was opened, with the optimizer and seed its provenance recorded.
   module Replay
+    # One place the replay and the record disagree.
+    Divergence = Data.define(:step, :expected, :actual, :why)
+
     # What a replay found. `agrees?` answers the question the mode asked.
     Result = Data.define(:mode, :steps, :final_loss, :divergences) do
       def agrees? = divergences.empty?
@@ -30,46 +32,125 @@ module Torobi
       def to_s
         return "#{mode}: agrees after #{steps} steps" if agrees?
 
-        "#{mode}: #{divergences.size} divergence(s), first at " \
-          "step #{divergences.first.fetch(:step)}"
+        "#{mode}: #{divergences.size} divergence(s), first at step #{divergences.first.step}"
       end
     end
 
-    module_function
+    # `Replay::Action.new(...).call(batches)`, said shorter.
+    def self.action(journal, config:, weights:, batches:, tolerance: :bitwise)
+      Action.new(journal, config:, weights:, tolerance:).call(batches)
+    end
 
-    # Applies a journal's operations to a fresh session, in order, without
-    # running any policy. `batches` supplies the data the journal names.
-    #
-    # `tolerance` is the agreement asked for on the loss at each step:
-    # nil for none (only the operations are replayed), a number for the
-    # dtype-scale agreement of docs/plan.md section 8.6, and :bitwise for
-    # exact equality, which the same machine and build should give.
-    def action(journal, config:, weights:, batches:, tolerance: :bitwise)
-      entries = entries_of(journal)
-      recorded = entries.select { |e| e["kind"] == "span" && e.key?("loss") }
-      data = batches.to_a
-      divergences = []
+    # `Replay::Rerun.new(...).call(batches, &program)`, said shorter.
+    def self.rerun(journal, config:, weights:, batches:, tolerance: 1e-6, &program)
+      Rerun.new(journal, config:, weights:, tolerance:).call(batches, &program)
+    end
 
-      final = Session.open(config, weights: weights, optimizer: optimizer_of(entries)) do |session|
-        seen = 0
-        entries.each do |entry|
-          case entry["kind"]
-          when "adjust" then apply_adjust(session, entry)
-          when "put" then nil # a put's value is not in the journal, only its digest
-          when "span"
-            batch = data[seen] or
-              raise ArgumentError,
-                    "the journal has #{recorded.size} steps and only #{data.size} " \
-                    "batches were given"
-            loss = session.step!(batch)
-            check(divergences, entry, loss, tolerance, seen + 1)
-            seen += 1
-          end
-        end
-        session.loss
+    # What both modes share: the record, how to open a session the way the
+    # run was opened, and what counts as agreeing.
+    class Mode
+      # `journal` is a Journal, its JSONL, or what `Journal.read` returned.
+      #
+      # `tolerance` is the agreement asked for: nil for none (only the
+      # operations are replayed), a number for the dtype-scale agreement of
+      # docs/plan.md section 8.6, and :bitwise for exact equality, which the
+      # same machine and build should give.
+      def initialize(journal, config:, weights:, tolerance:)
+        @record = record_of(journal)
+        @config = config
+        @weights = weights
+        @tolerance = tolerance
+        @divergences = []
       end
 
-      Result.new(mode: :action, steps: recorded.size, final_loss: final, divergences:)
+      private
+
+      def open(&)
+        provenance = @record.header.provenance
+        optimizer = provenance.optimizer&.transform_keys(&:to_sym) || Session::DEFAULT_OPTIMIZER
+        Session.open(@config, weights: @weights, optimizer:,
+                              seed: provenance.seed || Session::DEFAULT_SEED, &)
+      end
+
+      def agrees?(a, b)
+        return true if @tolerance.nil?
+        return a == b unless a.is_a?(Numeric) && b.is_a?(Numeric)
+        return a == b if @tolerance == :bitwise
+
+        (a - b).abs <= @tolerance
+      end
+
+      def diverged(step:, expected:, actual:, why:)
+        @divergences << Divergence.new(step:, expected:, actual:, why:)
+      end
+
+      def record_of(journal)
+        case journal
+        when Journal then journal.to_record
+        when String then Journal.read(journal)
+        when Journal::Record then journal
+        else
+          raise ArgumentError, "a journal is a Journal, its JSONL, or what Journal.read returned"
+        end
+      end
+    end
+
+    # Applies a journal's operations to a fresh session, in order, without
+    # running any policy. `batches` supplies the data the journal names,
+    # one per step taken or part accumulated.
+    class Action < Mode
+      def call(batches)
+        @data = batches.to_a
+        @fed = 0
+        steps = @record.of(Journal::Span).size
+        final = open do |session|
+          @record.entries.each { |entry| apply(session, entry) }
+          session.loss
+        end
+        Result.new(mode: :action, steps:, final_loss: final, divergences: @divergences.dup)
+      end
+
+      private
+
+      def apply(session, entry)
+        case entry
+        when Journal::Adjust
+          session.adjust(**entry.knobs.transform_keys(&:to_sym))
+        when Journal::Freezing
+          entry.frozen ? session.freeze!(entry.pattern) : session.unfreeze!(entry.pattern)
+        when Journal::Accumulate
+          session.accumulate(next_batch)
+        when Journal::Span
+          loss = entry.accumulated? ? session.apply! : session.step!(next_batch)
+          compare(entry, loss)
+        end
+        # A put's value is not in the journal, only its digest; observations
+        # and notes change nothing.
+      end
+
+      def compare(entry, loss)
+        return if agrees?(entry.loss, loss)
+
+        diverged(step: entry.step, expected: entry.loss, actual: loss,
+                 why: "the loss differs by #{(entry.loss - loss).abs}")
+      end
+
+      # The batch the next step or part was fed.
+      def next_batch
+        batch = @data.fetch(@fed) do
+          raise ArgumentError,
+                "the journal was fed #{fed_in_all} batches and only #{@data.size} " \
+                "batches were given"
+        end
+        @fed += 1
+        batch
+      end
+
+      # One per step taken on a batch, and one per part accumulated.
+      def fed_in_all
+        @record.of(Journal::Span).count { |span| !span.accumulated? } +
+          @record.of(Journal::Accumulate).size
+      end
     end
 
     # Runs `program` again over the same data and holds it to what the
@@ -79,35 +160,44 @@ module Torobi
     # This is the mode for a policy: the program is the Ruby that drove the
     # run, and what is compared is its inputs and its decisions, not only
     # where the training ended up.
-    def rerun(journal, config:, weights:, batches:, tolerance: 1e-6, &program)
-      raise ArgumentError, "rerun needs the program that drove the run" unless program
+    class Rerun < Mode
+      def call(batches, &program)
+        raise ArgumentError, "rerun needs the program that drove the run" unless program
 
-      entries = entries_of(journal)
-      expected = entries.select { |e| e["kind"] == "observe" }
-      seen = []
-      divergences = []
-
-      final = Session.open(config, weights: weights, optimizer: optimizer_of(entries)) do |session|
-        recorder = Watcher.new(session, seen)
-        program.call(recorder, batches)
-        session.loss
-      end
-
-      expected.zip(seen).each_with_index do |(want, got), i|
-        if got.nil?
-          divergences << { step: want["step"], expected: values_of(want), actual: nil,
-                           why: "the rerun observed nothing here" }
-          next
+        seen = []
+        final = open do |session|
+          program.call(Watcher.new(session, seen), batches)
+          session.loss
         end
-        compare_observation(divergences, want, got, tolerance, i)
-      end
-      if seen.size > expected.size
-        extra = seen[expected.size]
-        divergences << { step: extra.fetch(:step), expected: nil, actual: extra,
-                         why: "the rerun observed more than the journal did" }
+        expected = @record.of(Journal::Observe)
+        expected.zip(seen).each_with_index { |(want, got), i| compare(want, got, i) }
+        if seen.size > expected.size
+          extra = seen[expected.size]
+          diverged(step: extra.step, expected: nil, actual: extra.values,
+                   why: "the rerun observed more than the journal did")
+        end
+        Result.new(mode: :rerun, steps: seen.size, final_loss: final, divergences: @divergences.dup)
       end
 
-      Result.new(mode: :rerun, steps: seen.size, final_loss: final, divergences:)
+      private
+
+      def compare(want, got, index)
+        if got.nil?
+          diverged(step: want.step, expected: want.values, actual: nil,
+                   why: "the rerun observed nothing here")
+        elsif want.values.keys.sort != got.values.keys.sort
+          diverged(step: want.step, expected: want.values, actual: got.values,
+                   why: "the rerun observed different things")
+        else
+          want.values.each_pair do |key, value|
+            other = got.values.fetch(key)
+            next if agrees?(value, other)
+
+            diverged(step: want.step, expected: { key => value }, actual: { key => other },
+                     why: "observation #{index} differs on #{key}")
+          end
+        end
+      end
     end
 
     # Wraps a session so that what the program observes is collected for
@@ -119,7 +209,7 @@ module Torobi
       end
 
       def observe(**values)
-        @into << { step: @session.step, values: values.transform_keys(&:to_s) }
+        @into << ::Torobi::Journal::Observe.new(step: @session.step, values:)
         @session.observe(**values)
       end
 
@@ -130,71 +220,6 @@ module Torobi
       def respond_to_missing?(name, include_private = false)
         @session.respond_to?(name, include_private)
       end
-    end
-
-    def entries_of(journal)
-      case journal
-      when Journal then journal.to_a
-      when String then Journal.read(journal)
-      when Array then journal
-      else
-        raise ArgumentError, "a journal is a Journal, its JSONL, or its entries"
-      end
-    end
-
-    def optimizer_of(entries)
-      opened = entries.find { |e| e["event"] == "opened" }
-      opened&.dig("optimizer")&.transform_keys(&:to_sym) || Session::DEFAULT_OPTIMIZER
-    end
-
-    def apply_adjust(session, entry)
-      knobs = {}
-      knobs[:lr] = entry["lr"] if entry.key?("lr")
-      knobs[:seed] = entry["seed"] if entry.key?("seed")
-      session.adjust(**knobs) unless knobs.empty?
-      session.freeze!(entry["freeze"]) if entry["freeze"]
-      session.unfreeze!(entry["unfreeze"]) if entry["unfreeze"]
-    end
-
-    def check(divergences, entry, loss, tolerance, step)
-      return if tolerance.nil?
-
-      want = entry.fetch("loss")
-      agrees = tolerance == :bitwise ? want == loss : (want - loss).abs <= tolerance
-      return if agrees
-
-      divergences << { step:, expected: want, actual: loss,
-                       why: "the loss differs by #{(want - loss).abs}" }
-    end
-
-    def compare_observation(divergences, want, got, tolerance, index)
-      wanted = values_of(want)
-      actual = got.fetch(:values)
-      if wanted.keys.sort != actual.keys.sort
-        divergences << { step: want["step"], expected: wanted, actual:,
-                         why: "the rerun observed different things" }
-        return
-      end
-
-      wanted.each do |key, value|
-        other = actual.fetch(key)
-        next if agrees?(value, other, tolerance)
-
-        divergences << { step: want["step"], expected: { key => value },
-                         actual: { key => other },
-                         why: "observation #{index} differs on #{key}" }
-      end
-    end
-
-    def agrees?(a, b, tolerance)
-      return a == b unless a.is_a?(Numeric) && b.is_a?(Numeric)
-      return a == b if tolerance == :bitwise
-
-      (a - b).abs <= tolerance
-    end
-
-    def values_of(entry)
-      entry.except("kind", "step", "at")
     end
   end
 end
