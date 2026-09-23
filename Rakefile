@@ -257,12 +257,21 @@ namespace :mlx do
     release = JSON.parse(fetch_json(api))
     # Only this machine's archive: the digest is checked against the bytes,
     # and only these bytes can be fetched and run here.
+    #
+    # The assets are read from the release's own list rather than from the
+    # copy the tag lookup embeds: on 2026-09-23 that copy said a release had
+    # no assets while its list held four.
+    #
+    # The platform key is coarse on purpose (mlx_prebuilt.rb), and an
+    # archive may name a variant after it: `-linux-x86_64-cuda12.tar.gz` is
+    # the `linux-x86_64` archive.
     platform = MlxPrebuilt.platform
-    asset = release.fetch("assets")
-                   .find { |a| a.fetch("name").end_with?("-#{platform}.tar.gz") }
+    assets = JSON.parse(fetch_json(release.fetch("assets_url")))
+    named = /-#{Regexp.escape(platform)}(-[a-z0-9]+)?\.tar\.gz\z/
+    asset = assets.find { |a| a.fetch("name").match?(named) }
     unless asset
       abort "#{release["tag_name"]} has no .tar.gz asset for #{platform}; it holds " \
-            "#{release.fetch("assets").map { |a| a["name"] }.join(", ")}"
+            "#{assets.map { |a| a["name"] }.join(", ")}"
     end
     digest = asset["digest"].to_s.delete_prefix("sha256:")
     abort "#{asset["name"]} carries no sha256 digest" if digest.empty?
