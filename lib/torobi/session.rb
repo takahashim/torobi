@@ -439,14 +439,15 @@ module Torobi
     # It is the shape a run produces for serving, and `checkpoint!` is the
     # shape it produces for itself.
     def export_model!(dir, from: nil, model: nil, pooling: nil, pooling_dim: nil)
-      model ||= sole_model
-      merged!(model)
+      paths = @native.parameter_paths
+      model = (model || Export.sole_model(paths)).to_s
+      Export.refuse_adapted!(model, paths)
       atomically do
-        written = @native.export_model(model.to_s, dir.to_s)
+        written = @native.export_model(model, dir.to_s)
         carried = Export.new(dir, from:, pooling:, pooling_dim:).publish
         # Last, so that a record of an export is a record of one that is
         # on disk whole.
-        @journal&.note(step: @native.step, event: "exported", model: model.to_s,
+        @journal&.note(step: @native.step, event: "exported", model:,
                        paths: written.map(&:last), carried:)
         written.to_h
       end
@@ -654,44 +655,6 @@ module Torobi
             "#{what} needs a loss, and this run has none: nothing is trained and " \
             "no model output is an f32 scalar. That is what a config opened for " \
             "inference looks like, and `forward` is what it can do."
-    end
-
-    # That there is a model here to export, rather than a model and an
-    # adapter beside it.
-    #
-    # LoRA leaves the weight alone and trains a pair of small matrices
-    # next to it, so an adapted run holds the base weights it started
-    # with and never moved. Exporting writes every parameter, which would
-    # be those weights plus `lora_A` and `lora_B` tensors nothing else
-    # knows: **a directory that looks trained and is not.** Merging them
-    # (W + scale * BA, and the adapter dropped) is what makes one, and it
-    # is not built yet. Until it is, this refuses rather than writes
-    # something misleading; the checkpoint holds both halves, so nothing
-    # is lost by waiting.
-    def merged!(model)
-      adapted = @native.parameter_paths.select do |path|
-        path.start_with?("#{model}.") && LoRA.adapted?(path)
-      end
-      return if adapted.empty?
-
-      raise ConfigError,
-            "#{model.inspect} was trained through an adapter (#{adapted.size} " \
-            "parameters like #{adapted.first.inspect}), and its base weights have " \
-            "not moved. Writing them would be a model that looks trained and is " \
-            "not. Merging the adapter into the weights is not implemented; the " \
-            "checkpoint holds both halves."
-    end
-
-    # Which model to export when the run holds only one.
-    #
-    # From the parameter paths, which the engine settled at open and
-    # answers without waiting for a step: a model name is the first
-    # segment of a qualified path.
-    def sole_model
-      names = @native.parameter_paths.map { |path| path.split(".").first }.uniq
-      return names.first if names.size == 1
-
-      raise ArgumentError, "model: is required (this run has #{names.inspect})"
     end
 
     # Runs an engine change and the journal's record of it as one, so an
