@@ -34,6 +34,16 @@ answer is a `[patch.crates-io]` onto a fork, which is a bridge and not a
 destination - "The Linux patch, and when it goes" below says what has to
 become true for it to be deleted.
 
+**2026-09-23 - mlx-c bound here, and mlx-rs on its way out.** The patch
+above got the build scripts to Linux, and the Rust underneath still did
+not compile there: `mlx/c/half.h` declares the four half-precision
+accessors only on ARM, and `mlx-rs` calls them unconditionally. Fixing
+that in `mlx-rs` would make part of its public API exist on one platform
+and not another, which is not a change to ask of somebody else's crate.
+The engine uses two or three percent of `mlx-rs`, so it binds mlx-c
+itself instead - "mlx-c, bound here" below - and the patch's exit becomes
+removing `mlx-rs` rather than waiting for a release.
+
 The parts below headed "Which one is upstream", "Is the fork's mlx-rs the
 same", "What Apple publishes" and "Which mlx-c, and which MLX under it"
 are the investigation that led here, kept for its evidence.
@@ -204,6 +214,79 @@ against the patch on a Mac before anything else was done with it.
 
 This is the second time a fork has been carried here, and the first one
 (OminiX-MLX, above) is the reason the exit is written before the entrance.
+
+## mlx-c, bound here
+
+The engine reaches MLX through `engine/src/mlxc/`, which binds mlx-c
+directly: `engine/build.rs` runs bindgen over the headers in the prefix
+`TOROBI_MLX_PREFIX` names, and links the three static archives beside
+them. Nothing is compiled, and no mlx-c source is fetched. The headers
+and the archives come out of the same prefix, so what is declared is what
+is linked (notes/plan-mlxc-migration.md has the plan and its progress).
+
+**Why here rather than through `mlx-rs`.** `mlx/c/half.h` defines
+`float16_t` and `bfloat16_t` only when compiling for ARM, and `array.h`
+declares `mlx_array_item_float16`, `mlx_array_item_bfloat16`,
+`mlx_array_data_float16` and `mlx_array_data_bfloat16` under the same
+condition, so on x86_64 they do not exist. `mlx-rs` uses them without a
+condition (its `ArrayElement` for `f16` and `bf16`), so it cannot compile
+there. What they do is read half precision into a host variable; nothing
+about computing in half precision is missing, and the engine converts to
+f32 on the device before reading anything. bindgen is told to leave those
+two types and four functions out, and what remains is the same on both
+platforms.
+
+**Why not simply fix `mlx-rs`.** The fix changes its public API per
+platform, which is a design decision for its maintainers rather than a
+patch to send them. And the engine does not need most of it: models
+arrive from Ruby as a graph the engine interprets, so layers, optimizers
+and parameter management are the engine's own.
+
+**The shape is `mlx-rs`'s.** The same names, argument order and module
+paths, so that moving the engine is a change of `use` lines. `mlx-rs` is
+the reference for which mlx-c variant each method means. The reference
+is **`mlx-rs 0.32.0` from crates.io, source commit `9c2fd72e`**
+(`oxiglade/mlx-rs`, the `.cargo_vcs_info.json` of the published crate);
+the patched build this project compiled at the time differs from it only
+in build scripts, manifests and the RNG's seed clock, none of which is copied. It
+is MIT OR Apache-2.0, so reading it and taking from it are both fine.
+
+**Where the shim deliberately differs**, each for a stated reason:
+
+| what | `mlx-rs 0.32.0` | here |
+|---|---|---|
+| error handler | installed lazily on first use | installed once by the shim, independent of `mlx-rs`; tested in a process `mlx-rs` never touched |
+| `as_slice` on an empty array | panics (a null data pointer) | an empty slice |
+| a closure panicking inside `value_and_grad` | caught, then resumed after the call | the same |
+| the closure's output vector | written into mlx-c's | the same, with mlx-c's own empty vector filled rather than overwritten |
+
+## mlx-c, call by call
+
+What each method the engine calls maps to. **Ownership** is the same for
+every row and so is said once: inputs are borrowed (mlx-c takes a new
+reference where it keeps one), and the output is written into an
+`mlx_array` the shim owns before the call, so a failing call frees it.
+Every op runs on the default device's default stream, which is what
+`mlx-rs` uses when no thread-local stream is set.
+
+| method | mlx-c | optional and edge arguments |
+|---|---|---|
+| `abs` `negative` `sqrt` `rsqrt` `square` `exp` `log` `cos` `sin` | `mlx_<same name>` | none |
+| `add` `subtract` `multiply` `divide` `matmul` | `mlx_<same name>` | the other operand is `impl AsRef<Array>`; broadcasting is MLX's |
+| `sum` `mean` `max` `min` (`keep_dims`) | `mlx_sum` `mlx_mean` `mlx_max` `mlx_min`: over every axis | `keep_dims: None` is `false` |
+| `sum_axes` `mean_axes` `max_axes` (`axes`, `keep_dims`) | `mlx_sum_axes` `mlx_mean_axes` `mlx_max_axes` | negative axes count from the end; an **empty list reduces nothing** (MLX's reading, and `mlx-rs` passes it through); `keep_dims: None` is `false` |
+| `reshape` | `mlx_reshape` | one `-1` is inferred |
+| `transpose_axes` `expand_dims_axes` `squeeze_axes` | `mlx_transpose_axes` `mlx_expand_dims_axes` `mlx_squeeze_axes` | negative axes count from the end |
+| `take_axis` | `mlx_take_axis` | negative axis counts from the end |
+| `contiguous` | `mlx_contiguous` with `allow_col_major = false` | `mlx-rs`'s default |
+| `as_dtype` | `mlx_astype` | |
+| `zeros::<T>` `ones::<T>` | `mlx_zeros` `mlx_ones` with `T`'s dtype | |
+| `from_slice` | `mlx_array_new_data` (copies) | panics when the data does not fill the shape, as `mlx-rs` does |
+| `from_f32` | `mlx_array_new_float32` | |
+| `clone` | `mlx_array_set` into a new handle | another reference, not a copy of the data |
+| `item_cast::<T>` | `mlx_array_eval`, then `mlx_astype` when the dtype differs, then `mlx_array_item_<T>` | panics on more than one value, as `mlx-rs` does; `try_item_cast` returns the error |
+| `as_slice::<T>` | `mlx_array_eval`, `_mlx_array_is_row_contiguous`, `mlx_array_data_<T>` | panics on another dtype or a non-row-major layout, as `mlx-rs` does; `T` is `f32`, `i32`, `u32` or `bool` |
+| `shape` `ndim` `size` `dtype` | `mlx_array_shape` `mlx_array_ndim` `mlx_array_size` `mlx_array_dtype` | a scalar's shape is empty |
 
 ## The ledger
 

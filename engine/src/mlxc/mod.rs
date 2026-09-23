@@ -38,6 +38,7 @@ pub(crate) mod sys {
 }
 
 mod array;
+pub mod ops;
 pub mod error;
 pub(crate) mod handle;
 pub mod transforms;
