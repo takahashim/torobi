@@ -113,6 +113,9 @@ pub struct Plan {
     /// Every name a tap could ask for.
     node_names: Vec<String>,
     output_names: Vec<String>,
+    /// What each parameter is declared as, parallel to `paths`: what the
+    /// parameters are made from when the plan is materialized.
+    specs: Vec<ParameterSpec>,
 }
 
 impl Plan {
@@ -136,29 +139,39 @@ impl Plan {
         weights: Weights<'_>,
         seed: u64,
     ) -> Result<(Self, Vec<Array>)> {
+        let plan = Self::resolve(graph_json)?;
+        let mut source = Source::read(weights)?;
+        source.seed(seed)?;
+        let params = source.materialize(&plan)?;
+        // One evaluation for the lot: a file's arrays are lazy until asked.
+        eval(params.iter())?;
+        Ok((plan, params))
+    }
+
+    /// The description, resolved and checked, and nothing made: no file is
+    /// read and MLX is not reached. What the parameters will be is decided
+    /// here (their paths, which are trainable, what each is declared as);
+    /// making them is `Source::materialize`'s.
+    pub fn resolve(graph_json: &str) -> Result<Self> {
         let config_digest = crate::graph::digest(graph_json);
         let config: GraphConfig = serde_json::from_str(graph_json).context("parsing the graph")?;
         anyhow::ensure!(!config.models.is_empty(), "the graph has no models");
-        let mut source = Source::read(weights)?;
-        source.seed(seed)?;
 
         let mut models = Vec::new();
-        let mut params = Vec::new();
         let mut paths = Vec::new();
+        let mut specs = Vec::new();
         let mut candidates = Vec::new();
-        // BTreeMap iterates in name order, which is the declared order.
-        for (name, graph) in config.models {
+        for (name, mut graph) in config.models {
             let trained = config.train.contains(&name);
-            let start = params.len();
-            for spec in &graph.parameters {
-                let path = format!("{name}.{}", spec.path);
+            let start = paths.len();
+            for spec in std::mem::take(&mut graph.parameters) {
                 if trained && spec.trainable {
-                    candidates.push(params.len() as i32);
+                    candidates.push(paths.len() as i32);
                 }
-                params.push(source.parameter(&name, &path, spec)?);
-                paths.push(path);
+                paths.push(format!("{name}.{}", spec.path));
+                specs.push(spec);
             }
-            let slice = start..params.len();
+            let slice = start..paths.len();
             let program = Program::resolve(graph, slice.len(), &name)?;
             models.push(Model {
                 name,
@@ -176,14 +189,12 @@ impl Plan {
             "nothing to train: no model in {:?} has trainable parameters",
             config.train
         );
-        // One evaluation for the lot: a file's arrays are lazy until asked.
-        eval(params.iter())?;
 
         let objective = config
             .objective
             .map(|graph| Program::resolve(graph, 0, OBJECTIVE))
             .transpose()?;
-        let plan = Self {
+        Ok(Self {
             input_names: input_names(&models, objective.as_ref()),
             node_names: node_names(&models, objective.as_ref()),
             output_names: output_names(&models),
@@ -194,8 +205,8 @@ impl Plan {
             config_digest,
             graph_json: graph_json.to_string(),
             semantics_version: config.semantics_version,
-        };
-        Ok((plan, params))
+            specs,
+        })
     }
 
     /// Every program a run evaluates, models first.
@@ -391,6 +402,16 @@ impl Source {
                 key: None,
             },
         })
+    }
+
+    /// Every parameter the plan declares, from this source, in the order
+    /// the plan names them.
+    fn materialize(&self, plan: &Plan) -> Result<Vec<Array>> {
+        plan.models
+            .iter()
+            .flat_map(|model| model.slice.clone().map(move |i| (model, i)))
+            .map(|(model, i)| self.parameter(&model.name, &plan.paths[i], &plan.specs[i]))
+            .collect()
     }
 
     /// Where the fresh parameters are drawn from.
@@ -915,4 +936,18 @@ mod tests {
 
         assert!(Pattern::parse("").is_err());
     }
+
+    /// A plan is the description alone: resolved and checked with no
+    /// weights to read and nothing made, which is what lets a graph be
+    /// checked before any file or device is involved.
+    #[test]
+    fn a_description_resolves_without_its_weights() {
+        let (config, _) = fixtures::scaled_mean();
+        let plan = Plan::resolve(&config).unwrap();
+        assert_eq!(plan.paths, vec!["m.w".to_string()]);
+        assert_eq!(plan.candidates, vec![0]);
+        assert_eq!(plan.specs[0].shape, vec![2]);
+        assert_eq!(plan.config_digest, crate::graph::digest(&config));
+    }
+
 }
