@@ -136,10 +136,7 @@ impl Plan {
         weights: Weights<'_>,
         seed: u64,
     ) -> Result<(Self, Vec<Array>)> {
-        let config_digest = {
-            use sha2::{Digest, Sha256};
-            format!("{:x}", Sha256::digest(graph_json.as_bytes()))
-        };
+        let config_digest = crate::graph::digest(graph_json);
         let config: GraphConfig = serde_json::from_str(graph_json).context("parsing the graph")?;
         anyhow::ensure!(!config.models.is_empty(), "the graph has no models");
         let mut source = Source::read(weights)?;
@@ -363,7 +360,7 @@ enum Source {
     /// naming what is expected to come from an initializer instead.
     Pretrained {
         files: BTreeMap<String, std::collections::HashMap<String, Array>>,
-        fresh: Vec<String>,
+        fresh: Vec<Pattern>,
         /// Split per parameter as they are built, so what one draws does
         /// not depend on how many came before it.
         key: Option<Array>,
@@ -390,7 +387,7 @@ impl Source {
                         ))
                     })
                     .collect::<Result<_>>()?,
-                fresh: fresh.to_vec(),
+                fresh: fresh.iter().map(|p| Pattern::parse(p)).collect::<Result<_>>()?,
                 key: None,
             },
         })
@@ -449,7 +446,7 @@ impl Source {
                 shaped(array, path, spec)?
             }
             Source::Pretrained { files, fresh, key } => {
-                if let Some(pattern) = fresh.iter().find(|p| matches(p, path)) {
+                if let Some(pattern) = fresh.iter().find(|p| p.matches(path)) {
                     let key = key.as_ref().with_context(|| {
                         format!("parameter {path:?} matches {pattern:?} but no seed was set")
                     })?;
@@ -557,51 +554,46 @@ fn shaped(array: &Array, path: &str, spec: &ParameterSpec) -> Result<Array> {
     Ok(array.clone())
 }
 
-/// Whether a pattern names this path, in the same small language freezing
-/// uses: an exact path, or a prefix ending in `*`.
-fn matches(pattern: &str, path: &str) -> bool {
-    match pattern.strip_suffix('*') {
-        Some(prefix) => path.starts_with(prefix),
-        None => pattern == path,
-    }
-}
-
-/// A freeze pattern: a path, or a prefix ending in `*`.
+/// A parameter pattern: a path, or a prefix ending in `*`. The one small
+/// language both freezing and a pretrained run's fresh parameters are named
+/// in.
 ///
 /// Deliberately small. A path names one parameter, `student.*` names a
 /// model's, `student.layers.3.*` names a block's; anything more expressive
 /// would be a query language nobody asked for.
 pub struct Pattern {
+    text: String,
     prefix: String,
     exact: bool,
-    pub matched_any: bool,
 }
 
 impl Pattern {
     pub fn parse(pattern: &str) -> Result<Self> {
-        anyhow::ensure!(!pattern.is_empty(), "a freeze pattern must not be empty");
-        Ok(match pattern.strip_suffix('*') {
-            Some(prefix) => Self {
-                prefix: prefix.to_string(),
-                exact: false,
-                matched_any: false,
-            },
-            None => Self {
-                prefix: pattern.to_string(),
-                exact: true,
-                matched_any: false,
-            },
+        anyhow::ensure!(!pattern.is_empty(), "a parameter pattern must not be empty");
+        let (prefix, exact) = match pattern.strip_suffix('*') {
+            Some(prefix) => (prefix, false),
+            None => (pattern, true),
+        };
+        Ok(Self {
+            text: pattern.to_string(),
+            prefix: prefix.to_string(),
+            exact,
         })
     }
 
-    pub fn matches(&mut self, path: &str) -> bool {
-        let hit = if self.exact {
+    pub fn matches(&self, path: &str) -> bool {
+        if self.exact {
             path == self.prefix
         } else {
             path.starts_with(&self.prefix)
-        };
-        self.matched_any |= hit;
-        hit
+        }
+    }
+}
+
+impl std::fmt::Debug for Pattern {
+    /// As it was written, which is how an error should quote it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.text)
     }
 }
 
@@ -918,20 +910,16 @@ mod tests {
 
     #[test]
     fn a_pattern_is_a_path_or_a_prefix() {
-        let mut exact = Pattern::parse("a.b").unwrap();
+        let exact = Pattern::parse("a.b").unwrap();
         assert!(exact.matches("a.b"));
         assert!(!exact.matches("a.bc"));
         assert!(!exact.matches("a"));
-        assert!(exact.matched_any);
 
-        let mut prefix = Pattern::parse("a.*").unwrap();
+        let prefix = Pattern::parse("a.*").unwrap();
         assert!(prefix.matches("a.b"));
         assert!(prefix.matches("a.b.c"));
         assert!(!prefix.matches("ab.c"));
-
-        let mut nothing = Pattern::parse("z").unwrap();
-        assert!(!nothing.matches("a"));
-        assert!(!nothing.matched_any);
+        assert_eq!(format!("{prefix:?}"), r#""a.*""#);
 
         assert!(Pattern::parse("").is_err());
     }

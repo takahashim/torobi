@@ -291,8 +291,7 @@ pub fn read(dir: impl AsRef<Path>) -> Result<Loaded> {
     let graph_json = std::fs::read_to_string(dir.join(GRAPH_FILE))
         .with_context(|| format!("reading {}", dir.join(GRAPH_FILE).display()))?;
     {
-        use sha2::{Digest, Sha256};
-        let digest = format!("{:x}", Sha256::digest(graph_json.as_bytes()));
+        let digest = crate::graph::digest(&graph_json);
         anyhow::ensure!(
             digest == manifest.config_digest,
             "{GRAPH_FILE} is not the description this manifest claims \

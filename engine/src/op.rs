@@ -17,7 +17,8 @@
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
-use crate::graph::{parse_ref, Graph, InputSpec, Ref};
+use crate::graph::{parse_ref, Graph, InputSpec, NodeSpec, Ref};
+use crate::tensor::{dtype_named, Dtype};
 
 /// One node's operation, with its attributes already read.
 ///
@@ -67,7 +68,7 @@ pub enum Op {
     Sum { axes: Option<Vec<i32>>, keepdims: bool },
     Max { axes: Option<Vec<i32>>, keepdims: bool },
 
-    Cast(String),
+    Cast(Dtype),
     Matmul,
     Take,
 
@@ -84,6 +85,8 @@ impl Op {
     /// A range where the manifest gives one.
     fn arity(&self) -> (usize, usize) {
         match self {
+            // Every variant by name, and no `_`: a new op has to say how
+            // many inputs it takes, rather than being taken for a unary one.
             Op::Parameter(_) => (0, 0),
             Op::Add
             | Op::Sub
@@ -91,17 +94,53 @@ impl Op {
             | Op::Div
             | Op::Matmul
             | Op::Take
-            | Op::CrossEntropy => (2, 2),
+            | Op::CrossEntropy
+            | Op::RmsNorm { .. } => (2, 2),
             Op::LayerNorm { .. } => (2, 3),
-            Op::RmsNorm { .. } => (2, 2),
             Op::Sdpa { .. } => (3, 4),
-            _ => (1, 1),
+            Op::AddScalar(_)
+            | Op::SubScalar(_)
+            | Op::MulScalar(_)
+            | Op::DivScalar(_)
+            | Op::Neg
+            | Op::Abs
+            | Op::Sqrt
+            | Op::Square
+            | Op::Exp
+            | Op::Log
+            | Op::Gelu
+            | Op::GeluTanh
+            | Op::Relu
+            | Op::Sigmoid
+            | Op::Tanh
+            | Op::Dropout(_)
+            | Op::StopGradient
+            | Op::Softmax { .. }
+            | Op::Rope { .. }
+            | Op::Transpose(_)
+            | Op::Reshape(_)
+            | Op::Slice { .. }
+            | Op::Mean { .. }
+            | Op::Sum { .. }
+            | Op::Max { .. }
+            | Op::Cast(_) => (1, 1),
         }
     }
 
-    fn resolve(op: &str, attributes: &Map<String, Value>) -> Result<Self> {
-        Ok(match op {
-            "parameter" => Op::Parameter(0), // filled in by the caller
+    /// The op a node spec describes. `parameters` is how many the model
+    /// declares, so a `parameter` node naming one past the end is refused
+    /// here rather than indexing past them in the middle of a step.
+    fn resolve(spec: &NodeSpec, parameters: usize) -> Result<Self> {
+        let attributes = &spec.attributes;
+        Ok(match spec.op.as_str() {
+            "parameter" => {
+                let index = *spec
+                    .parameters
+                    .first()
+                    .context("a parameter node names no parameter")?;
+                anyhow::ensure!(index < parameters, "parameter {index} of {parameters}");
+                Op::Parameter(index)
+            }
             "add" => Op::Add,
             "sub" => Op::Sub,
             "mul" => Op::Mul,
@@ -167,17 +206,20 @@ impl Op {
             },
             "mean" => Op::Mean {
                 axes: optional_integers(attributes, "axes")?,
-                keepdims: boolean(attributes, "keepdims"),
+                keepdims: boolean(attributes, "keepdims")?,
             },
             "sum" => Op::Sum {
                 axes: optional_integers(attributes, "axes")?,
-                keepdims: boolean(attributes, "keepdims"),
+                keepdims: boolean(attributes, "keepdims")?,
             },
             "max" => Op::Max {
                 axes: optional_integers(attributes, "axes")?,
-                keepdims: boolean(attributes, "keepdims"),
+                keepdims: boolean(attributes, "keepdims")?,
             },
-            "cast" => Op::Cast(string(attributes, "dtype")?),
+            "cast" => {
+                let name = string(attributes, "dtype")?;
+                Op::Cast(dtype_named(&name).with_context(|| format!("cast: unknown dtype {name:?}"))?)
+            }
             "matmul" => Op::Matmul,
             "take" => Op::Take,
             "layer_norm" => Op::LayerNorm {
@@ -188,7 +230,7 @@ impl Op {
             },
             "sdpa" => Op::Sdpa {
                 scale: optional_number(attributes, "scale")?,
-                causal: boolean(attributes, "causal"),
+                causal: boolean(attributes, "causal")?,
             },
             "cross_entropy" => Op::CrossEntropy,
             other => anyhow::bail!(
@@ -230,18 +272,7 @@ impl Program {
         let mut nodes = Vec::with_capacity(graph.nodes.len());
         for (position, spec) in graph.nodes.iter().enumerate() {
             let where_ = format!("{model}: node {} ({})", spec.id, spec.op);
-            let mut op = Op::resolve(&spec.op, &spec.attributes).context(where_.clone())?;
-
-            if let Op::Parameter(_) = op {
-                let index = *spec.parameters.first().with_context(|| {
-                    format!("{where_}: a parameter node names no parameter")
-                })?;
-                anyhow::ensure!(
-                    index < parameters,
-                    "{where_}: parameter {index} of {parameters}"
-                );
-                op = Op::Parameter(index);
-            }
+            let op = Op::resolve(spec, parameters).context(where_.clone())?;
 
             let inputs = spec
                 .inputs
@@ -404,8 +435,16 @@ fn optional_integers(attributes: &Map<String, Value>, key: &str) -> Result<Optio
     }
 }
 
-fn boolean(attributes: &Map<String, Value>, key: &str) -> bool {
-    attributes.get(key).and_then(Value::as_bool).unwrap_or(false)
+/// `false` when the attribute is absent or null, as a graph that does not
+/// say `keepdims` means; anything else must be a boolean, since a typo read
+/// as `false` would be a different computation that runs.
+fn boolean(attributes: &Map<String, Value>, key: &str) -> Result<bool> {
+    match attributes.get(key) {
+        None | Some(Value::Null) => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .with_context(|| format!("attribute {key:?} must be true or false, got {value}")),
+    }
 }
 
 /// A resolved graph's outputs, by name, as the caller reads them.
@@ -580,6 +619,38 @@ mod tests {
         spec.parameters = vec![3];
         let e = refusal(vec![spec], &[("loss", "node:0")], 2);
         assert!(e.contains("parameter 3 of 2"), "{e}");
+    }
+
+    /// A cast names its dtype in the graph, so an unknown one is a graph
+    /// that cannot run, and it is refused when the plan opens.
+    #[test]
+    fn a_cast_to_an_unknown_dtype_is_refused_when_the_plan_opens() {
+        let said = refusal(
+            vec![node(0, "cast", &["input:0"], json!({"dtype": "f64"}))],
+            &[("y", "node:0")],
+            0,
+        );
+        assert!(said.contains("cast: unknown dtype \"f64\""), "{said}");
+    }
+
+    /// Absent means false, as a graph that does not say `keepdims` means;
+    /// a value that is not a boolean is a typo, not a false.
+    #[test]
+    fn a_flag_that_is_not_a_boolean_is_refused_rather_than_read_as_false() {
+        let said = refusal(
+            vec![node(0, "sum", &["input:0"], json!({"axes": [1], "keepdims": "yes"}))],
+            &[("y", "node:0")],
+            0,
+        );
+        assert!(said.contains("\"keepdims\" must be true or false"), "{said}");
+
+        let absent = Program::resolve(
+            graph(vec![node(0, "sum", &["input:0"], json!({"axes": [1]}))], &[("y", "node:0")]),
+            0,
+            "m",
+        )
+        .unwrap();
+        assert!(matches!(absent.nodes[0].op, Op::Sum { keepdims: false, .. }));
     }
 
     #[test]

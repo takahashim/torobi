@@ -195,12 +195,14 @@ impl TrainState {
     /// zero for what thaws). Which is why this lives here rather than in a
     /// setter.
     pub fn set_frozen(&mut self, plan: &Plan, pattern: &str, frozen: bool) -> Result<Vec<String>> {
-        let mut matcher = Pattern::parse(pattern)?;
+        let matcher = Pattern::parse(pattern)?;
         let mut wanted: Vec<i32> = Vec::new();
         let mut moved = Vec::new();
+        let mut matched_any = false;
         for &i in &plan.candidates {
             let path = &plan.paths[i as usize];
             let matches = matcher.matches(path);
+            matched_any |= matches;
             let currently = self.argnums.contains(&i);
             let next = if matches { !frozen } else { currently };
             if next != currently {
@@ -211,7 +213,7 @@ impl TrainState {
             }
         }
         anyhow::ensure!(
-            !moved.is_empty() || matcher.matched_any,
+            !moved.is_empty() || matched_any,
             "no parameter matches {pattern:?} (this run has {:?})",
             plan.candidate_paths()
         );
