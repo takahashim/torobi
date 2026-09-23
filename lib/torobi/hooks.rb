@@ -223,6 +223,40 @@ module Torobi
       end
     end
 
+    # How the rate comes back down is the subclass's (`at`): the two here
+    # do not share that arithmetic, and a name would only hide the
+    # difference.
+    #
+    # `warmup` is a share of the run when it is below one, and a number of
+    # steps when it is not.
+    class Curve
+      def initialize(peak:, total:, warmup: 0.05, floor: 0.0)
+        raise ArgumentError, "a schedule needs a positive peak" unless peak.positive?
+        raise ArgumentError, "a schedule needs a positive length" unless total.positive?
+
+        @peak = Float(peak)
+        @total = Integer(total)
+        @warmup = warmup < 1 ? (total * warmup).round : Integer(warmup)
+        @floor = Float(floor)
+      end
+
+      attr_reader :peak, :total, :warmup, :floor
+
+      # Public so it can be looked at without a run: a schedule nobody can
+      # plot is a schedule nobody can check.
+      def at(step)
+        raise NotImplementedError, "#{self.class} must say how the rate decays"
+      end
+
+      def call(event)
+        event.session.adjust(lr: at(event.step))
+      end
+
+      private
+
+      def progress(step) = (step - @warmup).to_f / [@total - @warmup, 1].max
+    end
+
     # The rate over the run, which every fine-tune has an opinion about.
     #
     # Warmup, then decay. Both halves are there for a reason a run shows
@@ -240,33 +274,12 @@ module Torobi
     # It is not a scheduler in the framework's sense: it is an object
     # that turns the same knob a caller could turn, which is what every
     # policy here is (docs/plan.md section 8.4).
-    class Schedule
-      # `warmup` is a share of the run when it is below one, and a number
-      # of steps when it is not.
-      def initialize(peak:, total:, warmup: 0.05, floor: 0.0)
-        raise ArgumentError, "a schedule needs a positive peak" unless peak.positive?
-        raise ArgumentError, "a schedule needs a positive length" unless total.positive?
-
-        @peak = Float(peak)
-        @total = Integer(total)
-        @warmup = warmup < 1 ? (total * warmup).round : Integer(warmup)
-        @floor = Float(floor)
-      end
-
-      attr_reader :peak, :total, :warmup, :floor
-
-      # The rate at a step. Public so it can be looked at without a run:
-      # a schedule nobody can plot is a schedule nobody can check.
+    class Schedule < Curve
       def at(step)
         return @peak * (step + 1) / (@warmup + 1).to_f if step < @warmup
 
-        over = (step - @warmup).to_f / [@total - @warmup, 1].max
-        cosine = 0.5 * (1 + Math.cos(Math::PI * [over, 1.0].min))
+        cosine = 0.5 * (1 + Math.cos(Math::PI * [progress(step), 1.0].min))
         @floor + ((@peak - @floor) * cosine)
-      end
-
-      def call(event)
-        event.session.adjust(lr: at(event.step))
       end
     end
 
@@ -282,33 +295,11 @@ module Torobi
     # `0.5 * (1 + cos(pi * progress))`.
     #
     #   s.use(Torobi::Policies::Linear.new(peak: 3e-5, total: 5386), every: 10)
-    class Linear
-      # `warmup` is a share of the run when it is below one, and a number
-      # of steps when it is not, as in Schedule.
-      def initialize(peak:, total:, warmup: 0.05, floor: 0.0)
-        raise ArgumentError, "a schedule needs a positive peak" unless peak.positive?
-        raise ArgumentError, "a schedule needs a positive length" unless total.positive?
-
-        @peak = Float(peak)
-        @total = Integer(total)
-        @warmup = warmup < 1 ? (total * warmup).round : Integer(warmup)
-        @floor = Float(floor)
-      end
-
-      attr_reader :peak, :total, :warmup, :floor
-
-      # The rate at a step: up in a line to the peak over `warmup`, then
-      # down in a line to the floor over the rest. Public so it can be
-      # looked at without a run, as Schedule's is.
+    class Linear < Curve
       def at(step)
         return @peak * (step + 1) / [@warmup, 1].max.to_f if step < @warmup
 
-        over = (step - @warmup).to_f / [@total - @warmup, 1].max
-        @floor + ((@peak - @floor) * (1.0 - [over, 1.0].min))
-      end
-
-      def call(event)
-        event.session.adjust(lr: at(event.step))
+        @floor + ((@peak - @floor) * (1.0 - [progress(step), 1.0].min))
       end
     end
 
