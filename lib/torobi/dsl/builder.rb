@@ -4,17 +4,29 @@ module Torobi
   module DSL
     # The `g` inside Torobi.graph: everything that adds to the graph.
     #
-    # The division of labour with Handle is one rule: what creates
-    # parameters or joins several values is a method here (linear, sdpa,
-    # matmul); what transforms one value is a method or operator on the
-    # handle. Layers apply immediately: `g.linear(x, 512, name: "wo")`
-    # creates the parameters and the nodes in one call.
+    # The division of labour with Handle: a handle has the one-value ops
+    # the manifest marks `handle: true`, whose attributes are all keywords
+    # (`x.gelu`, `x.softmax(axis: -1)`, `x.dropout(p: 0.1)`), its
+    # operators, and the shape helpers built from them (`split_heads`).
+    # Everything else is here: what declares parameters (`param` and the
+    # layers in `Layers`), what joins several values (`matmul`, `sdpa`),
+    # and the ops whose call is more than keywords on one value: the
+    # reductions, whose axes default to all of them, and `cast`, which is
+    # no node at all when the dtype is already the one asked for.
     class Builder
+      include Layers
+
+      # What a graph is built with when nothing is adapted: every parameter
+      # trains as declared, and no linear gains anything. The same two
+      # questions a `LoRA` answers, so the builder asks them without first
+      # asking whether there is an adapter at all.
+      module NoAdapter
+        def self.trains?(_path) = true
+        def self.wraps?(_path) = false
+      end
+
       # `models` is the set an objective may read outputs from; a model
       # graph is built with none.
-      # The adapter in scope, if a caller put one there (`adapting`).
-      attr_reader :adapter
-
       def initialize(models: {})
         @models = models.to_h { |name, graph| [name.to_s, graph] }
         @inputs = []
@@ -24,14 +36,13 @@ module Torobi
         @scopes = []
         @sharing = 0
         @labels = []
+        @adapter = NoAdapter
       end
 
       # --- graph boundary ---
 
       # An input fed from the batch, by field name.
-      def input(name, shape, dtype: :f32)
-        declare_input(name, shape, dtype, IR::Source.batch(name))
-      end
+      def input(name, shape, dtype: :f32) = from_batch(name, shape, dtype:)
 
       # An input fed from the batch under a different field name than the
       # one it is known by here.
@@ -97,7 +108,7 @@ module Torobi
       # the scope it is called in.
       def parameter(name)
         path = scoped(name)
-        spec = @parameters.find { |p| p.path == path }
+        spec = declared(path)
         unless spec
           raise ConfigError,
                 "no parameter #{path.inspect} is declared yet (this graph has " \
@@ -147,19 +158,13 @@ module Torobi
 
       def param(name, shape, init:, dtype: :f32, trainable: true)
         path = scoped(name)
-        # Inside an adapting block, what is trained is the adapter and
-        # nothing else. Said here rather than at each parameter, because
-        # a base model left trainable by an oversight is not a LoRA
-        # fine-tune, and no pattern anybody writes later can undo it: the
-        # window's `unfreeze!` moves within what the graph declared
-        # trainable, so this is the declaration that matters.
-        #
-        # Before the sharing lookup, so that a second application is
+        # Whether it trains is the adapter's to say (`LoRA#trains?`). Asked
+        # before the sharing lookup, so that a second application is
         # compared with what the first actually declared: an adapted base
         # weight is frozen, and asking whether it is the same parameter
         # has to ask about the same thing.
-        trainable &&= @adapter.adapted?(path) if @adapter
-        if @sharing.positive? && (already = @parameters.find { |p| p.path == path })
+        trainable &&= @adapter.trains?(path)
+        if @sharing.positive? && (already = declared(path))
           return shared(already, shape:, dtype:, init:, trainable:)
         end
 
@@ -167,6 +172,32 @@ module Torobi
                                      dtype:, initializer: init, trainable:)
         @parameters << spec
         emit("parameter", params: [spec.id])
+      end
+
+      # Builds a graph with an adapter in scope, so that every linear it
+      # names is trained through a pair of small matrices instead of
+      # being moved itself (`Torobi::LoRA`).
+      #
+      # A block rather than a keyword on `linear`, because what is being
+      # adapted is decided once, by whoever is doing the fine-tune, and a
+      # model description should not have to be rewritten to be adapted:
+      #
+      #   Torobi.graph do |g|
+      #     g.adapting(adapter) { ... the model ... }
+      #   end
+      #
+      # `nil` adapts nothing, so a builder that always writes this reads
+      # the same either way.
+      def adapting(adapter)
+        return yield if adapter.nil?
+        raise ConfigError, "an adapter is already in scope" unless @adapter.equal?(NoAdapter)
+
+        @adapter = adapter
+        begin
+          yield
+        ensure
+          @adapter = NoAdapter
+        end
       end
 
       # --- primitive joins ---
@@ -230,123 +261,16 @@ module Torobi
         emit("cross_entropy", inputs: [logits, targets])
       end
 
-      # --- layers: parameters plus their application, in one call ---
-
-      def linear(x, d_out, name:, bias: true)
-        label = name
-        d_in = concrete_last_dim!(x, "linear #{scoped(name).inspect}")
-        # PyTorch layout [d_out, d_in], so pretrained checkpoints map 1:1.
-        w = param("#{name}.weight", [d_out, d_in], dtype: x.dtype,
-                  init: { "type" => "kaiming_uniform" })
-        wt = emit("transpose", inputs: [w], attrs: { axes: [1, 0] })
-        y = matmul(x, wt)
-        y += param("#{name}.bias", [d_out], dtype: x.dtype, init: { "type" => "zeros" }) if bias
-        y += low_rank(x, d_in, d_out, name:) if @adapter&.wraps?(scoped(name))
-        self.name(label, y)
-      end
-
-      # Builds a graph with an adapter in scope, so that every linear it
-      # names is trained through a pair of small matrices instead of
-      # being moved itself (`Torobi::LoRA`).
-      #
-      # A block rather than a keyword on `linear`, because what is being
-      # adapted is decided once, by whoever is doing the fine-tune, and a
-      # model description should not have to be rewritten to be adapted:
-      #
-      #   Torobi.graph do |g|
-      #     g.adapting(adapter) { ... the model ... }
-      #   end
-      #
-      # `nil` adapts nothing, so a builder that always writes this reads
-      # the same either way.
-      def adapting(adapter)
-        return yield if adapter.nil?
-        raise ConfigError, "an adapter is already in scope" if @adapter
-
-        @adapter = adapter
-        begin
-          yield
-        ensure
-          @adapter = nil
-        end
-      end
-
-      # The adapter's own arithmetic: `x` through a narrow matrix and back
-      # out to the width the linear has, scaled.
-      #
-      # `B` starts at zero, so this contributes nothing until something
-      # has trained it. That is what makes an adapted model start as the
-      # model it adapts.
-      def low_rank(x, d_in, d_out, name:)
-        rank = @adapter.rank
-        a = param("#{name}.lora_A.weight", [rank, d_in], dtype: x.dtype,
-                                                         init: { "type" => "kaiming_uniform" })
-        b = param("#{name}.lora_B.weight", [d_out, rank], dtype: x.dtype,
-                                                          init: { "type" => "zeros" })
-        down = matmul(x, emit("transpose", inputs: [a], attrs: { axes: [1, 0] }))
-        up = matmul(down, emit("transpose", inputs: [b], attrs: { axes: [1, 0] }))
-        up * @adapter.scale
-      end
-
-      # The table, and the lookup into it.
-      #
-      # `dtype:` is where a model's precision is decided: everything
-      # downstream takes its dtype from what it is given (`linear` and the
-      # norms use `x.dtype`), so a bf16 table makes a bf16 model.
-      def embedding(ids, vocab:, dim:, name:, dtype: :f32)
-        table = param("#{name}.weight", [vocab, dim], dtype:,
-                      init: { "type" => "normal", "std" => 0.02 })
-        emit("take", inputs: [table, ids])
-      end
-
-      def layer_norm(x, name:, bias: false, eps: 1.0e-5)
-        d = concrete_last_dim!(x, "layer_norm #{scoped(name).inspect}")
-        w = param("#{name}.weight", [d], dtype: x.dtype, init: { "type" => "ones" })
-        inputs = [x, w]
-        inputs << param("#{name}.bias", [d], dtype: x.dtype, init: { "type" => "zeros" }) if bias
-        emit("layer_norm", inputs:, attrs: { eps: })
-      end
-
-      # `offset:` is added to the learned weight before it scales.
-      #
-      # Gemma stores its norms as `w` and applies `(1 + w)`, so its
-      # weights sit around zero where everyone else's sit around one.
-      # The op is the same op; what differs is what is handed to it, and
-      # that is a fact about the checkpoint rather than about norms.
-      def rms_norm(x, name:, eps: 1.0e-5, offset: 0.0)
-        d = concrete_last_dim!(x, "rms_norm #{scoped(name).inspect}")
-        w = param("#{name}.weight", [d], dtype: x.dtype,
-                                         init: { "type" => offset.zero? ? "ones" : "zeros" })
-        w += offset unless offset.zero?
-        emit("rms_norm", inputs: [x, w], attrs: { eps: })
-      end
-
-      # GeGLU as ModernBERT uses it: one projection producing act and gate,
-      # gelu on the act half, a projection back down.
-      def geglu(x, d_hidden, name:)
-        d_in = concrete_last_dim!(x, "geglu #{scoped(name).inspect}")
-        scope name do
-          a, gate = linear(x, d_hidden * 2, name: "wi", bias: false).split(2, axis: -1)
-          linear(a.gelu * gate, d_in, name: "wo", bias: false)
-        end
-      end
-
-      # --- objective vocabulary ---
-
-      def mse(a, b) = mean((a - b).square)
-
-      # Values whose gradient does not flow back. A teacher's output goes
-      # through this (docs/plan.md section 5A.3).
-      def stop_gradient(x) = emit("stop_gradient", inputs: [x])
-
-      # Inverted dropout, drawing from the session's RNG state. `p` is the
-      # rate dropped; 0 is the identity.
-      def dropout(x, p) = emit("dropout", inputs: [x], attrs: { p: })
-
       # --- core ---
 
       # Adds one node: checks ownership, arity and attributes against the
       # manifest, infers shape and dtype, and returns the handle.
+      #
+      # Public because a handle adds its nodes through it. A model
+      # description does not reach it: `Models::Description::VOCABULARY`
+      # is what a description may say, and `emit` is left out of it on
+      # purpose, so a node no layer means cannot be put in a graph that
+      # way.
       def emit(op, inputs: [], params: [], attrs: {}, name: nil)
         where = "node #{@nodes.size} (#{op})"
         spec = Ops.fetch(op, where:)
@@ -364,13 +288,10 @@ module Torobi
         Handle.new(builder: self, ref: IR::Ref.node(node.id), shape:, dtype:)
       end
 
-      # Names a value, so a tap can ask for it later (docs/plan.md 6.4 and
-      # 8.3). The name is taken under the scopes in force, so the same
-      # component in a loop yields "layers.0.attn", "layers.1.attn".
-      #
-      #   h = g.name("attn", g.sdpa(q, k, v))
-      def name(label, handle)
-        own!(handle, where: "name #{label.to_s.inspect}")
+      # What `Handle#named` asks of the graph: the node behind `handle`,
+      # given a name no other value here has.
+      def named(handle, label)
+        own!(handle, where: "named #{label.to_s.inspect}")
         kind, id = IR::Ref.parse(handle.ref)
         if kind != :node
           raise ConfigError, "only a computed value can be named, and #{handle.ref} is an input"
@@ -379,11 +300,7 @@ module Torobi
         node = @nodes[id]
         raise ConfigError, "#{handle.ref} is already named #{node.name.inspect}" if node.name
 
-        @nodes[id] = IR::NodeSpec.new(
-          id: node.id, op: node.op, name: unique_name(label), inputs: node.inputs,
-          parameters: node.parameters, attributes: node.attributes,
-          shape: node.shape, dtype: node.dtype
-        )
+        @nodes[id] = node.with(name: unique_name(label))
         handle
       end
 
@@ -410,6 +327,8 @@ module Torobi
         emit("parameter", params: [already.id])
       end
 
+      def declared(path) = @parameters.find { |p| p.path == path }
+
       def unique_name(label)
         candidate = (@labels + [scoped(label)]).join(".")
         if @nodes.any? { |n| n.name == candidate }
@@ -427,6 +346,10 @@ module Torobi
       end
 
       def scoped(name) = (@scopes + [name.to_s]).join(".")
+
+      # The adapter in scope (`NoAdapter` when there is none), for a layer
+      # that may be adapted.
+      attr_reader :adapter
 
       def own!(handle, where:)
         unless handle.is_a?(Handle)

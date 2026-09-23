@@ -60,6 +60,30 @@ module Torobi
     # What an adapter adds to a linear, by the names PEFT gives them.
     def paths(name) = SUFFIXES.map { |suffix| "#{name}.#{suffix}" }
 
+    # Whether the parameter at `path` is trained while this adapter is in
+    # scope: only the adapter's own are. A base model left trainable by an
+    # oversight is not a LoRA fine-tune, and the window's `unfreeze!` moves
+    # only within what the graph declared trainable, so this is the
+    # declaration that matters.
+    def trains?(path) = adapted?(path)
+
+    # The adapter's own arithmetic, added to the linear `name` over `x`:
+    # `x` through a narrow matrix and back out to the width the linear
+    # has, scaled. Built through the graph's public vocabulary, with the
+    # names `paths` gives, which are the names every other part of Torobi
+    # reads them by.
+    #
+    # `B` starts at zero, so this contributes nothing until something has
+    # trained it. That is what makes an adapted model start as the model
+    # it adapts.
+    def contribution(g, x, d_in:, d_out:, name:)
+      a_path, b_path = paths(name)
+      a = g.param(a_path, [rank, d_in], dtype: x.dtype, init: { "type" => "kaiming_uniform" })
+      b = g.param(b_path, [d_out, rank], dtype: x.dtype, init: { "type" => "zeros" })
+      down = g.matmul(x, a.transpose(axes: [1, 0]))
+      g.matmul(down, b.transpose(axes: [1, 0])) * scale
+    end
+
     # What `fresh:` should say when starting from a published checkpoint:
     # the adapter's matrices are in no file, and everything else must be.
     #

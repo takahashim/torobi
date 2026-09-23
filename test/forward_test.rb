@@ -64,6 +64,20 @@ class ForwardTest < Minitest::Test
     assert_equal [6.5, 14.5], produced["m.logits"].to_a
   end
 
+  # `2.0 / x` at an infinite x is 0: the number is divided by the value
+  # directly, not spread to its shape through it (which would be NaN).
+  def test_a_number_divided_by_an_infinite_value_is_zero
+    graph = Torobi.graph do |g|
+      x = g.input :x, [nil, 2]
+      g.output :y, 2.0 / x
+    end
+    config = Torobi::GraphConfig.new(models: { m: graph }, train: [])
+    batch = { x: Torobi::TensorData.nested([[4.0, Float::INFINITY]]) }
+    produced = Torobi::Session.open(config, weights: { params: {} }) { |s| s.forward(batch) }
+
+    assert_equal [0.5, 0.0], produced["m.y"].to_a
+  end
+
   def test_a_forward_can_be_asked_for_one_output
     produced = open_run { |s| s.forward(x, outputs: ["m.logits"]) }
 
@@ -129,7 +143,7 @@ class ForwardTest < Minitest::Test
   def test_a_forward_draws_no_randomness
     dropped = Torobi.graph do |g|
       x = g.input :x, [nil, DIM]
-      g.output :hidden, g.dropout(g.linear(x, 3, name: "l"), 0.5)
+      g.output :hidden, g.linear(x, 3, name: "l").dropout(p: 0.5)
     end
     config = Torobi::GraphConfig.new(models: { m: dropped }, train: [])
     w = { params: weights.fetch(:params).slice("m.l.weight", "m.l.bias") }

@@ -232,7 +232,7 @@ module Torobi
             encoded = scope "model" do
               encode
             end
-            name "hidden", encoded
+            encoded.named("hidden")
           end
           # Not named: an untied head is a `linear`, which names its own
           # node after its parameters, and `forward` reaches an output by

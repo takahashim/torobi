@@ -332,6 +332,29 @@ class DslTest < Minitest::Test
     end
   end
 
+  # A number divided by a value is one op, not the number spread to the
+  # value's shape by multiplying the value by zero, which is NaN wherever
+  # the value is infinite.
+  def test_a_number_divided_by_a_value_is_one_op
+    graph = Torobi.graph do |g|
+      x = g.input :x, [nil, 2]
+      g.output :y, 2.0 / x
+    end
+
+    assert_equal ["rdiv_scalar"], graph.nodes.map(&:op)
+    assert_in_delta(2.0, graph.nodes.first.attributes["value"])
+  end
+
+  # A count that is not one is the DSL's error, not Ruby's arithmetic.
+  def test_a_split_into_no_parts_is_refused_in_the_dsls_words
+    [0, -2, "two"].each do |count|
+      e = assert_raises(Torobi::ConfigError) do
+        Torobi.graph { |g| g.input(:x, [nil, 4]).split(count) }
+      end
+      assert_match(/is not a count/, e.message)
+    end
+  end
+
   def test_the_manifest_and_the_ruby_side_agree
     Torobi::Ops::REGISTRY.each_value do |spec|
       assert_includes Torobi::Shape::RULES, spec.shape_rule,

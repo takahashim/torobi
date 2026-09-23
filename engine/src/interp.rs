@@ -197,6 +197,7 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
         Op::SubScalar(v) => ins[0].subtract(scalar(*v)?)?,
         Op::MulScalar(v) => ins[0].multiply(scalar(*v)?)?,
         Op::DivScalar(v) => ins[0].divide(scalar(*v)?)?,
+        Op::RdivScalar(v) => scalar(*v)?.divide(&ins[0])?,
 
         Op::Neg => ins[0].negative()?,
         Op::Abs => ins[0].abs()?,
@@ -504,6 +505,19 @@ mod tests {
             let seen = session.tapped().unwrap();
             assert_eq!(seen[0].1.shape, vec![rows, 5, 2, 2]);
         }
+    }
+
+    /// `value / x`, and at an infinite x that is 0, not NaN: the reason
+    /// it is an op rather than a number spread to x's shape by x * 0.
+    #[test]
+    fn a_number_divided_by_the_value_is_zero_where_the_value_is_infinite() {
+        let got = output(
+            "rdiv_scalar",
+            &[3],
+            serde_json::json!({"value": 2.0}),
+            &[&[4.0, -0.5, f32::INFINITY]],
+        );
+        close(&got, &[0.5, -4.0, 0.0]);
     }
 
     #[test]

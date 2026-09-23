@@ -38,6 +38,8 @@ pub enum Op {
     SubScalar(f32),
     MulScalar(f32),
     DivScalar(f32),
+    /// The number divided by the value: `value / x`.
+    RdivScalar(f32),
 
     Neg,
     Abs,
@@ -102,6 +104,7 @@ impl Op {
             | Op::SubScalar(_)
             | Op::MulScalar(_)
             | Op::DivScalar(_)
+            | Op::RdivScalar(_)
             | Op::Neg
             | Op::Abs
             | Op::Sqrt
@@ -149,6 +152,7 @@ impl Op {
             "sub_scalar" => Op::SubScalar(number(attributes, "value")?),
             "mul_scalar" => Op::MulScalar(number(attributes, "value")?),
             "div_scalar" => Op::DivScalar(number(attributes, "value")?),
+            "rdiv_scalar" => Op::RdivScalar(number(attributes, "value")?),
             "neg" => Op::Neg,
             "abs" => Op::Abs,
             "sqrt" => Op::Sqrt,

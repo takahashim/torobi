@@ -22,7 +22,7 @@ class WiringTest < Minitest::Test
     t = teacher
     objective = Torobi.objective(student: s, teacher: t) do |g|
       logits = g.from_model :student, :logits
-      target = g.stop_gradient(g.from_model(:teacher, :logits))
+      target = g.from_model(:teacher, :logits).stop_gradient
       g.output :loss, g.mse(logits, target)
     end
     Torobi::GraphConfig.new(models: { student: s, teacher: t }, objective:, train:)

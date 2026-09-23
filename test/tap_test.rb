@@ -155,8 +155,8 @@ optimizer: { kind: :sgd, lr: 0.05 }) do |s|
     e = assert_raises(Torobi::ConfigError) do
       Torobi.graph do |g|
         x = g.input :x, [nil, DIM]
-        a = g.name("twice", g.mean(x))
-        g.output :loss, g.name("twice", a * 2.0)
+        a = g.mean(x).named("twice")
+        g.output :loss, (a * 2.0).named("twice")
       end
     end
     assert_match(/two values are named "twice"/, e.message)
