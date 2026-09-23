@@ -369,7 +369,7 @@ class LlamaTest < Minitest::Test
       Torobi::Models::Llama.batch(small, [Array.new(SEQ + 1, 1)], seq: SEQ)
     end
 
-    assert_match(/has #{SEQ + 1} tokens and this graph was built for #{SEQ}/, e.message)
+    assert_match(/has #{SEQ + 1} tokens and this batch pads to #{SEQ}/, e.message)
   end
 
   def test_a_batch_pads_on_the_right_with_the_configured_token

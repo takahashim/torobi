@@ -238,15 +238,7 @@ module Torobi
       # do need is the window, which depends on the sequence length and
       # nothing else.
       def batch(config, rows, seq:)
-        too_long = rows.each_with_index.select { |row, _| row.size > seq }
-        unless too_long.empty?
-          row, at = too_long.first
-          raise ConfigError,
-                "row #{at} has #{row.size} tokens and this graph was built for #{seq}. " \
-                "Tokenize to at most #{seq}, or build the graph for a longer sequence."
-        end
-
-        ids = rows.flat_map { |row| row + Array.new(seq - row.size, config.pad_token_id) }
+        ids = Padding.ids(rows, seq:, pad: config.pad_token_id)
         fields = { input_ids: TensorData.from_a([rows.size, seq], ids, dtype: :i32) }
         return fields unless config.any_sliding?
 

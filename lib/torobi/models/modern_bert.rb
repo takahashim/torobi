@@ -428,15 +428,7 @@ module Torobi
       # the same word `embedder` and `pool` take.
       def batch(config, rows, seq:, pooling: nil, fields: "")
         lengths = rows.map(&:size)
-        too_long = lengths.each_with_index.select { |length, _| length > seq }
-        unless too_long.empty?
-          raise ConfigError,
-                "row #{too_long.first.last} has #{too_long.first.first} tokens and this " \
-                "batch pads to #{seq}. Tokenize to at most #{seq}, or pad to more; " \
-                "where to cut a long text is the caller's to decide."
-        end
-
-        ids = rows.flat_map { |row| row + Array.new(seq - row.size, config.pad_token_id) }
+        ids = Padding.ids(rows, seq:, pad: config.pad_token_id)
         carried = { input_ids: TensorData.from_a([rows.size, seq], ids, dtype: :i32) }
                   .merge(masks(config, seq:, lengths:))
         carried = carried.merge(tokens: tokens(seq:, lengths:)) if pooling.to_s == "mean"

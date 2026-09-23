@@ -205,6 +205,16 @@ class Gemma3Test < Minitest::Test
     assert_equal [:input_ids], described.batch(global, ROWS, seq: SEQ).keys
   end
 
+  # A row longer than the padding is refused rather than cut, the way
+  # every architecture's batch refuses it (`Models::Padding`).
+  def test_a_row_longer_than_the_padding_is_refused_rather_than_cut
+    e = assert_raises(Torobi::ConfigError) do
+      described.batch(small, [[1, 2, 3, 4, 5, 6, 7]], seq: SEQ)
+    end
+
+    assert_match(/7 tokens and this batch pads to #{SEQ}/, e.message)
+  end
+
   # Swept rather than guessed, as `modern_bert_gradient_test` was, and
   # the bottom of the curve is elsewhere: 4.7e-3 at a step of 3e-3,
   # 6.5e-4 at 1e-3, 6.8e-4 at 3e-4, then 2.5e-3 at 1e-4 as f32 rounding
