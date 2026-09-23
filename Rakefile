@@ -18,6 +18,9 @@ require_relative "ext/torobi/mlx_prebuilt"
 # cannot know about when MLX is a system package. Returns the prefix.
 def with_mlx
   prefix = MlxPrebuilt.ensure!
+  # What engine/build.rs reads: the headers it generates bindings from and
+  # the archives it links.
+  ENV["TOROBI_MLX_PREFIX"] = prefix
   ENV["CMAKE_TOOLCHAIN_FILE"] = MlxPrebuilt.toolchain_file(prefix)
   ENV["MLX_RS_METAL_PATH"] = MlxPrebuilt.link_dir(prefix) if MlxPrebuilt.metal?
   flags = [ENV.fetch("RUSTFLAGS", nil), "-L", "native=#{MlxPrebuilt.link_dir(prefix)}"]

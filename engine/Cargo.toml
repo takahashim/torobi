@@ -52,6 +52,12 @@ mlx-rs = { version = "=0.32.0", default-features = false, features = [
 ] }
 mlx-sys = { version = "=0.6.0", default-features = false, features = ["cuda"] }
 
+[build-dependencies]
+# The bindings for mlx-c, generated from the headers in the prefix that is
+# linked. docs/vendoring.md says why they are generated here rather than
+# taken from mlx-sys.
+bindgen = "0.72"
+
 [dev-dependencies]
 # Checkpoint tests write real directories; nothing here mocks a filesystem.
 tempfile = "3"

@@ -28,6 +28,7 @@ pub(crate) mod graph;
 pub mod init;
 pub(crate) mod interp;
 pub mod memory;
+pub(crate) mod mlxc;
 pub(crate) mod op;
 pub(crate) mod optimizer;
 pub(crate) mod plan;

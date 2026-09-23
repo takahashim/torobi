@@ -25,7 +25,10 @@ create_rust_makefile("torobi/torobi")
 File.open("Makefile", "a") do |makefile|
   # Exported rather than set in this process: make spawns cargo, and this
   # process is gone by then.
-  makefile.puts("\nexport CMAKE_TOOLCHAIN_FILE := #{MlxPrebuilt.toolchain_file(prefix)}")
+  # What engine/build.rs reads: the headers it generates bindings from and
+  # the archives it links.
+  makefile.puts("\nexport TOROBI_MLX_PREFIX := #{prefix}")
+  makefile.puts("export CMAKE_TOOLCHAIN_FILE := #{MlxPrebuilt.toolchain_file(prefix)}")
   # mlx-sys links MLX's archive by name, and with a system MLX that
   # archive is in the prefix rather than in mlx-sys's build tree. One
   # search path, appended so a caller's RUSTFLAGS survive.

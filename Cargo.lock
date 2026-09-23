@@ -927,6 +927,7 @@ name = "torobi-engine"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "bindgen",
  "libc",
  "mlx-rs",
  "mlx-sys",
