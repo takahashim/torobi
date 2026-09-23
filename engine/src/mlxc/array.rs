@@ -160,6 +160,12 @@ impl Array {
         Array(unsafe { sys::mlx_array_new_float32(value) })
     }
 
+    /// An empty handle, which is how mlx-c spells "no array" for an
+    /// optional argument.
+    pub(crate) fn empty() -> Array {
+        Array(unsafe { sys::mlx_array_new() })
+    }
+
     pub(crate) fn from_i32(value: i32) -> Array {
         Array(unsafe { sys::mlx_array_new_int(value) })
     }

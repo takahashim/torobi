@@ -38,9 +38,17 @@ pub(crate) mod sys {
 }
 
 mod array;
-pub mod ops;
 pub mod error;
+pub mod fast;
 pub(crate) mod handle;
+mod io;
+pub mod memory;
+pub mod nn;
+pub mod ops;
+#[cfg(test)]
+mod parity;
+pub mod random;
 pub mod transforms;
 
 pub use array::{Array, ArrayElement, Dtype};
+pub use ops::stop_gradient;

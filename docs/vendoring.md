@@ -287,6 +287,24 @@ Every op runs on the default device's default stream, which is what
 | `item_cast::<T>` | `mlx_array_eval`, then `mlx_astype` when the dtype differs, then `mlx_array_item_<T>` | panics on more than one value, as `mlx-rs` does; `try_item_cast` returns the error |
 | `as_slice::<T>` | `mlx_array_eval`, `_mlx_array_is_row_contiguous`, `mlx_array_data_<T>` | panics on another dtype or a non-row-major layout, as `mlx-rs` does; `T` is `f32`, `i32`, `u32` or `bool` |
 | `shape` `ndim` `size` `dtype` | `mlx_array_shape` `mlx_array_ndim` `mlx_array_size` `mlx_array_dtype` | a scalar's shape is empty |
+| `ops::tanh` `ops::sigmoid` `ops::erf` `stop_gradient` | `mlx_tanh` `mlx_sigmoid` `mlx_erf` `mlx_stop_gradient` | none |
+| `ops::maximum` | `mlx_maximum` | |
+| `ops::zeros_like` | `mlx_zeros` with the input's shape and dtype, **not** `mlx_zeros_like` | as `mlx-rs`: the input is read for its shape and does not enter the graph |
+| `ops::softmax_axis` | `mlx_softmax_axis` | `precise: None` is `false` |
+| `ops::logsumexp_axes` | `mlx_logsumexp_axes` | `keep_dims: None` is `false` |
+| `ops::concatenate` `ops::stack` | `mlx_concatenate_axis` `mlx_stack_axis` | the arrays go in an `mlx_vector_array` the shim owns and frees |
+| `ops::indexing::take_along_axis` | `mlx_take_along_axis` | `axis: None` flattens first (`mlx_reshape` to `[-1]`, axis 0), as `mlx-rs` does |
+| `power` | `mlx_power` | used by `gelu_approximate` |
+| `nn::gelu_approximate` | `0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))`, op for op as `mlx-rs` writes it: f32 constants, an i32 exponent | **not compiled**, where `mlx-rs` wraps it in `compile`; equal to the bit in f32 and bf16 on the parity test's inputs |
+| `fast::scaled_dot_product_attention` | `mlx_fast_scaled_dot_product_attention` with `force_fused = false` | no mask and an array mask are mode `""`, causal is `"causal"` with an empty array; no sinks is an empty array. The empty arrays are owned and freed, where `mlx-rs` leaked them |
+| `random::key` | `mlx_random_key` | |
+| `random::split(key, n)` | `mlx_random_split_num`, then `take_axis` of index 0 and 1 on axis 0 | returns the first two of `n`, as `mlx-rs` does |
+| `random::normal::<T>` `random::uniform::<_, T>` `random::bernoulli` | `mlx_random_normal` `mlx_random_uniform` `mlx_random_bernoulli` | `loc` 0 and `scale` 1 when `None`; `p` 0.5 when `None`. **A missing key is an error**, where `mlx-rs` drew from a clock-seeded global; the engine always passes one. Seed 42's draws are the ones `mlx-rs` drew, pinned in a test |
+| `transforms::eval` | `mlx_eval` over one vector | |
+| `transforms::value_and_grad_with_argnums` | `mlx_closure_new_func_payload`, `mlx_value_and_grad`, `mlx_closure_value_and_grad_apply` | the closure's own error wins over MLX's "non-zero value"; a panic resumes on the Rust side |
+| `Array::load_safetensors` | `mlx_load_safetensors` on the CPU stream, then `mlx_map_string_to_array_iterator_*` | refuses a missing file or another extension before MLX sees it, in `mlx-rs`'s words; the header's metadata is read and dropped |
+| `Array::save_safetensors` | `mlx_map_string_to_array_insert`, `mlx_map_string_to_string_insert`, `mlx_save_safetensors` | the maps are owned and freed on every path; a name with a NUL is an error |
+| `memory::active` `cache` `peak` `limit` `clear_cache` `reset_peak` `set_limit` | `mlx_get_active_memory` and its siblings | not in `mlx-rs`: the engine called `mlx-sys` for these, and now goes through the shim's handler |
 
 ## The ledger
 

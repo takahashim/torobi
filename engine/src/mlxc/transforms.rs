@@ -119,6 +119,12 @@ impl Drop for ValueAndGrad {
     }
 }
 
+/// Evaluates every array given, together: one graph, one submission.
+pub fn eval<'a>(outputs: impl IntoIterator<Item = &'a Array>) -> Result<()> {
+    let vector = Vector::of(outputs)?;
+    check(unsafe { sys::mlx_eval(vector.0) }, "mlx_eval")
+}
+
 /// The closures `value_and_grad_with_argnums` accepts: one that can fail
 /// and one that cannot, as mlx-rs takes both.
 pub trait IntoValueAndGrad<'a, Err> {

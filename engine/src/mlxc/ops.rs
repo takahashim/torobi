@@ -11,8 +11,8 @@
 //! does.
 
 use super::error::Result;
-use super::handle::Stream;
-use super::{sys, Array, ArrayElement};
+use super::handle::{Stream, Vector};
+use super::{sys, Array, ArrayElement, Dtype};
 
 /// `a.$name()`: one array in, one out.
 macro_rules! unary {
@@ -117,6 +117,7 @@ binary! {
     multiply => mlx_multiply,
     divide => mlx_divide,
     matmul => mlx_matmul,
+    power => mlx_power,
 }
 
 reduce_all! {
@@ -171,12 +172,115 @@ impl Array {
             sys::mlx_ones(res, shape.as_ptr(), shape.len(), T::DTYPE.to_raw(), stream.as_raw())
         })
     }
+
+    fn zeros_dtype(shape: &[i32], dtype: Dtype) -> Result<Array> {
+        let stream = Stream::default_device();
+        Array::try_from_op(|res| unsafe {
+            sys::mlx_zeros(res, shape.as_ptr(), shape.len(), dtype.to_raw(), stream.as_raw())
+        })
+    }
+}
+
+/// `$name(a)`: the ops mlx-rs offers as free functions rather than methods.
+macro_rules! unary_function {
+    ($($name:ident => $call:ident),* $(,)?) => {
+        $(
+            pub fn $name(a: impl AsRef<Array>) -> Result<Array> {
+                let stream = Stream::default_device();
+                Array::try_from_op(|res| unsafe {
+                    sys::$call(res, a.as_ref().as_raw(), stream.as_raw())
+                })
+            }
+        )*
+    };
+}
+
+unary_function! {
+    tanh => mlx_tanh,
+    sigmoid => mlx_sigmoid,
+    erf => mlx_erf,
+    stop_gradient => mlx_stop_gradient,
+}
+
+/// Zeros of `a`'s shape and dtype. Through `mlx_zeros` rather than
+/// `mlx_zeros_like`, as mlx-rs does: the array is read for its shape, and
+/// nothing about it enters the graph.
+pub fn zeros_like(a: impl AsRef<Array>) -> Result<Array> {
+    let a = a.as_ref();
+    Array::zeros_dtype(a.shape(), a.dtype())
+}
+
+pub fn maximum(a: impl AsRef<Array>, b: impl AsRef<Array>) -> Result<Array> {
+    let stream = Stream::default_device();
+    Array::try_from_op(|res| unsafe {
+        sys::mlx_maximum(res, a.as_ref().as_raw(), b.as_ref().as_raw(), stream.as_raw())
+    })
+}
+
+/// Softmax along one axis. `precise: None` is `false`: MLX then computes
+/// in the input's precision, which for f32 is f32.
+pub fn softmax_axis(a: impl AsRef<Array>, axis: i32, precise: impl Into<Option<bool>>) -> Result<Array> {
+    let precise = precise.into().unwrap_or(false);
+    let stream = Stream::default_device();
+    Array::try_from_op(|res| unsafe {
+        sys::mlx_softmax_axis(res, a.as_ref().as_raw(), axis, precise, stream.as_raw())
+    })
+}
+
+pub fn logsumexp_axes(
+    a: impl AsRef<Array>,
+    axes: &[i32],
+    keep_dims: impl Into<Option<bool>>,
+) -> Result<Array> {
+    let keep = keep_dims.into().unwrap_or(false);
+    let stream = Stream::default_device();
+    Array::try_from_op(|res| unsafe {
+        sys::mlx_logsumexp_axes(res, a.as_ref().as_raw(), axes.as_ptr(), axes.len(), keep, stream.as_raw())
+    })
+}
+
+/// The arrays end to end along an existing axis.
+pub fn concatenate(arrays: &[impl AsRef<Array>], axis: i32) -> Result<Array> {
+    let vector = Vector::of(arrays.iter().map(AsRef::as_ref))?;
+    let stream = Stream::default_device();
+    Array::try_from_op(|res| unsafe {
+        sys::mlx_concatenate_axis(res, vector.0, axis, stream.as_raw())
+    })
+}
+
+/// The arrays side by side along a new axis.
+pub fn stack(arrays: &[impl AsRef<Array>], axis: i32) -> Result<Array> {
+    let vector = Vector::of(arrays.iter().map(AsRef::as_ref))?;
+    let stream = Stream::default_device();
+    Array::try_from_op(|res| unsafe { sys::mlx_stack_axis(res, vector.0, axis, stream.as_raw()) })
+}
+
+pub mod indexing {
+    use super::*;
+
+    /// At each position, the element of `a` along `axis` that `indices`
+    /// names there. `None` for the axis reads `a` flattened, as mlx-rs
+    /// does.
+    pub fn take_along_axis(
+        a: impl AsRef<Array>,
+        indices: impl AsRef<Array>,
+        axis: impl Into<Option<i32>>,
+    ) -> Result<Array> {
+        let (flat, axis) = match axis.into() {
+            None => (Some(a.as_ref().reshape(&[-1])?), 0),
+            Some(axis) => (None, axis),
+        };
+        let a = flat.as_ref().unwrap_or(a.as_ref());
+        let stream = Stream::default_device();
+        Array::try_from_op(|res| unsafe {
+            sys::mlx_take_along_axis(res, a.as_raw(), indices.as_ref().as_raw(), axis, stream.as_raw())
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mlxc::Dtype;
     use crate::runtime;
 
     fn run<R>(f: impl FnOnce() -> Result<R>) -> R {
