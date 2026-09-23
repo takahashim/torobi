@@ -35,7 +35,7 @@ pub fn build(spec: &ParameterSpec, key: &Array) -> Result<Array> {
         "ones" => Array::ones::<f32>(shape)?,
         "normal" => {
             let std = number(spec, "std").unwrap_or(0.02);
-            crate::mlxc::random::normal::<f32>(shape, None, Some(std), Some(key))?
+            crate::mlxc::random::normal::<f32>(shape, 0.0, std, key)?
         }
         // Kaiming uniform as PyTorch's `Linear` uses it: bound
         // sqrt(6 / fan_in) with the default gain, where fan_in is the
@@ -50,7 +50,7 @@ pub fn build(spec: &ParameterSpec, key: &Array) -> Result<Array> {
                 spec.path
             );
             let bound = (6.0f32 / fan_in).sqrt();
-            crate::mlxc::random::uniform::<_, f32>(-bound, bound, shape, Some(key))?
+            crate::mlxc::random::uniform::<f32>(-bound, bound, shape, key)?
         }
         other => anyhow::bail!(
             "parameter {:?}: initializer {other:?} is not one this engine builds \

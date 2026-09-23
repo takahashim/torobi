@@ -277,7 +277,8 @@ recorded in docs/plan.md section 15.75.
 
 | what | `mlx-rs 0.32.0` | here |
 |---|---|---|
-| error handler | installed lazily on first use | installed once by the shim, independent of `mlx-rs`; tested in a process `mlx-rs` never touched |
+| error handler | installed lazily on first use | installed once, by the runtime when it is created and wherever a handle that can fail is made (`engine/src/mlxc/error.rs` says where); tested in a child process, so an exit would fail the test rather than end the run |
+| an array a constructor could not make | an empty handle, and a later failure in MLX's words | refused by the shim from the handle before mlx-c sees it, with the constructor's reason |
 | `as_slice` on an empty array | panics (a null data pointer) | an empty slice |
 | a closure panicking inside `value_and_grad` | caught, then resumed after the call | the same |
 | the closure's output vector | written into mlx-c's | the same, with mlx-c's own empty vector filled rather than overwritten |
@@ -286,10 +287,11 @@ recorded in docs/plan.md section 15.75.
 
 What each method the engine calls maps to. **Ownership** is the same for
 every row and so is said once: inputs are borrowed (mlx-c takes a new
-reference where it keeps one), and the output is written into an
-`mlx_array` the shim owns before the call, so a failing call frees it.
-Every op runs on the default device's default stream, which is what
-`mlx-rs` uses when no thread-local stream is set.
+reference where it keeps one) and checked to have been made, and the
+output is written into an `mlx_array` the shim owns before the call, so a
+failing call frees it. Every op runs on `Stream::current`, the default
+device's default stream, which is what `mlx-rs` used when no thread-local
+stream was set.
 
 | method | mlx-c | optional and edge arguments |
 |---|---|---|
@@ -321,7 +323,7 @@ Every op runs on the default device's default stream, which is what
 | `fast::scaled_dot_product_attention` | `mlx_fast_scaled_dot_product_attention` with `force_fused = false` | no mask and an array mask are mode `""`, causal is `"causal"` with an empty array; no sinks is an empty array. The empty arrays are owned and freed, where `mlx-rs` leaked them |
 | `random::key` | `mlx_random_key` | |
 | `random::split(key, n)` | `mlx_random_split_num`, then `take_axis` of index 0 and 1 on axis 0 | returns the first two of `n`, as `mlx-rs` does |
-| `random::normal::<T>` `random::uniform::<_, T>` `random::bernoulli` | `mlx_random_normal` `mlx_random_uniform` `mlx_random_bernoulli` | `loc` 0 and `scale` 1 when `None`; `p` 0.5 when `None`. **A missing key is an error**, where `mlx-rs` drew from a clock-seeded global; the engine always passes one. Seed 42's draws are the ones `mlx-rs` drew, pinned in a test |
+| `random::normal::<T>` `random::uniform::<T>` `random::bernoulli` | `mlx_random_normal` `mlx_random_uniform` `mlx_random_bernoulli` | **the key is required by type** (`&Array`), where `mlx-rs` took an `Option` and drew from a clock-seeded global without one; `loc`, `scale` and the bounds are plain `f32`, and `p` is an array. Seed 42's draws are the ones `mlx-rs` drew, pinned in a test |
 | `transforms::eval` | `mlx_eval` over one vector | |
 | `transforms::value_and_grad_with_argnums` | `mlx_closure_new_func_payload`, `mlx_value_and_grad`, `mlx_closure_value_and_grad_apply` | the closure's own error wins over MLX's "non-zero value"; a panic resumes on the Rust side |
 | `Array::load_safetensors` | `mlx_load_safetensors` on the CPU stream, then `mlx_map_string_to_array_iterator_*` | refuses a missing file or another extension before MLX sees it, in `mlx-rs`'s words; the header's metadata is read and dropped |

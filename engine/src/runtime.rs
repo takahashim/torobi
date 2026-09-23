@@ -92,11 +92,11 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
-    /// Also where MLX's error handler goes in, before anything can reach
-    /// MLX: every route goes through here, and mlx-c's own handler exits
-    /// the process. The binding installs it on its own paths as well
-    /// (`crate::mlxc::error::install`); this is the one place that is
-    /// certainly first.
+    /// Also where MLX's error handler goes in: every route to MLX in
+    /// production goes through here first, and mlx-c's own handler exits
+    /// the process. The binding installs it where handles are born as well
+    /// (`crate::mlxc::error`), which is what covers the engine's tests of
+    /// the layers under the runtime, since they build arrays by hand.
     fn new() -> Self {
         crate::mlxc::error::install();
         Self {

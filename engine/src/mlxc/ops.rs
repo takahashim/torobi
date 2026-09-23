@@ -6,9 +6,9 @@
 //! number. Each one here is the call mlx-rs 0.32.0 makes for the same
 //! method, and docs/vendoring.md ("mlx-c, call by call") lists them.
 //!
-//! Every op runs on the default device's default stream, as mlx-rs's do
-//! when nothing has set a thread-local stream, which nothing in the engine
-//! does.
+//! Every op runs on [`Stream::current`], and takes its array arguments
+//! through [`Array::raw`], so an array that was never made is refused
+//! before mlx-c sees it.
 
 use super::error::Result;
 use super::handle::{Stream, Vector};
@@ -20,10 +20,9 @@ macro_rules! unary {
         impl Array {
             $(
                 pub fn $name(&self) -> Result<Array> {
-                    let stream = Stream::default_device();
-                    Array::try_from_op(|res| unsafe {
-                        sys::$call(res, self.as_raw(), stream.as_raw())
-                    })
+                    let a = self.raw()?;
+                    let stream = Stream::current();
+                    Array::try_from_op(|res| unsafe { sys::$call(res, a, stream.as_raw()) })
                 }
             )*
         }
@@ -36,10 +35,9 @@ macro_rules! binary {
         impl Array {
             $(
                 pub fn $name(&self, other: impl AsRef<Array>) -> Result<Array> {
-                    let stream = Stream::default_device();
-                    Array::try_from_op(|res| unsafe {
-                        sys::$call(res, self.as_raw(), other.as_ref().as_raw(), stream.as_raw())
-                    })
+                    let (a, b) = (self.raw()?, other.as_ref().raw()?);
+                    let stream = Stream::current();
+                    Array::try_from_op(|res| unsafe { sys::$call(res, a, b, stream.as_raw()) })
                 }
             )*
         }
@@ -53,11 +51,10 @@ macro_rules! reduce_all {
         impl Array {
             $(
                 pub fn $name(&self, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
+                    let a = self.raw()?;
                     let keep = keep_dims.into().unwrap_or(false);
-                    let stream = Stream::default_device();
-                    Array::try_from_op(|res| unsafe {
-                        sys::$call(res, self.as_raw(), keep, stream.as_raw())
-                    })
+                    let stream = Stream::current();
+                    Array::try_from_op(|res| unsafe { sys::$call(res, a, keep, stream.as_raw()) })
                 }
             )*
         }
@@ -72,10 +69,11 @@ macro_rules! reduce_axes {
         impl Array {
             $(
                 pub fn $name(&self, axes: &[i32], keep_dims: impl Into<Option<bool>>) -> Result<Array> {
+                    let a = self.raw()?;
                     let keep = keep_dims.into().unwrap_or(false);
-                    let stream = Stream::default_device();
+                    let stream = Stream::current();
                     Array::try_from_op(|res| unsafe {
-                        sys::$call(res, self.as_raw(), axes.as_ptr(), axes.len(), keep, stream.as_raw())
+                        sys::$call(res, a, axes.as_ptr(), axes.len(), keep, stream.as_raw())
                     })
                 }
             )*
@@ -89,9 +87,10 @@ macro_rules! with_ints {
         impl Array {
             $(
                 pub fn $name(&self, ints: &[i32]) -> Result<Array> {
-                    let stream = Stream::default_device();
+                    let a = self.raw()?;
+                    let stream = Stream::current();
                     Array::try_from_op(|res| unsafe {
-                        sys::$call(res, self.as_raw(), ints.as_ptr(), ints.len(), stream.as_raw())
+                        sys::$call(res, a, ints.as_ptr(), ints.len(), stream.as_raw())
                     })
                 }
             )*
@@ -141,40 +140,42 @@ with_ints! {
 }
 
 impl Array {
+    /// The array in another dtype.
+    pub fn as_dtype(&self, dtype: Dtype) -> Result<Array> {
+        let a = self.raw()?;
+        let stream = Stream::current();
+        Array::try_from_op(|res| unsafe { sys::mlx_astype(res, a, dtype.to_raw(), stream.as_raw()) })
+    }
+
     /// The rows (or whatever `axis` is) that `indices` names, in its order.
     pub fn take_axis(&self, indices: impl AsRef<Array>, axis: i32) -> Result<Array> {
-        let stream = Stream::default_device();
-        Array::try_from_op(|res| unsafe {
-            sys::mlx_take_axis(res, self.as_raw(), indices.as_ref().as_raw(), axis, stream.as_raw())
-        })
+        let (a, at) = (self.raw()?, indices.as_ref().raw()?);
+        let stream = Stream::current();
+        Array::try_from_op(|res| unsafe { sys::mlx_take_axis(res, a, at, axis, stream.as_raw()) })
     }
 
     /// The same values laid out row-major, sharing the buffer when it
     /// already is. Column-major is not accepted as contiguous, which is
     /// mlx-rs's default and what `as_slice` needs.
     pub fn contiguous(&self) -> Result<Array> {
-        let stream = Stream::default_device();
-        Array::try_from_op(|res| unsafe {
-            sys::mlx_contiguous(res, self.as_raw(), false, stream.as_raw())
-        })
+        let a = self.raw()?;
+        let stream = Stream::current();
+        Array::try_from_op(|res| unsafe { sys::mlx_contiguous(res, a, false, stream.as_raw()) })
     }
 
     pub fn zeros<T: ArrayElement>(shape: &[i32]) -> Result<Array> {
-        let stream = Stream::default_device();
-        Array::try_from_op(|res| unsafe {
-            sys::mlx_zeros(res, shape.as_ptr(), shape.len(), T::DTYPE.to_raw(), stream.as_raw())
-        })
+        Array::zeros_dtype(shape, T::DTYPE)
     }
 
     pub fn ones<T: ArrayElement>(shape: &[i32]) -> Result<Array> {
-        let stream = Stream::default_device();
+        let stream = Stream::current();
         Array::try_from_op(|res| unsafe {
             sys::mlx_ones(res, shape.as_ptr(), shape.len(), T::DTYPE.to_raw(), stream.as_raw())
         })
     }
 
     fn zeros_dtype(shape: &[i32], dtype: Dtype) -> Result<Array> {
-        let stream = Stream::default_device();
+        let stream = Stream::current();
         Array::try_from_op(|res| unsafe {
             sys::mlx_zeros(res, shape.as_ptr(), shape.len(), dtype.to_raw(), stream.as_raw())
         })
@@ -186,10 +187,9 @@ macro_rules! unary_function {
     ($($name:ident => $call:ident),* $(,)?) => {
         $(
             pub fn $name(a: impl AsRef<Array>) -> Result<Array> {
-                let stream = Stream::default_device();
-                Array::try_from_op(|res| unsafe {
-                    sys::$call(res, a.as_ref().as_raw(), stream.as_raw())
-                })
+                let a = a.as_ref().raw()?;
+                let stream = Stream::current();
+                Array::try_from_op(|res| unsafe { sys::$call(res, a, stream.as_raw()) })
             }
         )*
     };
@@ -207,24 +207,23 @@ unary_function! {
 /// nothing about it enters the graph.
 pub fn zeros_like(a: impl AsRef<Array>) -> Result<Array> {
     let a = a.as_ref();
+    a.raw()?;
     Array::zeros_dtype(a.shape(), a.dtype())
 }
 
 pub fn maximum(a: impl AsRef<Array>, b: impl AsRef<Array>) -> Result<Array> {
-    let stream = Stream::default_device();
-    Array::try_from_op(|res| unsafe {
-        sys::mlx_maximum(res, a.as_ref().as_raw(), b.as_ref().as_raw(), stream.as_raw())
-    })
+    let (a, b) = (a.as_ref().raw()?, b.as_ref().raw()?);
+    let stream = Stream::current();
+    Array::try_from_op(|res| unsafe { sys::mlx_maximum(res, a, b, stream.as_raw()) })
 }
 
 /// Softmax along one axis. `precise: None` is `false`: MLX then computes
 /// in the input's precision, which for f32 is f32.
 pub fn softmax_axis(a: impl AsRef<Array>, axis: i32, precise: impl Into<Option<bool>>) -> Result<Array> {
+    let a = a.as_ref().raw()?;
     let precise = precise.into().unwrap_or(false);
-    let stream = Stream::default_device();
-    Array::try_from_op(|res| unsafe {
-        sys::mlx_softmax_axis(res, a.as_ref().as_raw(), axis, precise, stream.as_raw())
-    })
+    let stream = Stream::current();
+    Array::try_from_op(|res| unsafe { sys::mlx_softmax_axis(res, a, axis, precise, stream.as_raw()) })
 }
 
 pub fn logsumexp_axes(
@@ -232,27 +231,28 @@ pub fn logsumexp_axes(
     axes: &[i32],
     keep_dims: impl Into<Option<bool>>,
 ) -> Result<Array> {
+    let a = a.as_ref().raw()?;
     let keep = keep_dims.into().unwrap_or(false);
-    let stream = Stream::default_device();
+    let stream = Stream::current();
     Array::try_from_op(|res| unsafe {
-        sys::mlx_logsumexp_axes(res, a.as_ref().as_raw(), axes.as_ptr(), axes.len(), keep, stream.as_raw())
+        sys::mlx_logsumexp_axes(res, a, axes.as_ptr(), axes.len(), keep, stream.as_raw())
     })
 }
 
 /// The arrays end to end along an existing axis.
 pub fn concatenate(arrays: &[impl AsRef<Array>], axis: i32) -> Result<Array> {
     let vector = Vector::of(arrays.iter().map(AsRef::as_ref))?;
-    let stream = Stream::default_device();
+    let stream = Stream::current();
     Array::try_from_op(|res| unsafe {
-        sys::mlx_concatenate_axis(res, vector.0, axis, stream.as_raw())
+        sys::mlx_concatenate_axis(res, vector.as_raw(), axis, stream.as_raw())
     })
 }
 
 /// The arrays side by side along a new axis.
 pub fn stack(arrays: &[impl AsRef<Array>], axis: i32) -> Result<Array> {
     let vector = Vector::of(arrays.iter().map(AsRef::as_ref))?;
-    let stream = Stream::default_device();
-    Array::try_from_op(|res| unsafe { sys::mlx_stack_axis(res, vector.0, axis, stream.as_raw()) })
+    let stream = Stream::current();
+    Array::try_from_op(|res| unsafe { sys::mlx_stack_axis(res, vector.as_raw(), axis, stream.as_raw()) })
 }
 
 pub mod indexing {
@@ -270,11 +270,10 @@ pub mod indexing {
             None => (Some(a.as_ref().reshape(&[-1])?), 0),
             Some(axis) => (None, axis),
         };
-        let a = flat.as_ref().unwrap_or(a.as_ref());
-        let stream = Stream::default_device();
-        Array::try_from_op(|res| unsafe {
-            sys::mlx_take_along_axis(res, a.as_raw(), indices.as_ref().as_raw(), axis, stream.as_raw())
-        })
+        let a = flat.as_ref().unwrap_or(a.as_ref()).raw()?;
+        let at = indices.as_ref().raw()?;
+        let stream = Stream::current();
+        Array::try_from_op(|res| unsafe { sys::mlx_take_along_axis(res, a, at, axis, stream.as_raw()) })
     }
 }
 

@@ -8,12 +8,43 @@ use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
 use std::path::Path;
 
-use super::error::{check, install, Exception, Result};
+use super::error::{check, failure, Exception, Result};
 use super::handle::Stream;
 use super::{sys, Array};
 
 /// An `mlx_map_string_to_array`.
 struct Arrays(sys::mlx_map_string_to_array);
+
+impl Arrays {
+    fn new() -> Self {
+        Self(unsafe { sys::mlx_map_string_to_array_new() })
+    }
+
+    fn insert(&self, name: &str, array: &Array) -> Result<()> {
+        let name = c_string(name)?;
+        check(
+            unsafe { sys::mlx_map_string_to_array_insert(self.0, name.as_ptr(), array.raw()?) },
+            "mlx_map_string_to_array_insert",
+        )
+    }
+
+    fn as_raw(&self) -> sys::mlx_map_string_to_array {
+        self.0
+    }
+
+    fn as_out(&mut self) -> *mut sys::mlx_map_string_to_array {
+        &mut self.0
+    }
+
+    /// Every entry, each array owned by the caller. The map must outlive
+    /// the iteration, which the borrow says.
+    fn entries(&self) -> Entries<'_> {
+        Entries {
+            raw: unsafe { sys::mlx_map_string_to_array_iterator_new(self.0) },
+            _map: self,
+        }
+    }
+}
 
 impl Drop for Arrays {
     fn drop(&mut self) {
@@ -24,18 +55,65 @@ impl Drop for Arrays {
 /// An `mlx_map_string_to_string`.
 struct Strings(sys::mlx_map_string_to_string);
 
+impl Strings {
+    fn new() -> Self {
+        Self(unsafe { sys::mlx_map_string_to_string_new() })
+    }
+
+    fn as_raw(&self) -> sys::mlx_map_string_to_string {
+        self.0
+    }
+
+    fn as_out(&mut self) -> *mut sys::mlx_map_string_to_string {
+        &mut self.0
+    }
+
+    fn insert(&self, key: &str, value: &str) -> Result<()> {
+        let (key, value) = (c_string(key)?, c_string(value)?);
+        check(
+            unsafe { sys::mlx_map_string_to_string_insert(self.0, key.as_ptr(), value.as_ptr()) },
+            "mlx_map_string_to_string_insert",
+        )
+    }
+}
+
 impl Drop for Strings {
     fn drop(&mut self) {
         unsafe { sys::mlx_map_string_to_string_free(self.0) };
     }
 }
 
-/// An `mlx_map_string_to_array_iterator`.
-struct Entries(sys::mlx_map_string_to_array_iterator);
+/// An `mlx_map_string_to_array_iterator`, as a Rust iterator.
+struct Entries<'a> {
+    raw: sys::mlx_map_string_to_array_iterator,
+    _map: &'a Arrays,
+}
 
-impl Drop for Entries {
+impl Iterator for Entries<'_> {
+    type Item = Result<(String, Array)>;
+
+    /// mlx-c answers 0 with an entry, 2 at the end, and anything else on
+    /// failure.
+    fn next(&mut self) -> Option<Self::Item> {
+        const END: i32 = 2;
+        let mut key: *const c_char = std::ptr::null();
+        let mut value = Array::empty();
+        let status = unsafe { sys::mlx_map_string_to_array_iterator_next(&mut key, value.as_out(), self.raw) };
+        match status {
+            END => None,
+            0 => {
+                // The key belongs to the map, which outlives this borrow.
+                let name = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
+                Some(Ok((name, value)))
+            }
+            _ => Some(Err(failure("mlx_map_string_to_array_iterator_next"))),
+        }
+    }
+}
+
+impl Drop for Entries<'_> {
     fn drop(&mut self) {
-        unsafe { sys::mlx_map_string_to_array_iterator_free(self.0) };
+        unsafe { sys::mlx_map_string_to_array_iterator_free(self.raw) };
     }
 }
 
@@ -55,46 +133,24 @@ fn c_string(text: &str) -> Result<CString> {
 impl Array {
     /// Every tensor in a safetensors file, by name. Lazy: nothing is read
     /// until an array is evaluated. Loaded on the CPU stream, as mlx-rs
-    /// does, which is where MLX reads files.
+    /// does, which is where MLX reads files. The header's metadata is read
+    /// by mlx-c and dropped here.
     pub fn load_safetensors(path: impl AsRef<Path>) -> Result<HashMap<String, Array>> {
         let path = path.as_ref();
         if !path.is_file() {
             return Err(Exception::custom("Path must point to a local file"));
         }
         let file = c_path(path)?;
-        install();
         let stream = Stream::cpu();
-        let mut arrays = Arrays(unsafe { sys::mlx_map_string_to_array_new() });
-        let mut metadata = Strings(unsafe { sys::mlx_map_string_to_string_new() });
+        let mut arrays = Arrays::new();
+        let mut metadata = Strings::new();
         check(
             unsafe {
-                sys::mlx_load_safetensors(&mut arrays.0, &mut metadata.0, file.as_ptr(), stream.as_raw())
+                sys::mlx_load_safetensors(arrays.as_out(), metadata.as_out(), file.as_ptr(), stream.as_raw())
             },
             "mlx_load_safetensors",
         )?;
-
-        let entries = Entries(unsafe { sys::mlx_map_string_to_array_iterator_new(arrays.0) });
-        let mut loaded = HashMap::new();
-        loop {
-            let mut key: *const c_char = std::ptr::null();
-            let mut status = 0;
-            let value = Array::try_from_op(|res| {
-                status = unsafe { sys::mlx_map_string_to_array_iterator_next(&mut key, res, entries.0) };
-                // 2 is the end, not a failure; it is told apart below.
-                if status == 2 {
-                    0
-                } else {
-                    status
-                }
-            })?;
-            if status == 2 {
-                break;
-            }
-            // The key belongs to the map, which outlives this loop.
-            let name = unsafe { CStr::from_ptr(key) }.to_string_lossy().into_owned();
-            loaded.insert(name, value);
-        }
-        Ok(loaded)
+        arrays.entries().collect()
     }
 
     /// Writes `arrays` to a safetensors file with `metadata` in its header.
@@ -109,28 +165,16 @@ impl Array {
         V: AsRef<Array>,
     {
         let file = c_path(path.as_ref())?;
-        install();
-
-        let map = Arrays(unsafe { sys::mlx_map_string_to_array_new() });
+        let map = Arrays::new();
         for (name, array) in arrays {
-            let name = c_string(name.as_ref())?;
-            check(
-                unsafe { sys::mlx_map_string_to_array_insert(map.0, name.as_ptr(), array.as_ref().as_raw()) },
-                "mlx_map_string_to_array_insert",
-            )?;
+            map.insert(name.as_ref(), array.as_ref())?;
         }
-
-        let header = Strings(unsafe { sys::mlx_map_string_to_string_new() });
+        let header = Strings::new();
         for (key, value) in metadata.into().into_iter().flatten() {
-            let (key, value) = (c_string(key)?, c_string(value)?);
-            check(
-                unsafe { sys::mlx_map_string_to_string_insert(header.0, key.as_ptr(), value.as_ptr()) },
-                "mlx_map_string_to_string_insert",
-            )?;
+            header.insert(key, value)?;
         }
-
         check(
-            unsafe { sys::mlx_save_safetensors(file.as_ptr(), map.0, header.0) },
+            unsafe { sys::mlx_save_safetensors(file.as_ptr(), map.as_raw(), header.as_raw()) },
             "mlx_save_safetensors",
         )
     }

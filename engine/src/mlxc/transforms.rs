@@ -5,18 +5,62 @@
 //! travels to mlx-c as a payload with a destructor, is called back through
 //! [`trampoline`], and reports failure with the only thing the boundary
 //! carries, an `int`. What actually went wrong waits on the Rust side
-//! (`error::park`) and is picked up by `error::settle`.
+//! ([`park`]) and is picked up once control is back in Rust ([`settle`]).
 
+use std::any::Any;
+use std::cell::RefCell;
 use std::ffi::{c_int, c_void};
 use std::marker::PhantomData;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
-use super::error::{self, check, failure, install, Exception, Parked, Result};
+use super::error::{self, check, failure, install, Exception, Result};
 use super::handle::Vector;
 use super::{sys, Array};
 
 const SUCCESS: c_int = 0;
 const FAILURE: c_int = 1;
+
+/// Why a closure reported failure to mlx-c.
+enum Parked {
+    Error(Exception),
+    Panic(Box<dyn Any + Send>),
+}
+
+thread_local! {
+    /// What a closure failed with, on its way back through C.
+    static PARKED: RefCell<Option<Parked>> = const { RefCell::new(None) };
+}
+
+fn park(parked: Parked) {
+    PARKED.with(|slot| *slot.borrow_mut() = Some(parked));
+}
+
+/// The status of a call that ran a closure, with the closure's own failure
+/// taking precedence over what MLX made of it.
+///
+/// When a closure fails, mlx-c turns the `1` it returned into a C++
+/// exception and reports *that* ("mlx_closure returned a non-zero value"),
+/// which says nothing. The parked error is the cause, so it wins, and MLX's
+/// message is dropped rather than left to be blamed on a later call.
+///
+/// A panic resumes here, on the Rust side, with its own payload: the
+/// engine's runtime relies on a panic unwinding through its gate to close
+/// the process to further MLX work (`crate::runtime`), and turning it into
+/// an error on the way through C would quietly undo that.
+#[track_caller]
+fn settle(status: c_int, operation: &str) -> Result<()> {
+    match PARKED.with(|slot| slot.borrow_mut().take()) {
+        Some(Parked::Panic(payload)) => {
+            error::forget_said();
+            resume_unwind(payload)
+        }
+        Some(Parked::Error(error)) if status != 0 => {
+            error::forget_said();
+            Err(error)
+        }
+        _ => check(status, operation),
+    }
+}
 
 /// A Rust closure, owned by mlx-c as an `mlx_closure`.
 ///
@@ -83,18 +127,21 @@ where
             .and_then(|given| closure(&given))
             .and_then(|produced| Vector::of(&produced))
             .and_then(|vector| {
-                check(unsafe { sys::mlx_vector_array_set(out, vector.0) }, "mlx_vector_array_set")
+                check(
+                    unsafe { sys::mlx_vector_array_set(out, vector.as_raw()) },
+                    "mlx_vector_array_set",
+                )
             });
         match produced {
             Ok(()) => SUCCESS,
             Err(error) => {
-                error::park(Parked::Error(error));
+                park(Parked::Error(error));
                 FAILURE
             }
         }
     }));
     caught.unwrap_or_else(|payload| {
-        error::park(Parked::Panic(payload));
+        park(Parked::Panic(payload));
         FAILURE
     })
 }
@@ -122,7 +169,7 @@ impl Drop for ValueAndGrad {
 /// Evaluates every array given, together: one graph, one submission.
 pub fn eval<'a>(outputs: impl IntoIterator<Item = &'a Array>) -> Result<()> {
     let vector = Vector::of(outputs)?;
-    check(unsafe { sys::mlx_eval(vector.0) }, "mlx_eval")
+    check(unsafe { sys::mlx_eval(vector.as_raw()) }, "mlx_eval")
 }
 
 /// The closures `value_and_grad_with_argnums` accepts: one that can fail
@@ -163,9 +210,11 @@ pub fn value_and_grad_with_argnums<'a, F, Err>(
 where
     F: IntoValueAndGrad<'a, Err> + 'a,
 {
-    let closure = Closure::new(f.into_function()).map_err(|e| e.what().to_string());
+    // mlx-rs's signature returns the function, not a `Result`, so a closure
+    // mlx-c would not take is reported on each call, as the error it was.
+    let closure = Closure::new(f.into_function());
     move |arrays: &[Array]| {
-        let closure = closure.as_ref().map_err(|what| Exception::custom(what.clone()))?;
+        let closure = closure.as_ref().map_err(Exception::clone)?;
         let mut valued = ValueAndGrad(unsafe { sys::mlx_closure_value_and_grad_new() });
         check(
             unsafe {
@@ -178,9 +227,9 @@ where
         let mut values = Vector::new();
         let mut grads = Vector::new();
         let status = unsafe {
-            sys::mlx_closure_value_and_grad_apply(&mut values.0, &mut grads.0, valued.0, given.0)
+            sys::mlx_closure_value_and_grad_apply(values.as_out(), grads.as_out(), valued.0, given.as_raw())
         };
-        error::settle(status, "mlx_closure_value_and_grad_apply")?;
+        settle(status, "mlx_closure_value_and_grad_apply")?;
         Ok((values.arrays()?, grads.arrays()?))
     }
 }
@@ -201,7 +250,7 @@ mod tests {
     }
 
     fn square(x: &Array) -> Result<Array> {
-        let stream = Stream::default_device();
+        let stream = Stream::current();
         Array::try_from_op(|res| unsafe {
             sys::mlx_multiply(res, x.as_raw(), x.as_raw(), stream.as_raw())
         })
@@ -270,6 +319,8 @@ mod tests {
     /// same panic, which is what lets the runtime's gate be poisoned by it.
     #[test]
     fn a_closure_that_panics_resumes_its_panic_on_the_rust_side() {
+        // Outside the runtime's gate on purpose: a panic through the gate
+        // would poison it for every later test.
         let caught = std::panic::catch_unwind(|| {
             let panics = |_: &[Array]| -> Result<Vec<Array>> { panic!("inside the closure") };
             let _ = value_and_grad_with_argnums(panics, &[0])(&[Array::from_f32(1.0)]);

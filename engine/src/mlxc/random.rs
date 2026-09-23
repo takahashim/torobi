@@ -1,72 +1,54 @@
 //! Keys and draws.
 //!
-//! Every draw here takes its key from the caller. mlx-rs falls back to a
-//! global state seeded from the clock when no key is given, and on Linux
-//! that clock is what failed to link (docs/vendoring.md). The engine never
-//! draws without a key, because a run is reproducible only if every draw
-//! comes from the run's seed, so there is no fallback to port: a missing
-//! key is an error.
+//! Every draw takes its key from the caller, by type: there is no global
+//! state to fall back on. mlx-rs kept one, seeded from a clock, and on
+//! Linux that clock is what failed to link (docs/vendoring.md). The engine
+//! never wanted it, because a run is reproducible only if every draw comes
+//! from the run's seed.
 
-use super::error::{Exception, Result};
+use super::error::Result;
 use super::handle::Stream;
 use super::{sys, Array, ArrayElement};
-
-fn given<'a>(key: impl Into<Option<&'a Array>>) -> Result<&'a Array> {
-    key.into().ok_or_else(|| {
-        Exception::custom("a draw was asked for without a key; the engine keeps no global one")
-    })
-}
 
 /// A key from a seed.
 pub fn key(seed: u64) -> Result<Array> {
     Array::try_from_op(|res| unsafe { sys::mlx_random_key(res, seed) })
 }
 
-/// Two keys from one, as mlx-rs returns them: split `num` ways, then the
+/// Two keys from one, as mlx-rs returned them: split `num` ways, then the
 /// first and second of those. The engine asks for two and uses both.
-pub fn split(key: impl AsRef<Array>, num: i32) -> Result<(Array, Array)> {
-    let stream = Stream::default_device();
+pub fn split(key: &Array, num: i32) -> Result<(Array, Array)> {
+    let key = key.raw()?;
+    let stream = Stream::current();
     let keys = Array::try_from_op(|res| unsafe {
-        sys::mlx_random_split_num(res, key.as_ref().as_raw(), num, stream.as_raw())
+        sys::mlx_random_split_num(res, key, num, stream.as_raw())
     })?;
     Ok((keys.take_axis(Array::from_i32(0), 0)?, keys.take_axis(Array::from_i32(1), 0)?))
 }
 
 /// Uniform on [lower, upper), in `T`'s dtype.
-pub fn uniform<'a, E: Into<Array>, T: ArrayElement>(
-    lower: E,
-    upper: E,
-    shape: &[i32],
-    key: impl Into<Option<&'a Array>>,
-) -> Result<Array> {
-    let (lower, upper): (Array, Array) = (lower.into(), upper.into());
-    let key = given(key)?;
-    let stream = Stream::default_device();
+pub fn uniform<T: ArrayElement>(lower: f32, upper: f32, shape: &[i32], key: &Array) -> Result<Array> {
+    let (lower, upper) = (Array::from_f32(lower), Array::from_f32(upper));
+    let (lo, hi, key) = (lower.raw()?, upper.raw()?, key.raw()?);
+    let stream = Stream::current();
     Array::try_from_op(|res| unsafe {
         sys::mlx_random_uniform(
             res,
-            lower.as_raw(),
-            upper.as_raw(),
+            lo,
+            hi,
             shape.as_ptr(),
             shape.len(),
             T::DTYPE.to_raw(),
-            key.as_raw(),
+            key,
             stream.as_raw(),
         )
     })
 }
 
-/// Normal with mean `loc` (0 when `None`) and standard deviation `scale`
-/// (1 when `None`), in `T`'s dtype.
-pub fn normal<'a, T: ArrayElement>(
-    shape: &[i32],
-    loc: impl Into<Option<f32>>,
-    scale: impl Into<Option<f32>>,
-    key: impl Into<Option<&'a Array>>,
-) -> Result<Array> {
-    let (loc, scale) = (loc.into().unwrap_or(0.0), scale.into().unwrap_or(1.0));
-    let key = given(key)?;
-    let stream = Stream::default_device();
+/// Normal with mean `loc` and standard deviation `scale`, in `T`'s dtype.
+pub fn normal<T: ArrayElement>(shape: &[i32], loc: f32, scale: f32, key: &Array) -> Result<Array> {
+    let key = key.raw()?;
+    let stream = Stream::current();
     Array::try_from_op(|res| unsafe {
         sys::mlx_random_normal(
             res,
@@ -75,32 +57,18 @@ pub fn normal<'a, T: ArrayElement>(
             T::DTYPE.to_raw(),
             loc,
             scale,
-            key.as_raw(),
+            key,
             stream.as_raw(),
         )
     })
 }
 
-/// `true` with probability `p` (0.5 when `None`), at each position of
-/// `shape`.
-pub fn bernoulli<'a>(
-    p: impl Into<Option<&'a Array>>,
-    shape: &[i32],
-    key: impl Into<Option<&'a Array>>,
-) -> Result<Array> {
-    let half = Array::from_f32(0.5);
-    let p = p.into().unwrap_or(&half);
-    let key = given(key)?;
-    let stream = Stream::default_device();
+/// `true` with probability `p` at each position of `shape`.
+pub fn bernoulli(p: &Array, shape: &[i32], key: &Array) -> Result<Array> {
+    let (p, key) = (p.raw()?, key.raw()?);
+    let stream = Stream::current();
     Array::try_from_op(|res| unsafe {
-        sys::mlx_random_bernoulli(
-            res,
-            p.as_raw(),
-            shape.as_ptr(),
-            shape.len(),
-            key.as_raw(),
-            stream.as_raw(),
-        )
+        sys::mlx_random_bernoulli(res, p, shape.as_ptr(), shape.len(), key, stream.as_raw())
     })
 }
 
@@ -125,8 +93,8 @@ mod tests {
         let (key, first, second, normal, uniform, kept) = run(|| {
             let root = key(42)?;
             let (first, second) = split(&root, 2)?;
-            let normal = super::normal::<f32>(&[3], None, Some(0.02), Some(&first))?;
-            let uniform = super::uniform::<_, f32>(-0.5f32, 0.5f32, &[3], Some(&second))?;
+            let normal = super::normal::<f32>(&[3], 0.0, 0.02, &first)?;
+            let uniform = super::uniform::<f32>(-0.5, 0.5, &[3], &second)?;
             let kept = bernoulli(&Array::from_f32(0.75), &[8], &first)?;
             Ok((
                 root.as_slice::<u32>().to_vec(),
@@ -167,16 +135,10 @@ mod tests {
     fn a_draw_has_the_shape_and_dtype_it_was_asked_for() {
         let got = run(|| {
             let k = key(1)?;
-            let n = normal::<f32>(&[2, 3], None, None, Some(&k))?;
-            let b = bernoulli(None, &[4], &k)?;
+            let n = normal::<f32>(&[2, 3], 0.0, 1.0, &k)?;
+            let b = bernoulli(&Array::from_f32(0.5), &[4], &k)?;
             Ok((n.shape().to_vec(), n.dtype(), b.shape().to_vec(), b.dtype()))
         });
         assert_eq!(got, (vec![2, 3], Dtype::Float32, vec![4], Dtype::Bool));
-    }
-
-    #[test]
-    fn a_draw_without_a_key_is_refused_rather_than_seeded_from_a_clock() {
-        let said = run(|| Ok(normal::<f32>(&[1], None, None, None).unwrap_err().to_string()));
-        assert!(said.contains("without a key"), "{said}");
     }
 }

@@ -8,7 +8,6 @@
 use std::ffi::c_int;
 
 use super::error::{check, install, never_made, unmade, Exception, Result};
-use super::handle::Stream;
 use super::sys;
 
 /// An `mlx_array`. One reference to an array MLX owns; dropping it gives
@@ -27,8 +26,13 @@ impl Drop for Array {
 }
 
 impl Clone for Array {
-    /// Another reference to the same array, not a copy of its data.
+    /// Another reference to the same array, not a copy of its data. An
+    /// array that was never made clones to another that was never made,
+    /// and is refused where it is used, with its cause.
     fn clone(&self) -> Self {
+        if self.0.ctx.is_null() {
+            return Array::empty();
+        }
         Array::try_from_op(|res| unsafe { sys::mlx_array_set(res, self.0) })
             .expect("mlx_array_set only fails when out of memory")
     }
@@ -50,6 +54,9 @@ impl From<f32> for Array {
 /// printing them would evaluate the array.
 impl std::fmt::Debug for Array {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.ctx.is_null() {
+            return write!(f, "Array(never made)");
+        }
         write!(f, "Array({:?} {:?})", self.dtype(), self.shape())
     }
 }
@@ -152,6 +159,28 @@ impl Array {
         Ok(out)
     }
 
+    /// The handle, for an argument mlx-c will use as an array.
+    ///
+    /// Refused when it is the empty handle a failed constructor left: that
+    /// is found here, from the handle, rather than from whatever mlx-c
+    /// would say about it, and the constructor's reason comes with it.
+    #[track_caller]
+    pub(crate) fn raw(&self) -> Result<sys::mlx_array> {
+        if self.0.ctx.is_null() {
+            Err(never_made())
+        } else {
+            Ok(self.0)
+        }
+    }
+
+    /// Where mlx-c writes an array it hands back through an out-argument
+    /// rather than through [`Array::try_from_op`] (a map's iterator).
+    pub(crate) fn as_out(&mut self) -> *mut sys::mlx_array {
+        &mut self.0
+    }
+
+    /// The handle as it is, empty or not: for mlx-c's optional arguments,
+    /// where the empty handle means "none" (`fast`).
     pub(crate) fn as_raw(&self) -> sys::mlx_array {
         self.0
     }
@@ -161,11 +190,10 @@ impl Array {
     ///
     /// The constructors return no status: on failure mlx-c reports and
     /// hands back an empty handle. That cannot be an error here (their
-    /// signatures are mlx-rs's, and infallible), but it must not be an
-    /// exit either, and on CUDA it is real: making an array allocates
-    /// device memory there, and with no usable device it fails. So the
-    /// handler is installed first, and the report is kept for the op that
-    /// then meets the empty array (`error::failure`).
+    /// signatures are mlx-rs's, and infallible), but on CUDA it is real:
+    /// making an array allocates device memory there, and with no usable
+    /// device it fails. The report is kept for whoever then uses the
+    /// empty array ([`Array::raw`]).
     fn made(make: impl FnOnce() -> sys::mlx_array) -> Array {
         install();
         let array = Array(make());
@@ -227,17 +255,7 @@ impl Array {
     }
 
     pub fn eval(&self) -> Result<()> {
-        self.made_or_why()?;
-        check(unsafe { sys::mlx_array_eval(self.0) }, "mlx_array_eval")
-    }
-
-    /// The array in another dtype. Here rather than in `ops` because
-    /// reading a value needs it.
-    pub fn as_dtype(&self, dtype: Dtype) -> Result<Array> {
-        let stream = Stream::default_device();
-        Array::try_from_op(|res| unsafe {
-            sys::mlx_astype(res, self.0, dtype.to_raw(), stream.as_raw())
-        })
+        check(unsafe { sys::mlx_array_eval(self.raw()?) }, "mlx_array_eval")
     }
 
     /// The single value this holds, converted to `T` on the device first
@@ -249,18 +267,10 @@ impl Array {
         self.try_item_cast().unwrap_or_else(|error| panic!("{error}"))
     }
 
-    /// `Err` for the empty handle a failed constructor leaves, before
-    /// anything reads its size (which would say 0 and hide why).
-    fn made_or_why(&self) -> Result<()> {
-        if self.0.ctx.is_null() {
-            Err(never_made())
-        } else {
-            Ok(())
-        }
-    }
-
+    /// Refuses the empty handle a failed constructor leaves before reading
+    /// its size, which would say 0 and hide why.
     pub fn try_item_cast<T: ArrayElement>(&self) -> Result<T> {
-        self.made_or_why()?;
+        self.raw()?;
         if self.size() != 1 {
             return Err(Exception::custom(format!(
                 "an item was asked of an array of {} values",
@@ -286,7 +296,7 @@ impl Array {
     }
 
     pub fn try_as_slice<T: ArrayElement>(&self) -> Result<&[T]> {
-        self.made_or_why()?;
+        self.raw()?;
         if self.dtype() != T::DTYPE {
             return Err(Exception::custom(format!(
                 "dtype mismatch: expected {:?}, found {:?}",

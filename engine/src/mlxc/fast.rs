@@ -33,24 +33,30 @@ pub fn scaled_dot_product_attention<'a>(
     mask: impl Into<Option<ScaledDotProductAttentionMask<'a>>>,
     sinks: impl Into<Option<&'a Array>>,
 ) -> Result<Array> {
+    let (q, k, v) = (queries.as_ref().raw()?, keys.as_ref().raw()?, values.as_ref().raw()?);
+    // The empty handle is mlx-c's "none" here, so it is passed as it is
+    // (`as_raw`); an array the caller did hand over must have been made.
     let none = Array::empty();
     let (mode, mask) = match mask.into() {
-        None => (c"", &none),
-        Some(ScaledDotProductAttentionMask::Array(mask)) => (c"", mask),
-        Some(ScaledDotProductAttentionMask::Causal) => (c"causal", &none),
+        None => (c"", none.as_raw()),
+        Some(ScaledDotProductAttentionMask::Array(mask)) => (c"", mask.raw()?),
+        Some(ScaledDotProductAttentionMask::Causal) => (c"causal", none.as_raw()),
     };
-    let sinks = sinks.into().unwrap_or(&none);
-    let stream = Stream::default_device();
+    let sinks = match sinks.into() {
+        Some(sinks) => sinks.raw()?,
+        None => none.as_raw(),
+    };
+    let stream = Stream::current();
     Array::try_from_op(|res| unsafe {
         sys::mlx_fast_scaled_dot_product_attention(
             res,
-            queries.as_ref().as_raw(),
-            keys.as_ref().as_raw(),
-            values.as_ref().as_raw(),
+            q,
+            k,
+            v,
             scale,
             mode.as_ptr(),
-            mask.as_raw(),
-            sinks.as_raw(),
+            mask,
+            sinks,
             false,
             stream.as_raw(),
         )
