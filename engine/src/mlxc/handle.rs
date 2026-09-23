@@ -5,7 +5,7 @@
 //! ownership changes hands are named: [`Vector::read`] for a vector mlx-c
 //! still owns, and the trampoline's hand-over in `transforms`.
 
-use super::error::{check, Result};
+use super::error::{check, install, Result};
 use super::{sys, Array};
 
 /// An `mlx_stream`.
@@ -16,6 +16,7 @@ impl Stream {
     /// for on every op (`Stream::thread_local_or_default`): the GPU unless
     /// something moved the default.
     pub(crate) fn default_device() -> Self {
+        install();
         unsafe {
             let mut device = sys::mlx_device_new();
             sys::mlx_get_default_device(&mut device);
@@ -28,6 +29,7 @@ impl Stream {
 
     /// The CPU's default stream, which is where mlx-rs loads safetensors.
     pub(crate) fn cpu() -> Self {
+        install();
         Self(unsafe { sys::mlx_default_cpu_stream_new() })
     }
 

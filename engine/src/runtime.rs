@@ -92,7 +92,13 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
+    /// Also where MLX's error handler goes in, before anything can reach
+    /// MLX: every route goes through here, and mlx-c's own handler exits
+    /// the process. The binding installs it on its own paths as well
+    /// (`crate::mlxc::error::install`); this is the one place that is
+    /// certainly first.
     fn new() -> Self {
+        crate::mlxc::error::install();
         Self {
             origin_pid: std::process::id(),
             gate: Mutex::new(()),

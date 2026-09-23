@@ -66,6 +66,11 @@ thread_local! {
     /// thread is one slot per failure.
     static SAID: RefCell<Option<String>> = const { RefCell::new(None) };
 
+    /// What MLX said when a constructor could not make an array. Kept apart
+    /// from `SAID`, because the failure that surfaces is a later op meeting
+    /// the empty handle, and that op's own report would replace it.
+    static UNMADE: RefCell<Option<String>> = const { RefCell::new(None) };
+
     /// What a closure failed with, on its way back through C.
     static PARKED: RefCell<Option<Parked>> = const { RefCell::new(None) };
 }
@@ -112,16 +117,42 @@ pub(crate) fn install() {
 }
 
 /// A failing status as an error, in MLX's words when it left any.
+///
+/// When what failed was an op meeting an empty array, and a constructor
+/// failed to make one earlier, the constructor's report is the cause and
+/// leads the message.
 #[track_caller]
 pub(crate) fn failure(operation: &str) -> Exception {
     let location = Location::caller();
-    match SAID.with(|slot| slot.borrow_mut().take()) {
-        Some(what) => Exception { what, location },
-        None => Exception {
-            what: format!("{operation} failed"),
-            location,
-        },
-    }
+    let said = SAID.with(|slot| slot.borrow_mut().take());
+    let what = match said {
+        Some(said) if said.contains("non-empty mlx_array") => {
+            match UNMADE.with(|slot| slot.borrow_mut().take()) {
+                Some(cause) => format!("{cause} (an array could not be made; then: {said})"),
+                None => said,
+            }
+        }
+        Some(said) => said,
+        None => format!("{operation} failed"),
+    };
+    Exception { what, location }
+}
+
+/// Why an array a caller holds is empty: what MLX said when it could not
+/// make it, if that was on this thread and not already reported.
+#[track_caller]
+pub(crate) fn never_made() -> Exception {
+    let cause = UNMADE.with(|slot| slot.borrow_mut().take());
+    Exception::custom(match cause {
+        Some(cause) => format!("{cause} (an array could not be made)"),
+        None => "this array was never made: mlx-c returned an empty handle".to_string(),
+    })
+}
+
+/// A constructor handed back an empty array: keep what MLX said about it.
+pub(crate) fn unmade() {
+    let said = SAID.with(|slot| slot.borrow_mut().take());
+    UNMADE.with(|slot| *slot.borrow_mut() = said);
 }
 
 /// `Ok` for mlx-c's success, MLX's own message otherwise.
@@ -228,6 +259,42 @@ mod tests {
             .expect("the runtime should let this through");
         let said = said.expect("shapes 2 and 3 do not broadcast");
         assert!(said.contains("broadcast"), "{said}");
+    }
+
+    /// What a constructor leaves behind when it cannot make an array: an
+    /// empty handle, which the next op refuses. That is an error rather
+    /// than an exit, and on a Mac it is the only way to reach it, since
+    /// making an array there cannot fail.
+    #[test]
+    fn an_op_on_an_array_that_was_never_made_is_an_error() {
+        let said = runtime::runtime()
+            .execute(|| {
+                let empty = Array::empty();
+                let stream = Stream::default_device();
+                let added = Array::try_from_op(|res| unsafe {
+                    sys::mlx_add(res, empty.as_raw(), empty.as_raw(), stream.as_raw())
+                });
+                Ok(added.err().map(|error| error.what().to_string()))
+            })
+            .expect("the runtime should let this through");
+        let said = said.expect("an empty handle is not an array");
+        assert!(said.contains("non-empty"), "{said}");
+    }
+
+    /// Where it can fail, on CUDA with no usable device, MLX's report about
+    /// the constructor is the cause, and leads what the later op says.
+    #[test]
+    fn a_constructor_s_failure_leads_the_error_it_causes() {
+        on_error(c"cudaMallocManaged(&data, size) failed".as_ptr(), std::ptr::null_mut());
+        unmade();
+        on_error(c"expected a non-empty mlx_array".as_ptr(), std::ptr::null_mut());
+        let said = failure("mlx_add").what().to_string();
+        assert!(said.starts_with("cudaMallocManaged"), "{said}");
+        assert!(said.contains("non-empty"), "{said}");
+
+        // And it is used once, not blamed on a later, unrelated failure.
+        on_error(c"expected a non-empty mlx_array".as_ptr(), std::ptr::null_mut());
+        assert!(!failure("mlx_add").what().contains("cudaMallocManaged"));
     }
 
     #[test]

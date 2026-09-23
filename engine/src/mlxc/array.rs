@@ -7,7 +7,7 @@
 
 use std::ffi::c_int;
 
-use super::error::{check, install, Exception, Result};
+use super::error::{check, install, never_made, unmade, Exception, Result};
 use super::handle::Stream;
 use super::sys;
 
@@ -156,8 +156,27 @@ impl Array {
         self.0
     }
 
+    /// Owns an array a constructor made, and keeps what MLX said if it
+    /// could not make one.
+    ///
+    /// The constructors return no status: on failure mlx-c reports and
+    /// hands back an empty handle. That cannot be an error here (their
+    /// signatures are mlx-rs's, and infallible), but it must not be an
+    /// exit either, and on CUDA it is real: making an array allocates
+    /// device memory there, and with no usable device it fails. So the
+    /// handler is installed first, and the report is kept for the op that
+    /// then meets the empty array (`error::failure`).
+    fn made(make: impl FnOnce() -> sys::mlx_array) -> Array {
+        install();
+        let array = Array(make());
+        if array.0.ctx.is_null() {
+            unmade();
+        }
+        array
+    }
+
     pub fn from_f32(value: f32) -> Array {
-        Array(unsafe { sys::mlx_array_new_float32(value) })
+        Array::made(|| unsafe { sys::mlx_array_new_float32(value) })
     }
 
     /// An empty handle, which is how mlx-c spells "no array" for an
@@ -167,7 +186,7 @@ impl Array {
     }
 
     pub(crate) fn from_i32(value: i32) -> Array {
-        Array(unsafe { sys::mlx_array_new_int(value) })
+        Array::made(|| unsafe { sys::mlx_array_new_int(value) })
     }
 
     /// An array holding a copy of `data`, in row-major order.
@@ -177,7 +196,7 @@ impl Array {
     pub fn from_slice<T: ArrayElement>(data: &[T], shape: &[i32]) -> Array {
         let wanted: i64 = shape.iter().map(|&d| d as i64).product();
         assert_eq!(data.len() as i64, wanted, "{} values for shape {shape:?}", data.len());
-        Array(unsafe {
+        Array::made(|| unsafe {
             sys::mlx_array_new_data(
                 data.as_ptr().cast(),
                 shape.as_ptr(),
@@ -208,7 +227,7 @@ impl Array {
     }
 
     pub fn eval(&self) -> Result<()> {
-        install();
+        self.made_or_why()?;
         check(unsafe { sys::mlx_array_eval(self.0) }, "mlx_array_eval")
     }
 
@@ -230,7 +249,18 @@ impl Array {
         self.try_item_cast().unwrap_or_else(|error| panic!("{error}"))
     }
 
+    /// `Err` for the empty handle a failed constructor leaves, before
+    /// anything reads its size (which would say 0 and hide why).
+    fn made_or_why(&self) -> Result<()> {
+        if self.0.ctx.is_null() {
+            Err(never_made())
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn try_item_cast<T: ArrayElement>(&self) -> Result<T> {
+        self.made_or_why()?;
         if self.size() != 1 {
             return Err(Exception::custom(format!(
                 "an item was asked of an array of {} values",
@@ -256,6 +286,7 @@ impl Array {
     }
 
     pub fn try_as_slice<T: ArrayElement>(&self) -> Result<&[T]> {
+        self.made_or_why()?;
         if self.dtype() != T::DTYPE {
             return Err(Exception::custom(format!(
                 "dtype mismatch: expected {:?}, found {:?}",
@@ -361,6 +392,14 @@ mod tests {
             Ok(b.as_slice::<f32>().to_vec())
         });
         assert_eq!(got, vec![4.0, 5.0]);
+    }
+
+    /// Reading an array a constructor could not make says so, rather than
+    /// that it holds no values.
+    #[test]
+    fn reading_an_array_that_was_never_made_says_so() {
+        let said = run(|| Ok(Array::empty().try_item_cast::<f32>().unwrap_err().to_string()));
+        assert!(said.contains("never made"), "{said}");
     }
 
     #[test]
