@@ -94,7 +94,7 @@ pub struct State<'a> {
     /// Which of them are differentiated, as positions into `parameters`.
     pub argnums: &'a [i32],
     /// The optimizer's slots, parallel to `argnums`.
-    pub slots: (&'a [Array], &'a [Array]),
+    pub slots: Option<(&'a [Array], &'a [Array])>,
     /// The RNG key, so a resumed run draws what a continuous one would.
     pub rng: &'a Array,
     pub seed: u64,
@@ -175,8 +175,7 @@ fn lay_out(staging: &Path, state: &State<'_>) -> Result<()> {
     )
     .context("writing parameters")?;
 
-    let (m, v) = state.slots;
-    if !m.is_empty() {
+    if let Some((m, v)) = state.slots {
         let named: Vec<(String, &Array)> = state
             .argnums
             .iter()

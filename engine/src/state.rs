@@ -15,7 +15,7 @@ use crate::mlxc::transforms::eval;
 use crate::mlxc::{Array, Dtype};
 
 use crate::checkpoint;
-use crate::optimizer::{global_norm, scaled, Config as OptimizerConfig, Optimizer};
+use crate::optimizer::{global_norm, scaled, Config as OptimizerConfig, Moments, Optimizer};
 use crate::plan::{Model, Pattern, Plan};
 use crate::tensor::{to_tensor, Tensor};
 
@@ -25,8 +25,7 @@ use crate::tensor::{to_tensor, Tensor};
 /// [`TrainState::restore`] a commit rather than a sequence of hopes.
 struct Restored {
     params: Vec<Array>,
-    m: Vec<Array>,
-    v: Vec<Array>,
+    moments: Moments,
     rng: Array,
     seed: u64,
     step: usize,
@@ -329,14 +328,7 @@ impl TrainState {
         let mut params = self.params.clone();
         let next_optimizer = self.optimizer.next(&mut params, &self.argnums, &grads)?;
 
-        let (m, v) = next_optimizer.slots();
-        eval(
-            params
-                .iter()
-                .chain(m.iter())
-                .chain(v.iter())
-                .chain(std::iter::once(&rng)),
-        )?;
+        eval(params.iter().chain(next_optimizer.arrays()).chain(std::iter::once(&rng)))?;
 
         self.params = params;
         self.optimizer = next_optimizer;
@@ -448,7 +440,6 @@ impl TrainState {
         } else {
             serde_json::from_str(run).context("the run metadata is not JSON")?
         };
-        let (m, v) = self.optimizer.slots();
         let state = checkpoint::State {
             config_digest: &plan.config_digest,
             graph_json: &plan.graph_json,
@@ -458,7 +449,7 @@ impl TrainState {
             optimizer_steps: self.optimizer.steps_taken(),
             parameters: plan.paths.iter().cloned().zip(self.params.iter()).collect(),
             argnums: &self.argnums,
-            slots: (m, v),
+            slots: self.optimizer.slots(),
             rng: &self.rng,
             seed: self.seed,
             run,
@@ -582,14 +573,13 @@ impl TrainState {
             accepted
                 .params
                 .iter()
-                .chain(accepted.m.iter())
-                .chain(accepted.v.iter())
+                .chain(accepted.moments.arrays())
                 .chain(std::iter::once(&accepted.rng)),
         )?;
 
         self.params = accepted.params;
         self.optimizer
-            .restore(accepted.m, accepted.v, accepted.optimizer_steps);
+            .restore(accepted.moments, accepted.optimizer_steps);
         self.rng = accepted.rng;
         self.seed = accepted.seed;
         self.step = accepted.step;
@@ -652,11 +642,10 @@ impl TrainState {
             params.push(array.clone());
         }
 
-        let (m, v) = self.accept_slots(plan, &loaded)?;
+        let moments = self.accept_slots(plan, &loaded)?;
         Ok(Restored {
             params,
-            m,
-            v,
+            moments,
             rng: loaded.rng.context("the checkpoint has no RNG state")?,
             seed: manifest.seed,
             step: manifest.step,
@@ -674,14 +663,14 @@ impl TrainState {
         &self,
         plan: &Plan,
         loaded: &checkpoint::Loaded,
-    ) -> Result<(Vec<Array>, Vec<Array>)> {
+    ) -> Result<Moments> {
         if !self.optimizer.wants_slots() {
             anyhow::ensure!(
                 loaded.slots.is_empty(),
                 "this checkpoint carries optimizer state, and {} has none",
                 self.optimizer.config().name()
             );
-            return Ok((Vec::new(), Vec::new()));
+            return Ok(Moments::None);
         }
 
         anyhow::ensure!(
@@ -704,7 +693,7 @@ impl TrainState {
             m.push(slot_m.clone());
             v.push(slot_v.clone());
         }
-        Ok((m, v))
+        Ok(Moments::Adam { m, v })
     }
 }
 
