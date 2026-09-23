@@ -20,7 +20,7 @@ module Torobi
         end
 
         # Checks everything and returns +outputs+ as the graph holds them:
-        # string names, sorted, frozen.
+        # string names to Refs, sorted, frozen.
         def call(outputs)
           sequential!(@inputs, InputSpec, "input")
           sequential!(@parameters, ParameterSpec, "parameter")
@@ -59,13 +59,12 @@ module Torobi
         def references!(node)
           where = "node #{node.id} (#{node.op})"
           node.inputs.each do |ref|
-            kind, id = Ref.parse(ref)
-            if kind == :node && id >= node.id
+            if ref.node? && ref.id >= node.id
               raise ConfigError,
-                    "#{where}: references node:#{id}, which is not before it " \
+                    "#{where}: references #{ref}, which is not before it " \
                     "(forward references are not allowed)"
             end
-            Ref.resolve(ref, inputs: @inputs, nodes: @nodes, where: "#{where}:")
+            ref.resolve(inputs: @inputs, nodes: @nodes, where: "#{where}:")
           end
           node.parameters.each do |pid|
             unless pid < @parameters.size
@@ -83,10 +82,11 @@ module Torobi
             name = name.to_s
             raise ConfigError, "an output name must not be empty" if name.empty?
 
-            Ref.resolve(ref, inputs: @inputs, nodes: @nodes, where: "output #{name.inspect}")
-            [-name, -ref.to_s]
+            ref = Ref.parse(ref)
+            ref.resolve(inputs: @inputs, nodes: @nodes, where: "output #{name.inspect}")
+            [-name, ref]
           end
-          Freeze.deep(named.sort.to_h)
+          named.sort.to_h.freeze
         end
 
         # Every node must contribute to an output. A dead node is almost
@@ -109,12 +109,7 @@ module Torobi
           raise ConfigError, "unreachable from any output: #{names}"
         end
 
-        def node_ids(refs)
-          refs.filter_map do |ref|
-            kind, id = Ref.parse(ref)
-            id if kind == :node
-          end
-        end
+        def node_ids(refs) = refs.filter_map { |ref| ref.id if ref.node? }
       end
     end
   end

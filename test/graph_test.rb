@@ -13,7 +13,8 @@ class GraphTest < Minitest::Test
     graph = Torobi::TestGraphs.linear_graph
 
     assert_equal 3, graph.nodes.size
-    assert_equal({ "loss" => "node:2" }, graph.outputs)
+    assert_equal({ "loss" => IR::Ref.node(2) }, graph.outputs)
+    assert_equal({ "loss" => "node:2" }, graph.to_h.fetch("outputs"), "and written as text")
   end
 
   def test_ids_must_be_consecutive_from_zero

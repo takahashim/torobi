@@ -22,10 +22,9 @@ module Torobi
         raise ConfigError, "node #{id}: name must not be empty" if name && name.empty?
 
         where = "node #{id} (#{op})"
-        # Parsed here so a malformed reference is refused by the node that
+        # Read here so a malformed reference is refused by the node that
         # holds it; whether it points anywhere is the graph's to say.
-        inputs.each { |ref| Ref.parse(ref) }
-        inputs = Freeze.deep(inputs.map { |ref| -ref.to_s })
+        inputs = inputs.map { |ref| Ref.parse(ref) }.freeze
         parameters = Freeze.deep(parameters.map { |pid| Integer(pid) })
         attributes = Freeze.deep(Json.primitive!(attributes.transform_keys(&:to_s),
                                                  where: "#{where} attributes"))
@@ -37,7 +36,7 @@ module Torobi
 
       def to_h
         {
-          "id" => id, "op" => op, "name" => name, "inputs" => inputs,
+          "id" => id, "op" => op, "name" => name, "inputs" => inputs.map(&:to_s),
           "parameters" => parameters, "attributes" => Json.canonical(attributes),
           "shape" => shape, "dtype" => dtype.to_s
         }

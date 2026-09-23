@@ -20,12 +20,12 @@ module Torobi
           "inputs" => inputs.map(&:to_h),
           "parameters" => parameters.map(&:to_h),
           "nodes" => nodes.map(&:to_h),
-          "outputs" => outputs
+          "outputs" => outputs.transform_values(&:to_s)
         }
       end
 
-      # The input or node +ref+ points at.
-      def resolve(ref) = Ref.resolve(ref, inputs:, nodes:, where: "this graph")
+      # The input or node +ref+ (a Ref, or one written out) points at.
+      def resolve(ref) = Ref.parse(ref).resolve(inputs:, nodes:, where: "this graph")
 
       # The shape and dtype behind one named output, for whoever consumes it.
       def output_signature(name)

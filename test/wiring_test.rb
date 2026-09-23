@@ -39,7 +39,7 @@ class WiringTest < Minitest::Test
     assert_equal [nil, 1], inputs.first.shape
     # stop_gradient, then mse lowered to sub / square / mean.
     assert_equal %w[stop_gradient sub square mean], config.objective.nodes.map(&:op)
-    assert_equal({ "loss" => "node:3" }, config.objective.outputs)
+    assert_equal({ "loss" => Torobi::IR::Ref.node(3) }, config.objective.outputs)
   end
 
   # The two halves are written separately, so a config that arrives from
@@ -205,6 +205,6 @@ class WiringTest < Minitest::Test
     # It sits between the teacher's output and the loss.
     node = config.objective.nodes.find { |n| n.op == "stop_gradient" }
 
-    assert_equal ["input:1"], node.inputs
+    assert_equal [Torobi::IR::Ref.input(1)], node.inputs
   end
 end

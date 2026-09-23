@@ -292,15 +292,16 @@ module Torobi
       # given a name no other value here has.
       def named(handle, label)
         own!(handle, where: "named #{label.to_s.inspect}")
-        kind, id = IR::Ref.parse(handle.ref)
-        if kind != :node
-          raise ConfigError, "only a computed value can be named, and #{handle.ref} is an input"
+        ref = handle.ref
+        if ref.input?
+          raise ConfigError,
+                "only a computed value can be named, and #{ref} is an input"
         end
 
-        node = @nodes[id]
+        node = @nodes[ref.id]
         raise ConfigError, "#{handle.ref} is already named #{node.name.inspect}" if node.name
 
-        @nodes[id] = node.with(name: unique_name(label))
+        @nodes[ref.id] = node.with(name: unique_name(label))
         handle
       end
 
