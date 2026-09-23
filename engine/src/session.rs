@@ -76,56 +76,16 @@ impl SessionCore {
         })
     }
 
-    pub(crate) fn step(&self) -> usize {
-        self.state.step()
-    }
 
-    pub(crate) fn loss(&self) -> f32 {
-        self.state.loss()
-    }
 
-    pub(crate) fn lr(&self) -> f32 {
-        self.state.lr()
-    }
 
-    /// A knob: effect begins with the next step.
-    pub(crate) fn set_lr(&mut self, lr: f32) {
-        self.state.set_lr(lr);
-    }
 
-    /// The norm of the last step's gradients, before clipping.
-    pub(crate) fn grad_norm(&self) -> f32 {
-        self.state.grad_norm()
-    }
 
-    pub(crate) fn clip(&self) -> Option<f32> {
-        self.state.clip()
-    }
 
-    /// A knob: effect begins with the next step. `None` is no cap.
-    pub(crate) fn set_clip(&mut self, clip: Option<f32>) {
-        self.state.set_clip(clip);
-    }
 
-    /// The L2 norm of every parameter, over the whole model.
-    pub(crate) fn param_norm(&self) -> Result<f32> {
-        self.state.param_norm()
-    }
 
-    /// What update rule this session runs, as data.
-    pub(crate) fn optimizer_config(&self) -> &OptimizerConfig {
-        self.state.optimizer_config()
-    }
 
-    pub(crate) fn seed(&self) -> u64 {
-        self.state.seed()
-    }
 
-    /// Restarts the RNG. A knob like any other: after this the draws are a
-    /// function of the new seed alone.
-    pub(crate) fn set_seed(&mut self, seed: u64) -> Result<()> {
-        self.state.set_seed(seed)
-    }
 
     /// Watches a named node. `stat` is "full", "mean", "norm" or "extent";
     /// a reduction costs a scalar per step where "full" costs the tensor,
@@ -152,15 +112,7 @@ impl SessionCore {
         self.taps.keys().cloned().collect()
     }
 
-    /// Every name a tap could ask for.
-    pub(crate) fn node_names(&self) -> Vec<String> {
-        self.plan.node_names().to_vec()
-    }
 
-    /// Every model output a forward could ask for.
-    pub(crate) fn output_names(&self) -> Vec<String> {
-        self.plan.output_names().to_vec()
-    }
 
     /// What the most recent pass's taps saw, by name.
     ///
@@ -176,11 +128,6 @@ impl SessionCore {
         self.plan.paths_of(self.state.argnums())
     }
 
-    /// Every parameter a model declared trainable, whether or not it is
-    /// frozen right now: the set `freeze` and `unfreeze` move within.
-    pub(crate) fn trainable_candidates(&self) -> Vec<String> {
-        self.plan.candidate_paths()
-    }
 
     /// Freezes or unfreezes parameters whose path matches `pattern`, and
     /// returns those that moved.
@@ -235,20 +182,8 @@ impl SessionCore {
         Ok(loss)
     }
 
-    /// Takes the step the accumulated gradients ask for.
-    pub(crate) fn apply(&mut self) -> Result<f32> {
-        self.state.apply()
-    }
 
-    /// How many parts are waiting for a step.
-    pub(crate) fn accumulated(&self) -> usize {
-        self.state.accumulated()
-    }
 
-    /// Throws away what was accumulated. Returns how many parts went.
-    pub(crate) fn discard(&mut self) -> usize {
-        self.state.discard()
-    }
 
     /// The loss for `batch`, without taking a step.
     ///
@@ -366,15 +301,7 @@ impl SessionCore {
         self.state.fetch(&self.plan, path)
     }
 
-    /// Qualified parameter paths, in the order the engine keeps them.
-    pub(crate) fn parameter_paths(&self) -> Vec<String> {
-        self.plan.paths.clone()
-    }
 
-    /// Every batch field the run reads, across the models and the objective.
-    pub(crate) fn input_names(&self) -> Vec<String> {
-        self.plan.input_names().to_vec()
-    }
 
     /// Writes the run's state and the description it belongs to. Atomic
     /// (docs/plan.md section 11.2). `run` is the caller's own record
@@ -500,167 +427,156 @@ impl Session {
     // --- plain: no Array is made, evaluated, copied or freed ---
 
     pub fn step(&self) -> Outcome<usize> {
-        Ok(self.core()?.step())
+        self.read(|core| core.state.step())
     }
 
     pub fn loss(&self) -> Outcome<f32> {
-        Ok(self.core()?.loss())
+        self.read(|core| core.state.loss())
     }
 
     pub fn lr(&self) -> Outcome<f32> {
-        Ok(self.core()?.lr())
+        self.read(|core| core.state.lr())
     }
 
     /// A knob: effect begins with the next step.
     pub fn set_lr(&mut self, lr: f32) -> Outcome<()> {
-        self.core_mut()?.set_lr(lr);
-        Ok(())
+        self.adjust(|core| core.state.set_lr(lr))
     }
 
     /// The norm of the last step's gradients, before clipping. NaN before
     /// the first step and on a step that was skipped.
     pub fn grad_norm(&self) -> Outcome<f32> {
-        Ok(self.core()?.grad_norm())
+        self.read(|core| core.state.grad_norm())
     }
 
     /// The largest gradient norm a step may carry, or `None`.
     pub fn clip(&self) -> Outcome<Option<f32>> {
-        Ok(self.core()?.clip())
+        self.read(|core| core.state.clip())
     }
 
     /// A knob: effect begins with the next step. `None` is no cap.
     pub fn set_clip(&mut self, clip: Option<f32>) -> Outcome<()> {
-        self.core_mut()?.set_clip(clip);
-        Ok(())
+        self.adjust(|core| core.state.set_clip(clip))
     }
 
     /// What update rule this session runs, as data.
     pub fn optimizer_config(&self) -> Outcome<OptimizerConfig> {
-        Ok(self.core()?.optimizer_config().clone())
+        self.read(|core| core.state.optimizer_config().clone())
     }
 
     pub fn seed(&self) -> Outcome<u64> {
-        Ok(self.core()?.seed())
+        self.read(|core| core.state.seed())
     }
 
     /// Watches a named node. `stat` is "full", "mean", "norm" or "extent";
     /// a reduction costs a scalar per step where "full" costs the tensor,
     /// which is why a standing tap should reduce.
     pub fn tap(&mut self, name: &str, stat: &str) -> Outcome<()> {
-        Ok(self.core_mut()?.tap(name, stat)?)
+        self.adjust(|core| core.tap(name, stat))?.map_err(RuntimeError::from)
     }
 
     /// Stops watching. Returns whether it was being watched.
     pub fn untap(&mut self, name: &str) -> Outcome<bool> {
-        Ok(self.core_mut()?.untap(name))
+        self.adjust(|core| core.untap(name))
     }
 
     /// What is being watched.
     pub fn taps(&self) -> Outcome<Vec<String>> {
-        Ok(self.core()?.taps())
+        self.read(|core| core.taps())
     }
 
     /// Every name a tap could ask for.
     pub fn node_names(&self) -> Outcome<Vec<String>> {
-        Ok(self.core()?.node_names())
+        self.read(|core| core.plan.node_names().to_vec())
     }
 
     /// What the most recent pass's taps saw. Already on the host, so this
     /// copies rather than reads a device.
     pub fn tapped(&self) -> Outcome<Vec<(String, Tensor)>> {
-        Ok(self.core()?.tapped())
+        self.read(|core| core.tapped())
     }
 
     /// Which parameters are currently differentiated, by qualified path.
     pub fn trainable(&self) -> Outcome<Vec<String>> {
-        Ok(self.core()?.trainable())
+        self.read(|core| core.trainable())
     }
 
     /// Every parameter a model declared trainable, whether or not it is
     /// frozen right now.
     pub fn trainable_candidates(&self) -> Outcome<Vec<String>> {
-        Ok(self.core()?.trainable_candidates())
+        self.read(|core| core.plan.candidate_paths())
     }
 
     /// Qualified parameter paths, in the order the engine keeps them.
     pub fn parameter_paths(&self) -> Outcome<Vec<String>> {
-        Ok(self.core()?.parameter_paths())
+        self.read(|core| core.plan.paths.clone())
     }
 
     /// Every batch field the run reads.
     pub fn input_names(&self) -> Outcome<Vec<String>> {
-        Ok(self.core()?.input_names())
+        self.read(|core| core.plan.input_names().to_vec())
     }
 
     // --- MLX: through the runtime ---
 
     /// Restarts the RNG. A knob like any other, but it builds a key.
     pub fn set_seed(&mut self, seed: u64) -> Outcome<()> {
-        let core = self.core_mut()?;
-        runtime().execute(|| core.set_seed(seed))
+        self.gated_mut(|core| core.state.set_seed(seed))
     }
 
     /// Freezes or unfreezes parameters whose path matches `pattern`, and
     /// returns those that moved. Not a scalar knob: the optimizer's slots
     /// follow, which means allocating and dropping them.
     pub fn set_frozen(&mut self, pattern: &str, frozen: bool) -> Outcome<Vec<String>> {
-        let core = self.core_mut()?;
-        runtime().execute(|| core.set_frozen(pattern, frozen))
+        self.gated_mut(|core| core.set_frozen(pattern, frozen))
     }
 
     /// Writes one parameter, by qualified path, from a copy.
     pub fn put(&mut self, path: &str, tensor: &Tensor) -> Outcome<()> {
-        let core = self.core_mut()?;
-        runtime().execute(|| core.put(path, tensor))
+        self.gated_mut(|core| core.put(path, tensor))
     }
 
     /// One step on `batch`: forward, backward, optimizer update.
     pub fn run_step(&mut self, batch: &Batch) -> Outcome<f32> {
-        let core = self.core_mut()?;
-        runtime().execute(|| core.run_step(batch))
+        self.gated_mut(|core| core.run_step(batch))
     }
 
     /// Adds one batch's gradients to what is waiting, without stepping.
     pub fn accumulate(&mut self, batch: &Batch) -> Outcome<f32> {
-        let core = self.core_mut()?;
-        runtime().execute(|| core.accumulate(batch))
+        self.gated_mut(|core| core.accumulate(batch))
     }
 
     /// Takes the step the accumulated gradients ask for, and reports the
     /// mean of the losses they came from.
     pub fn apply(&mut self) -> Outcome<f32> {
-        let core = self.core_mut()?;
-        runtime().execute(|| core.apply())
+        self.gated_mut(|core| core.state.apply())
     }
 
     /// How many parts are waiting for a step. Touches no MLX.
     pub fn accumulated(&self) -> Outcome<usize> {
-        Ok(self.core()?.accumulated())
+        self.read(|core| core.state.accumulated())
     }
 
     /// Throws away what was accumulated, and says how many parts went.
     pub fn discard(&mut self) -> Outcome<usize> {
-        let core = self.core_mut()?;
-        runtime().execute(|| Ok(core.discard()))
+        self.gated_mut(|core| Ok(core.state.discard()))
     }
 
     /// The loss for `batch` without taking a step: no gradients, no
     /// randomness, nothing moved. What a validation set is read with.
     pub fn evaluate(&mut self, batch: &Batch) -> Outcome<f32> {
-        let core = self.core_mut()?;
-        runtime().execute(|| core.evaluate(batch))
+        self.gated_mut(|core| core.evaluate(batch))
     }
 
     /// Named model outputs for `batch`: the forward an evaluation runs,
     /// stopping before the objective. Nothing about the run moves.
     pub fn forward(&mut self, batch: &Batch, wanted: &[String]) -> Outcome<Vec<(String, Tensor)>> {
-        let core = self.core_mut()?;
-        runtime().execute(|| core.forward(batch, wanted))
+        self.gated_mut(|core| core.forward(batch, wanted))
     }
 
     /// Every model output a forward can be asked for, qualified.
     pub fn output_names(&self) -> Outcome<Vec<String>> {
-        Ok(self.core()?.output_names())
+        self.read(|core| core.plan.output_names().to_vec())
     }
 
     /// Gradients with respect to named batch fields, by field name. The
@@ -670,51 +586,44 @@ impl Session {
         batch: &Batch,
         of: &[String],
     ) -> Outcome<Vec<(String, Tensor)>> {
-        let core = self.core()?;
-        runtime().execute(|| core.field_gradients(batch, of))
+        self.gated(|core| core.field_gradients(batch, of))
     }
 
     /// Gradients as copies, by qualified parameter path. Only
     /// differentiated parameters appear.
     pub fn gradients(&self, batch: &Batch) -> Outcome<Vec<(String, Tensor)>> {
-        let core = self.core()?;
-        runtime().execute(|| core.gradients(batch))
+        self.gated(|core| core.gradients(batch))
     }
 
     /// A copy of one parameter, by qualified path. Copies, not handles:
     /// nothing that lives on the device escapes this crate.
     pub fn fetch(&self, path: &str) -> Outcome<Tensor> {
-        let core = self.core()?;
-        runtime().execute(|| core.fetch(path))
+        self.gated(|core| core.fetch(path))
     }
 
     /// The L2 norm of every parameter. A reduction over the whole model, so
     /// it is asked for rather than kept up to date; nothing in a step reads
     /// it. Goes through the runtime like any other MLX work.
     pub fn param_norm(&self) -> Outcome<f32> {
-        let core = self.core()?;
-        runtime().execute(|| core.param_norm())
+        self.gated(|core| core.state.param_norm())
     }
 
     /// Writes the run's state and the description it belongs to. Atomic.
     /// `run` is the caller's own record, written verbatim.
     pub fn save(&self, dir: &str, run: &str) -> Outcome<String> {
-        let core = self.core()?;
-        runtime().execute(|| core.save(dir, run))
+        self.gated(|core| core.save(dir, run))
     }
 
     /// Writes one model's parameters as an HF-compatible fp32 safetensors
     /// file, stripping the GraphConfig model name from each path.
     pub fn export_model(&self, model: &str, dir: &str) -> Outcome<Vec<(String, String)>> {
-        let core = self.core()?;
-        runtime().execute(|| core.export_model(model, dir))
+        self.gated(|core| core.export_model(model, dir))
     }
 
     /// Restores state written by [`Session::save`], refusing anything that
     /// does not belong to this session. Returns the caller's record.
     pub fn restore(&mut self, dir: &str) -> Outcome<String> {
-        let core = self.core_mut()?;
-        runtime().execute(|| core.restore(dir))
+        self.gated_mut(|core| core.restore(dir))
     }
 
     /// The RNG key as host values, for the tests that watch it move.
@@ -731,6 +640,29 @@ impl Session {
         runtime()
             .execute(|| crate::tensor::to_tensor(core.state.pass().rng))
             .expect("reading the RNG key")
+    }
+
+    /// A value of the open session that does not reach MLX.
+    fn read<R>(&self, f: impl FnOnce(&SessionCore) -> R) -> Outcome<R> {
+        Ok(f(self.core()?))
+    }
+
+    /// A change to the open session that does not reach MLX (a knob).
+    fn adjust<R>(&mut self, f: impl FnOnce(&mut SessionCore) -> R) -> Outcome<R> {
+        Ok(f(self.core_mut()?))
+    }
+
+    /// An operation on the open session that reaches MLX, through the
+    /// runtime's gate: the one way every such call goes.
+    fn gated<R>(&self, f: impl FnOnce(&SessionCore) -> Result<R>) -> Outcome<R> {
+        let core = self.core()?;
+        runtime().execute(|| f(core))
+    }
+
+    /// The same, for an operation that changes the session.
+    fn gated_mut<R>(&mut self, f: impl FnOnce(&mut SessionCore) -> Result<R>) -> Outcome<R> {
+        let core = self.core_mut()?;
+        runtime().execute(|| f(core))
     }
 
     fn core(&self) -> Outcome<&SessionCore> {
