@@ -56,6 +56,7 @@ module Torobi
         raise ConfigError, "objective is a #{objective.class}, expected Torobi::IR::Graph"
       end
 
+      models.each { |name, graph| check_reads_batch(name, graph) }
       train = check_train(train, models)
       if objective
         check_objective(objective)
@@ -127,7 +128,7 @@ module Torobi
       return false unless graph.outputs.size == 1
 
       shape, dtype = graph.output_signature(graph.outputs.keys.first)
-      shape&.empty? && dtype == :f32
+      shape.empty? && dtype == :f32
     end
 
     def self.from_h(h)
@@ -184,7 +185,7 @@ module Torobi
       end
 
       shape, dtype = objective.output_signature(LOSS)
-      unless shape && shape.empty?
+      unless shape.empty?
         raise ConfigError,
               "the loss must be a scalar, and this one has shape #{shape.inspect}; " \
               "reduce it (mean or sum) before declaring it"
@@ -220,13 +221,28 @@ module Torobi
       end
 
       shape, dtype = graph.output_signature(names.first)
-      return if shape&.empty? && dtype == :f32
+      return if shape.empty? && dtype == :f32
 
       raise ConfigError,
             "without an objective, model #{name.inspect}'s output " \
             "#{names.first.inspect} is the loss, so it must be an f32 scalar, " \
             "and it is #{dtype}#{shape.inspect}. A config that trains nothing " \
             "(train: []) needs no loss, and can be asked what it produces."
+    end
+
+    # A model graph reads only from the batch. Reading another model's
+    # output is what an objective is for, and it is the objective that the
+    # wiring below holds to what the models declare; a model that read one
+    # would be wired by nothing.
+    def check_reads_batch(name, graph)
+      graph.inputs.each do |input|
+        next if input.from_batch?
+
+        raise ConfigError,
+              "model #{name.inspect} input #{input.name.inspect} reads " \
+              "#{input.source.model}.#{input.source.output}; a model reads only " \
+              "from the batch, and reading another model is an objective's to do"
+      end
     end
 
     # An objective may read a model output only if that model declares it,
@@ -236,8 +252,8 @@ module Torobi
       objective.inputs.each do |input|
         next unless input.from_model?
 
-        model_name = input.source.fetch("model")
-        output = input.source.fetch("output")
+        model_name = input.source.model
+        output = input.source.output
         where = "objective input #{input.name.inspect}"
         graph = models[model_name] or
           raise ConfigError,

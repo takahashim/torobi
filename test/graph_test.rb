@@ -5,6 +5,10 @@ require_relative "test_helper"
 class GraphTest < Minitest::Test
   IR = Torobi::IR
 
+  # What shape inference would have given each node below; these tests
+  # are about structure, so every node is the same small vector.
+  VALUE = { shape: [2], dtype: :f32 }.freeze
+
   def test_a_well_formed_graph_is_representable
     graph = Torobi::TestGraphs.linear_graph
 
@@ -28,8 +32,8 @@ class GraphTest < Minitest::Test
         inputs: [IR::InputSpec.new(id: 0, name: "x", shape: [2], dtype: :f32)],
         parameters: [],
         nodes: [
-          IR::NodeSpec.new(id: 0, op: "add", inputs: ["node:1", "input:0"]),
-          IR::NodeSpec.new(id: 1, op: "abs", inputs: ["input:0"])
+          IR::NodeSpec.new(id: 0, op: "add", inputs: ["node:1", "input:0"], **VALUE),
+          IR::NodeSpec.new(id: 1, op: "abs", inputs: ["input:0"], **VALUE)
         ],
         outputs: { "y" => "node:0" }
       )
@@ -42,7 +46,7 @@ class GraphTest < Minitest::Test
     inputs = [IR::InputSpec.new(id: 0, name: "x", shape: [2], dtype: :f32)]
     e = assert_raises(Torobi::ConfigError) do
       IR::Graph.new(inputs:, parameters: [],
-                    nodes: [IR::NodeSpec.new(id: 0, op: "abs", inputs: ["input:7"])],
+                    nodes: [IR::NodeSpec.new(id: 0, op: "abs", inputs: ["input:7"], **VALUE)],
                     outputs: { "y" => "node:0" })
     end
     assert_match(/unknown input:7/, e.message)
@@ -50,7 +54,7 @@ class GraphTest < Minitest::Test
     e = assert_raises(Torobi::ConfigError) do
       IR::Graph.new(inputs:, parameters: [],
                     nodes: [IR::NodeSpec.new(id: 0, op: "abs", inputs: ["input:0"],
-                                             parameters: [3])],
+                                             parameters: [3], **VALUE)],
                     outputs: { "y" => "node:0" })
     end
     assert_match(/unknown parameter 3/, e.message)
@@ -77,8 +81,8 @@ class GraphTest < Minitest::Test
       IR::Graph.new(
         inputs: [IR::InputSpec.new(id: 0, name: "x", shape: [2], dtype: :f32)],
         parameters: [],
-        nodes: [IR::NodeSpec.new(id: 0, op: "abs", inputs: ["input:0"]),
-                IR::NodeSpec.new(id: 1, op: "neg", inputs: ["input:0"])],
+        nodes: [IR::NodeSpec.new(id: 0, op: "abs", inputs: ["input:0"], **VALUE),
+                IR::NodeSpec.new(id: 1, op: "neg", inputs: ["input:0"], **VALUE)],
         outputs: { "y" => "node:1" }
       )
     end
@@ -108,8 +112,32 @@ class GraphTest < Minitest::Test
                             initializer: "zeros")                       # initializer not a Hash
     end
     e = assert_raises(Torobi::ConfigError) do
-      IR::NodeSpec.new(id: 0, op: "x", inputs: [], attributes: { "o" => Object.new })
+      IR::NodeSpec.new(id: 0, op: "x", inputs: [], attributes: { "o" => Object.new }, **VALUE)
     end
     assert_match(/not JSON-serializable/, e.message)
+  end
+
+  # A reference is refused by the node that holds it when it cannot be
+  # read at all; whether it points anywhere is the graph's to say.
+  def test_a_malformed_reference_is_refused_by_its_node
+    e = assert_raises(Torobi::ConfigError) do
+      IR::NodeSpec.new(id: 0, op: "abs", inputs: ["garbage"], **VALUE)
+    end
+    assert_match(/"garbage" is not a reference/, e.message)
+  end
+
+  def test_a_node_says_what_shape_inference_gave_it
+    assert_raises(ArgumentError) { IR::NodeSpec.new(id: 0, op: "abs", inputs: ["input:0"]) }
+  end
+
+  def test_a_source_round_trips_and_says_what_it_is
+    batch = IR::Source.batch("x")
+    read = IR::Source.model_output("student", "logits")
+
+    assert_equal batch, IR::Source.from_h(batch.to_h, where: "t")
+    assert_equal read, IR::Source.from_h(read.to_h, where: "t")
+    e = assert_raises(Torobi::ConfigError) { IR::Source.from_h({ "model" => "m" }, where: "t") }
+    assert_match(/\At: a source is/, e.message)
+    assert_raises(Torobi::ConfigError) { IR::Source.batch("") }
   end
 end

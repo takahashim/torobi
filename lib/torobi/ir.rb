@@ -2,12 +2,14 @@
 
 require_relative "ir/ref"
 require_relative "ir/dtype"
+require_relative "ir/dimensions"
 require_relative "ir/json"
 require_relative "ir/source"
 require_relative "ir/input_spec"
 require_relative "ir/parameter_spec"
 require_relative "ir/node_spec"
 require_relative "ir/graph"
+require_relative "ir/graph/check"
 
 module Torobi
   # The intermediate representation behind the Graph DSL.

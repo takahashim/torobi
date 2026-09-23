@@ -20,6 +20,16 @@ module Torobi
           raise ConfigError, "#{ref.inspect} is not a reference; expected \"input:N\" or \"node:N\""
         [m[1].to_sym, Integer(m[2])]
       end
+
+      # The spec +ref+ points at, among +inputs+ and +nodes+, or a
+      # ConfigError saying +where+ asked for something that is not there.
+      def resolve(ref, inputs:, nodes:, where:)
+        kind, id = parse(ref)
+        specs = kind == :input ? inputs : nodes
+        return specs[id] if id < specs.size
+
+        raise ConfigError, "#{where} references unknown #{kind}:#{id}"
+      end
     end
   end
 end
