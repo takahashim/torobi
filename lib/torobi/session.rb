@@ -94,6 +94,14 @@ module Torobi
     # config's provenance; without either, nothing is recorded and the
     # session is exactly as fast.
     #
+    # `observer:` is where `observe` is reported as well as recorded, for
+    # a caller that wants every observation the run makes, whoever makes
+    # it - the driving program or a policy firing in the window. It is
+    # anything answering `call(step:, values:)`, and it is how a
+    # deterministic rerun collects what it will hold the run to
+    # (`Torobi::Replay::Rerun`). Without one, observations are only
+    # journalled.
+    #
     # `dataset:` is anything about the data that a later reader would need
     # and cannot work out from here. It goes verbatim into the journal's
     # provenance and into every checkpoint's record, and nothing
@@ -110,7 +118,7 @@ module Torobi
     #              tokenizer_revision: "e3114c6...", max_seq_length: 512 }
     def self.open(config, weights: nil, weights_file: nil, pretrained: nil, fresh: [],
                   optimizer: DEFAULT_OPTIMIZER, seed: DEFAULT_SEED,
-                  journal: nil, io: nil, dataset: nil)
+                  journal: nil, io: nil, dataset: nil, observer: nil)
       source = Weights.of(weights:, weights_file:, pretrained:, fresh:)
       Preflight.check!
       native = source.open(config, optimizer, seed)
@@ -119,7 +127,7 @@ module Torobi
       # (docs/plan.md section 11.2).
       provenance = Provenance.of(config, dataset:, optimizer:, seed:)
       journal ||= Journal.new(provenance, io:) if io
-      session = new(native, journal:, provenance:, loss: config.loss?)
+      session = new(native, journal:, provenance:, loss: config.loss?, observer:)
       # What it was opened with is the header's provenance; this marks when.
       journal&.note(step: 0, event: "opened")
       return session unless block_given?
@@ -133,11 +141,12 @@ module Torobi
       end
     end
 
-    def initialize(native, journal: nil, provenance: nil, loss: true)
+    def initialize(native, journal: nil, provenance: nil, loss: true, observer: nil)
       @native = native
       @journal = journal
       @provenance = provenance
       @loss = loss
+      @observer = observer
       @hooks = Hooks.new(self)
     end
 
@@ -391,8 +400,13 @@ module Torobi
     # Records what the window read. A policy that reads and then decides
     # has the reading as its input, so a deterministic rerun is held to it
     # (docs/plan.md section 8.5).
+    #
+    # Every observation goes through here, whether the driving program
+    # makes it or a policy firing in the window does, so an `observer`
+    # sees them all (`Session.open`).
     def observe(**values)
       @journal&.observe(step: @native.step, **values)
+      @observer&.call(step: @native.step, values:)
       values
     end
 

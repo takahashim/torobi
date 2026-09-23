@@ -170,6 +170,46 @@ class ReplayTest < Minitest::Test
     assert_equal 4, result.steps, "it observed on every second step of eight"
   end
 
+  # A policy firing in the window observes through the same session, so a
+  # rerun holds it to what it decided just as it holds the program.
+  def test_a_rerun_holds_a_window_policy_to_what_it_observed
+    data = batches
+    io = StringIO.new
+    policy = ->(event) { event.session.observe(loss: event.loss) }
+    program = lambda do |session, all|
+      session.use(policy)
+      all.each { |batch| session.step!(batch) }
+    end
+
+    Torobi::Session.open(config, weights: weights, io:, optimizer:) { |s| program.call(s, data) }
+    result = Torobi::Replay.rerun(io.string, config:, weights:, batches: data, &program)
+
+    assert_predicate result, :agrees?, result.to_s
+    assert_equal data.size, result.steps
+  end
+
+  def test_a_rerun_catches_a_window_policy_that_decides_differently
+    data = batches
+    io = StringIO.new
+    original = ->(event) { event.session.observe(loss: event.loss) }
+    changed = ->(event) { event.session.observe(loss: 0.0) }
+    program = lambda do |session, all|
+      all.each { |batch| session.step!(batch) }
+    end
+
+    Torobi::Session.open(config, weights: weights, io:, optimizer:) do |s|
+      s.use(original)
+      program.call(s, data)
+    end
+    result = Torobi::Replay.rerun(io.string, config:, weights:, batches: data) do |session, all|
+      session.use(changed)
+      program.call(session, all)
+    end
+
+    refute_predicate result, :agrees?
+    assert_match(/differs on loss/, result.divergences.first.why)
+  end
+
   # And a policy that changed its mind is caught, which is the point.
   def test_a_rerun_catches_a_policy_that_decides_differently
     data = batches
@@ -284,7 +324,7 @@ class ReplayTest < Minitest::Test
     Torobi::Session.open(config, weights: weights, io:, optimizer:, seed: 42) { |s| s.run(data) }
     replayed = nil
     Torobi::Replay::Action.new(io.string, config:, weights:, tolerance: :bitwise)
-                          .send(:open) { |s| replayed = s.seed }
+                          .send(:open_session) { |s| replayed = s.seed }
 
     assert_equal 42, replayed
   end

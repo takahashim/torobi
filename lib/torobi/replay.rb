@@ -68,11 +68,11 @@ module Torobi
 
       private
 
-      def open(&)
+      def open_session(observer: nil, &)
         provenance = @record.header.provenance
         optimizer = provenance.optimizer&.transform_keys(&:to_sym) || Session::DEFAULT_OPTIMIZER
         Session.open(@config, weights: @weights, optimizer:,
-                              seed: provenance.seed || Session::DEFAULT_SEED, &)
+                              seed: provenance.seed || Session::DEFAULT_SEED, observer:, &)
       end
 
       def agrees?(a, b)
@@ -106,7 +106,7 @@ module Torobi
         @data = batches.to_a
         @fed = 0
         steps = @record.of(Journal::Span).size
-        final = open do |session|
+        final = open_session do |session|
           @record.entries.each { |entry| apply(session, entry) }
           session.loss
         end
@@ -181,14 +181,18 @@ module Torobi
     #
     # This is the mode for a policy: the program is the Ruby that drove the
     # run, and what is compared is its inputs and its decisions, not only
-    # where the training ended up.
+    # where the training ended up. It collects observations through the
+    # session's observer, so a `Torobi::Policies` object firing in the
+    # window is held to what it decided just as the driving program is
+    # (`Session.open`).
     class Rerun < Mode
       def call(batches, &program)
         raise ArgumentError, "rerun needs the program that drove the run" unless program
 
         seen = []
-        final = open do |session|
-          program.call(Watcher.new(session, seen), batches)
+        collect = ->(step:, values:) { seen << Journal::Observe.new(step:, values:) }
+        final = open_session(observer: collect) do |session|
+          program.call(session, batches)
           session.loss
         end
         expected = @record.of(Journal::Observe)
@@ -219,28 +223,6 @@ module Torobi
                      why: "observation #{index} differs on #{key}")
           end
         end
-      end
-    end
-
-    # Wraps a session so that what the program observes is collected for
-    # comparison. Everything else passes through untouched.
-    class Watcher < BasicObject
-      def initialize(session, into)
-        @session = session
-        @into = into
-      end
-
-      def observe(**values)
-        @into << ::Torobi::Journal::Observe.new(step: @session.step, values:)
-        @session.observe(**values)
-      end
-
-      def method_missing(name, ...)
-        @session.public_send(name, ...)
-      end
-
-      def respond_to_missing?(name, include_private = false)
-        @session.respond_to?(name, include_private)
       end
     end
   end

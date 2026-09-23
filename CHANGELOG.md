@@ -109,6 +109,21 @@ between two versions people have.
   this repository and is not published; what it does not implement it
   refuses by name.
 
+### Changed
+
+- **A journal names the data a batch held.** `batches_digest` is now a
+  digest of a batch's dtype, shape and bytes rather than of its field
+  names, an accumulation carries one too, and action replay holds each
+  batch it is fed to the digest that was recorded. `Journal.read` refuses
+  a journal from another schema rather than replaying it under the wrong
+  meaning (the journal schema is now 3).
+- **A deterministic rerun holds a policy to what it observed.**
+  Observations a `Torobi::Policies` object makes in the window now go
+  through `Session#observe` like the driving program's do, so a rerun
+  collects them; before this, rerunning a program that used a policy
+  reported divergences when nothing had changed. `Session.open(observer:)`
+  is how a caller sees every observation a run makes.
+
 ### Known limitations
 
 - Other decoder architectures, quantized ops and variable length
