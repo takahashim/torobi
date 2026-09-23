@@ -22,6 +22,7 @@
 // manifest.
 pub mod checkpoint;
 pub(crate) mod executor;
+pub(crate) mod export;
 #[cfg(test)]
 mod fixtures;
 pub(crate) mod graph;

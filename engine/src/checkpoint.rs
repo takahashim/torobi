@@ -32,7 +32,8 @@ use anyhow::{Context, Result};
 use crate::mlxc::Array;
 use serde::{Deserialize, Serialize};
 
-use crate::optimizer::Config as OptimizerConfig;
+use crate::optimizer::{Config as OptimizerConfig, Moments, Optimizer};
+use crate::plan::Plan;
 use crate::tensor::dtype_spelling;
 
 pub const SCHEMA_VERSION: u32 = 2;
@@ -279,6 +280,134 @@ pub struct Loaded {
     /// (m, v) by parameter path. Empty when the optimizer has no slots.
     pub slots: HashMap<String, (Array, Array)>,
     pub rng: Option<Array>,
+}
+
+/// The run a checkpoint is being restored into: what it has to match.
+pub struct Run<'a> {
+    pub plan: &'a Plan,
+    pub params: &'a [Array],
+    pub argnums: &'a [i32],
+    pub optimizer: &'a Optimizer,
+}
+
+/// A checkpoint that has been read and found to belong to the run.
+///
+/// Exists only after every check has passed, which is what makes
+/// `TrainState::restore` a commit rather than a sequence of hopes.
+pub struct Accepted {
+    pub params: Vec<Array>,
+    pub moments: Moments,
+    pub rng: Array,
+    pub seed: u64,
+    pub step: usize,
+    pub optimizer_steps: u64,
+    /// What the caller recorded alongside, handed back unchanged.
+    pub run: String,
+}
+
+/// Whether a checkpoint belongs to a run is a question about the
+/// checkpoint's contents, asked here beside the code that writes and reads
+/// them; the training state only commits what passes.
+impl Loaded {
+    /// Checks all of this checkpoint against the run that would restore
+    /// it, and hands back what it would restore. Touches nothing.
+    pub fn accept(&self, run: &Run<'_>) -> Result<Accepted> {
+        let (plan, manifest) = (run.plan, &self.manifest);
+        anyhow::ensure!(
+            manifest.config_digest == plan.config_digest,
+            "this checkpoint belongs to another graph (digest {}, not {})",
+            &manifest.config_digest[..12.min(manifest.config_digest.len())],
+            &plan.config_digest[..12]
+        );
+        anyhow::ensure!(
+            &manifest.optimizer == run.optimizer.config(),
+            "this checkpoint was written by a different optimizer ({:?})",
+            manifest.optimizer
+        );
+        anyhow::ensure!(
+            manifest.parameters.len() == plan.paths.len(),
+            "this checkpoint has {} parameters, this session has {}",
+            manifest.parameters.len(),
+            plan.paths.len()
+        );
+
+        let mut params = Vec::with_capacity(run.params.len());
+        for (i, path) in plan.paths.iter().enumerate() {
+            let entry = &manifest.parameters[i];
+            anyhow::ensure!(
+                &entry.path == path,
+                "parameter {i} is {:?} here and {:?} in the checkpoint",
+                path,
+                entry.path
+            );
+            let array = self
+                .parameters
+                .get(path)
+                .with_context(|| format!("the checkpoint has no parameter {path:?}"))?;
+            anyhow::ensure!(
+                array.shape() == run.params[i].shape(),
+                "parameter {path:?}: checkpoint shape {:?} is not {:?}",
+                array.shape(),
+                run.params[i].shape()
+            );
+            anyhow::ensure!(
+                array.dtype() == run.params[i].dtype(),
+                "parameter {path:?}: checkpoint dtype {:?} is not {:?}",
+                array.dtype(),
+                run.params[i].dtype()
+            );
+            params.push(array.clone());
+        }
+
+        let moments = self.moments_for(run)?;
+        Ok(Accepted {
+            params,
+            moments,
+            rng: self.rng.clone().context("the checkpoint has no RNG state")?,
+            seed: manifest.seed,
+            step: manifest.step,
+            optimizer_steps: manifest.optimizer_steps,
+            run: serde_json::to_string(&manifest.run)?,
+        })
+    }
+
+    /// The optimizer's slots, all of them or none.
+    ///
+    /// An AdamW session restored without moments used to index past the
+    /// end of an empty vector on its next step, which is why this refuses
+    /// rather than filling in.
+    fn moments_for(&self, run: &Run<'_>) -> Result<Moments> {
+        if !run.optimizer.wants_slots() {
+            anyhow::ensure!(
+                self.slots.is_empty(),
+                "this checkpoint carries optimizer state, and {} has none",
+                run.optimizer.config().name()
+            );
+            return Ok(Moments::None);
+        }
+
+        anyhow::ensure!(
+            !self.slots.is_empty(),
+            "this checkpoint has no optimizer state, and {} needs it",
+            run.optimizer.config().name()
+        );
+        let (mut m, mut v) = (Vec::new(), Vec::new());
+        for &i in run.argnums {
+            let path = &run.plan.paths[i as usize];
+            let (slot_m, slot_v) = self
+                .slots
+                .get(path)
+                .with_context(|| format!("the checkpoint has no optimizer state for {path:?}"))?;
+            anyhow::ensure!(
+                slot_m.shape() == run.params[i as usize].shape()
+                    && slot_v.shape() == run.params[i as usize].shape(),
+                "optimizer state for {path:?} has the wrong shape"
+            );
+            m.push(slot_m.clone());
+            v.push(slot_v.clone());
+        }
+        Ok(Moments::Adam { m, v })
+    }
 }
 
 pub fn read(dir: impl AsRef<Path>) -> Result<Loaded> {

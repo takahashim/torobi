@@ -386,7 +386,7 @@ impl SessionCore {
     /// Writes one model's parameters as an HF-compatible fp32 safetensors
     /// file, stripping the GraphConfig model name from each path.
     pub(crate) fn export_model(&self, model: &str, dir: &str) -> Result<Vec<(String, String)>> {
-        self.state.export_model(&self.plan, model, dir)
+        crate::export::write(&self.plan, self.state.params(), model, dir)
     }
 
     /// Restores state written by [`Session::save`], refusing anything that

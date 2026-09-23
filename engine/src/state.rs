@@ -8,31 +8,14 @@
 //! before any of it is assigned, so a step that fails leaves the run
 //! exactly as it was (docs/plan.md section 5A.4).
 
-use std::path::Path;
-
 use anyhow::{Context, Result};
 use crate::mlxc::transforms::eval;
-use crate::mlxc::{Array, Dtype};
+use crate::mlxc::Array;
 
 use crate::checkpoint;
-use crate::optimizer::{global_norm, scaled, Config as OptimizerConfig, Moments, Optimizer};
-use crate::plan::{Model, Pattern, Plan};
+use crate::optimizer::{global_norm, scaled, Config as OptimizerConfig, Optimizer};
+use crate::plan::{Pattern, Plan};
 use crate::tensor::{to_tensor, Tensor};
-
-/// A checkpoint that has been read and found to belong to this run.
-///
-/// Exists only after every check has passed, which is what makes
-/// [`TrainState::restore`] a commit rather than a sequence of hopes.
-struct Restored {
-    params: Vec<Array>,
-    moments: Moments,
-    rng: Array,
-    seed: u64,
-    step: usize,
-    optimizer_steps: u64,
-    /// What the caller recorded alongside, handed back unchanged.
-    run: String,
-}
 
 /// One pass's view of the state: what the executor reads, and nothing
 /// more.
@@ -68,23 +51,88 @@ pub struct TrainState {
     /// watcher can see how close a run is to its cap rather than having to
     /// guess. NaN until a step is taken, and when a step is skipped.
     last_grad_norm: f32,
-    /// Gradients waiting for a step, and the losses they came from.
-    ///
-    /// A batch that does not fit is trained as several that do, summing
-    /// their gradients and updating once. Held here rather than by the
-    /// caller because they are device arrays parallel to `argnums`, which
-    /// is this module's invariant to keep: a caller holding them could
-    /// freeze a parameter between two of them and hand back a vector that
-    /// no longer lines up.
-    pending: Option<Pending>,
+    /// Gradients waiting for a step. Held here rather than by the caller
+    /// because they are device arrays parallel to `argnums`, which is this
+    /// module's invariant to keep: a caller holding them could freeze a
+    /// parameter between two of them and hand back a vector that no longer
+    /// lines up.
+    accumulated: Accumulator,
 }
 
-/// What has been accumulated since the last step.
-struct Pending {
-    /// One per differentiated parameter, in `argnums` order.
+/// Gradients summed across the parts of a batch, and the losses they came
+/// from, waiting for one step.
+///
+/// A batch that does not fit is trained as several that do, summing their
+/// gradients and updating once. The gradients of a sum are the sum of the
+/// gradients, so that reaches where one step over the whole batch would.
+#[derive(Default)]
+struct Accumulator {
+    /// One per differentiated parameter, in `argnums` order; empty when
+    /// nothing is waiting.
     grads: Vec<Array>,
     /// The losses that produced them, so a step can report their mean.
     losses: Vec<f32>,
+}
+
+impl Accumulator {
+    fn parts(&self) -> usize {
+        self.losses.len()
+    }
+
+    /// Adds one part. The new sums are built and evaluated before they
+    /// replace the old ones, so a part that fails leaves what was already
+    /// held as it was. Evaluated rather than left lazy: ten parts should be
+    /// ten sums, not a graph ten deep.
+    fn add(&mut self, loss: f32, grads: &[Array]) -> Result<()> {
+        let sums: Vec<Array> = if self.grads.is_empty() {
+            grads.to_vec()
+        } else {
+            self.grads
+                .iter()
+                .zip(grads)
+                .map(|(held, new)| held.add(new))
+                .collect::<std::result::Result<_, _>>()?
+        };
+        eval(sums.iter())?;
+        self.grads = sums;
+        self.losses.push(loss);
+        Ok(())
+    }
+
+    /// The summed gradients and the mean loss, or `None` when nothing is
+    /// waiting. Left in place: they go only once the step they are for has
+    /// been taken.
+    fn waiting(&self) -> Option<(Vec<Array>, f32)> {
+        if self.losses.is_empty() {
+            return None;
+        }
+        let mean = self.losses.iter().sum::<f32>() / self.losses.len() as f32;
+        Some((self.grads.clone(), mean))
+    }
+}
+
+/// What a step came to, before any of it is the state's: the RNG and the
+/// numbers always, and the new parameters and optimizer when the step is
+/// taken.
+struct StepOutcome {
+    rng: Array,
+    loss: f32,
+    grad_norm: f32,
+    update: Option<(Vec<Array>, Optimizer)>,
+}
+
+impl StepOutcome {
+    /// A step not taken: the counters and the RNG still move, the
+    /// parameters and the optimizer do not.
+    fn skipped(rng: Array, loss: f32, grad_norm: f32) -> Result<Self> {
+        eval(std::iter::once(&rng))?;
+        Ok(Self {
+            rng,
+            loss,
+            grad_norm,
+            update: None,
+        })
+    }
 }
 
 impl TrainState {
@@ -107,7 +155,7 @@ impl TrainState {
             step: 0,
             last_loss: f32::NAN,
             last_grad_norm: f32::NAN,
-            pending: None,
+            accumulated: Accumulator::default(),
         })
     }
 
@@ -121,6 +169,11 @@ impl TrainState {
     }
 
     /// Which parameters autodiff differentiates now, as positions.
+    /// Every parameter, in `Plan::paths` order.
+    pub fn params(&self) -> &[Array] {
+        &self.params
+    }
+
     pub fn argnums(&self) -> &[i32] {
         &self.argnums
     }
@@ -224,7 +277,7 @@ impl TrainState {
         // else, and a caller that froze in the middle of a batch has lost
         // track of which half is which.
         anyhow::ensure!(
-            self.pending.is_none(),
+            self.accumulated.parts() == 0,
             "{} parts are accumulated and freezing changes what a gradient is for. \
              Apply them or discard them first",
             self.accumulated()
@@ -298,45 +351,51 @@ impl TrainState {
     /// and the optimizer's slots, so a policy that lowers the rate and
     /// carries on has something clean to carry on from.
     pub fn advance(&mut self, loss: &Array, grads: &[Array]) -> Result<f32> {
-        let value = loss.item::<f32>()?;
+        let outcome = self.outcome(loss, grads)?;
+        Ok(self.commit(outcome))
+    }
+
+    /// What one step comes to, built and evaluated in full, with none of
+    /// it this state's yet.
+    fn outcome(&self, loss: &Array, grads: &[Array]) -> Result<StepOutcome> {
+        let loss = loss.item::<f32>()?;
         let (rng, _) = crate::mlxc::random::split(&self.rng, 2)?;
-
-        if !value.is_finite() {
-            eval(std::iter::once(&rng))?;
-            self.rng = rng;
-            self.last_loss = value;
-            self.last_grad_norm = f32::NAN;
-            self.step += 1;
-            return Ok(value);
+        if !loss.is_finite() {
+            return StepOutcome::skipped(rng, loss, f32::NAN);
         }
-
         let norm = global_norm(grads)?;
         if !norm.is_finite() {
-            eval(std::iter::once(&rng))?;
-            self.rng = rng;
-            self.last_loss = value;
-            self.last_grad_norm = norm;
-            self.step += 1;
-            return Ok(value);
+            return StepOutcome::skipped(rng, loss, norm);
         }
 
         let grads: Vec<Array> = match self.optimizer.config().clip() {
             Some(max) if norm > max => scaled(grads, max / norm)?,
             _ => grads.to_vec(),
         };
-
         let mut params = self.params.clone();
-        let next_optimizer = self.optimizer.next(&mut params, &self.argnums, &grads)?;
+        let optimizer = self.optimizer.next(&mut params, &self.argnums, &grads)?;
+        eval(params.iter().chain(optimizer.arrays()).chain(std::iter::once(&rng)))?;
+        Ok(StepOutcome {
+            rng,
+            loss,
+            grad_norm: norm,
+            update: Some((params, optimizer)),
+        })
+    }
 
-        eval(params.iter().chain(next_optimizer.arrays()).chain(std::iter::once(&rng)))?;
-
-        self.params = params;
-        self.optimizer = next_optimizer;
-        self.rng = rng;
-        self.last_loss = value;
-        self.last_grad_norm = norm;
+    /// Makes a step's outcome this state's. Cannot fail, which is what lets
+    /// everything that can fail happen first: whether or not the update is
+    /// taken, the counters and the RNG move exactly once.
+    fn commit(&mut self, outcome: StepOutcome) -> f32 {
+        if let Some((params, optimizer)) = outcome.update {
+            self.params = params;
+            self.optimizer = optimizer;
+        }
+        self.rng = outcome.rng;
+        self.last_loss = outcome.loss;
+        self.last_grad_norm = outcome.grad_norm;
         self.step += 1;
-        Ok(value)
+        outcome.loss
     }
 
     /// Adds one batch's gradients to what is waiting, and reports its
@@ -368,26 +427,7 @@ impl TrainState {
             return Ok(value);
         }
 
-        let pending = match self.pending.take() {
-            None => Pending {
-                grads: grads.to_vec(),
-                losses: vec![value],
-            },
-            Some(mut held) => {
-                held.grads = held
-                    .grads
-                    .iter()
-                    .zip(grads)
-                    .map(|(held, new)| held.add(new))
-                    .collect::<std::result::Result<_, _>>()?;
-                held.losses.push(value);
-                held
-            }
-        };
-        // Evaluated here rather than left lazy: a run that accumulates ten
-        // parts should hold ten sums, not a graph ten deep.
-        eval(pending.grads.iter())?;
-        self.pending = Some(pending);
+        self.accumulated.add(value, grads)?;
         Ok(value)
     }
 
@@ -397,23 +437,27 @@ impl TrainState {
     /// Refuses when nothing is waiting: a step from no gradients is not a
     /// step of zero, it is a caller that has lost track of where it is.
     pub fn apply(&mut self) -> Result<f32> {
-        let Some(pending) = self.pending.take() else {
+        let Some((grads, mean)) = self.accumulated.waiting() else {
             anyhow::bail!("nothing has been accumulated, so there is no step to take");
         };
-        let mean = pending.losses.iter().sum::<f32>() / pending.losses.len() as f32;
-        let loss = Array::from_f32(mean)?;
-        self.advance(&loss, &pending.grads)
+        // A step that fails leaves the run as it was, and that includes
+        // what was waiting for it.
+        let loss = self.advance(&Array::from_f32(mean)?, &grads)?;
+        self.accumulated = Accumulator::default();
+        Ok(loss)
     }
 
     /// How many parts are waiting for a step.
     pub fn accumulated(&self) -> usize {
-        self.pending.as_ref().map_or(0, |p| p.losses.len())
+        self.accumulated.parts()
     }
 
     /// Throws away what was accumulated, for a caller abandoning a batch
     /// part way through. Returns how many parts went.
     pub fn discard(&mut self) -> usize {
-        self.pending.take().map_or(0, |p| p.losses.len())
+        let parts = self.accumulated.parts();
+        self.accumulated = Accumulator::default();
+        parts
     }
 
     /// Writes the run's state: parameters, optimizer slots, counters, the
@@ -430,7 +474,7 @@ impl TrainState {
         // had dropped half a batch. Refusing says so while the caller can
         // still choose.
         anyhow::ensure!(
-            self.pending.is_none(),
+            self.accumulated.parts() == 0,
             "{} parts are accumulated and a checkpoint does not hold them. \
              Apply them or discard them first",
             self.accumulated()
@@ -457,102 +501,6 @@ impl TrainState {
         Ok(checkpoint::write(dir, state)?.display().to_string())
     }
 
-    /// Writes one model's parameters to `dir` as an HF-compatible fp32
-    /// safetensors checkpoint. The GraphConfig model name is stripped from
-    /// each qualified path, so a model declared with `encoder_prefix:`
-    /// keeps that prefix and the file's keys match the published layout.
-    ///
-    /// Returns the (old, new) path pairs so the caller can write metadata
-    /// that names what was saved.
-    pub fn export_model(
-        &self,
-        plan: &Plan,
-        model: &str,
-        dir: &str,
-    ) -> Result<Vec<(String, String)>> {
-        let model = plan
-            .models
-            .iter()
-            .find(|m| m.name == model)
-            .with_context(|| {
-                format!(
-                    "no model named {model:?} (this run has {:?})",
-                    plan.models.iter().map(|m| &m.name).collect::<Vec<_>>()
-                )
-            })?;
-        let owned = self.published(plan, model)?;
-        let renamed = plan.paths[model.slice.clone()]
-            .iter()
-            .cloned()
-            .zip(owned.iter().map(|(path, _)| path.clone()))
-            .collect();
-
-        let dir = Path::new(dir);
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("creating {}", dir.display()))?;
-        // `{"format": "pt"}`, which is what a published checkpoint carries
-        // and what a loader looks for: transformers reads the metadata and
-        // refuses a file whose format it does not recognize. The bytes are
-        // plain little-endian f32 in reading order, which is what "pt"
-        // describes; the word names a layout, not a framework that wrote
-        // it.
-        let metadata = std::collections::HashMap::from([
-            ("format".to_string(), "pt".to_string()),
-        ]);
-        let file = dir.join("model.safetensors");
-        Array::save_safetensors(
-            owned.iter().map(|(path, array)| (path.as_str(), array)),
-            &metadata,
-            &file,
-        )
-        .context("writing model.safetensors")?;
-
-        // Read back before saying it is written, for the reason a
-        // checkpoint does (docs/plan.md section 15.27): a file that does
-        // not load is worse than no file, and finding out here costs one
-        // read of what was just written.
-        let read = Array::load_safetensors(&file)
-            .context("the export just written does not read back")?;
-        for (path, _) in &owned {
-            anyhow::ensure!(
-                read.contains_key(path.as_str()),
-                "the export just written has no {path:?}"
-            );
-        }
-        anyhow::ensure!(
-            read.len() == owned.len(),
-            "the export just written holds {} tensors and {} were saved",
-            read.len(),
-            owned.len()
-        );
-        Ok(renamed)
-    }
-
-    /// One model's parameters under the names a published checkpoint uses,
-    /// in fp32.
-    ///
-    /// Pure: it decides what would be written and touches no disk, so what
-    /// goes in a file can be looked at without making one. The model's own
-    /// name is stripped, so a model declared with `encoder_prefix:` keeps
-    /// that prefix and the keys line up with the published layout.
-    fn published(&self, plan: &Plan, model: &Model) -> Result<Vec<(String, Array)>> {
-        let prefix = format!("{}.", model.name);
-        let owned: Vec<(String, Array)> = plan.paths[model.slice.clone()]
-            .iter()
-            .zip(&self.params[model.slice.clone()])
-            .map(|(path, array)| {
-                let array = if array.dtype() == Dtype::Float32 {
-                    array.clone()
-                } else {
-                    array.as_dtype(Dtype::Float32)?
-                };
-                Ok((path.strip_prefix(&prefix).unwrap_or(path).to_string(), array))
-            })
-            .collect::<Result<_>>()?;
-        eval(owned.iter().map(|(_, a)| a))?;
-        Ok(owned)
-    }
-
     /// Restores state written by [`TrainState::save`], refusing anything
     /// that does not belong to this run: another description, another
     /// optimizer, a parameter of another shape, a missing slot.
@@ -560,12 +508,17 @@ impl TrainState {
     /// Returns what the caller recorded in `run`, so that whoever owns the
     /// data can put its sampler back where the checkpoint left it.
     ///
-    /// Reading and accepting is [`TrainState::accept`]; this is the commit.
-    /// They are separate so that "nothing moves until everything is
+    /// Reading and accepting is [`checkpoint::Loaded::accept`]; this is the
+    /// commit. They are separate so that "nothing moves until everything is
     /// checked" is a fact about the types rather than a claim in a comment:
-    /// a [`Restored`] only exists if every check passed.
+    /// an [`checkpoint::Accepted`] only exists if every check passed.
     pub fn restore(&mut self, plan: &Plan, dir: &str) -> Result<String> {
-        let accepted = self.accept(plan, dir)?;
+        let accepted = checkpoint::read(dir)?.accept(&checkpoint::Run {
+            plan,
+            params: &self.params,
+            argnums: &self.argnums,
+            optimizer: &self.optimizer,
+        })?;
 
         // Everything is here and consistent; make it real before touching
         // this state, so a failure below cannot leave it half restored.
@@ -587,114 +540,10 @@ impl TrainState {
         // Gradients for parameters that are no longer there. Going back is
         // the answer to a batch that went wrong, so they are dropped
         // rather than refused.
-        self.pending = None;
+        self.accumulated = Accumulator::default();
         Ok(accepted.run)
     }
 
-    /// Reads a checkpoint and checks all of it against this run. Touches
-    /// nothing.
-    fn accept(&self, plan: &Plan, dir: &str) -> Result<Restored> {
-        let loaded = checkpoint::read(dir)?;
-        let manifest = &loaded.manifest;
-        anyhow::ensure!(
-            manifest.config_digest == plan.config_digest,
-            "this checkpoint belongs to another graph (digest {}, not {})",
-            &manifest.config_digest[..12.min(manifest.config_digest.len())],
-            &plan.config_digest[..12]
-        );
-        anyhow::ensure!(
-            &manifest.optimizer == self.optimizer.config(),
-            "this checkpoint was written by a different optimizer ({:?})",
-            manifest.optimizer
-        );
-        anyhow::ensure!(
-            manifest.parameters.len() == plan.paths.len(),
-            "this checkpoint has {} parameters, this session has {}",
-            manifest.parameters.len(),
-            plan.paths.len()
-        );
-
-        let mut params = Vec::with_capacity(self.params.len());
-        for (i, path) in plan.paths.iter().enumerate() {
-            let entry = &manifest.parameters[i];
-            anyhow::ensure!(
-                &entry.path == path,
-                "parameter {i} is {:?} here and {:?} in the checkpoint",
-                path,
-                entry.path
-            );
-            let array = loaded
-                .parameters
-                .get(path)
-                .with_context(|| format!("the checkpoint has no parameter {path:?}"))?;
-            anyhow::ensure!(
-                array.shape() == self.params[i].shape(),
-                "parameter {path:?}: checkpoint shape {:?} is not {:?}",
-                array.shape(),
-                self.params[i].shape()
-            );
-            anyhow::ensure!(
-                array.dtype() == self.params[i].dtype(),
-                "parameter {path:?}: checkpoint dtype {:?} is not {:?}",
-                array.dtype(),
-                self.params[i].dtype()
-            );
-            params.push(array.clone());
-        }
-
-        let moments = self.accept_slots(plan, &loaded)?;
-        Ok(Restored {
-            params,
-            moments,
-            rng: loaded.rng.context("the checkpoint has no RNG state")?,
-            seed: manifest.seed,
-            step: manifest.step,
-            optimizer_steps: manifest.optimizer_steps,
-            run: serde_json::to_string(&manifest.run)?,
-        })
-    }
-
-    /// The optimizer's slots, all of them or none.
-    ///
-    /// An AdamW session restored without moments used to index past the
-    /// end of an empty vector on its next step, which is why this refuses
-    /// rather than filling in.
-    fn accept_slots(
-        &self,
-        plan: &Plan,
-        loaded: &checkpoint::Loaded,
-    ) -> Result<Moments> {
-        if !self.optimizer.wants_slots() {
-            anyhow::ensure!(
-                loaded.slots.is_empty(),
-                "this checkpoint carries optimizer state, and {} has none",
-                self.optimizer.config().name()
-            );
-            return Ok(Moments::None);
-        }
-
-        anyhow::ensure!(
-            !loaded.slots.is_empty(),
-            "this checkpoint has no optimizer state, and {} needs it",
-            self.optimizer.config().name()
-        );
-        let (mut m, mut v) = (Vec::new(), Vec::new());
-        for &i in &self.argnums {
-            let path = &plan.paths[i as usize];
-            let (slot_m, slot_v) = loaded
-                .slots
-                .get(path)
-                .with_context(|| format!("the checkpoint has no optimizer state for {path:?}"))?;
-            anyhow::ensure!(
-                slot_m.shape() == self.params[i as usize].shape()
-                    && slot_v.shape() == self.params[i as usize].shape(),
-                "optimizer state for {path:?} has the wrong shape"
-            );
-            m.push(slot_m.clone());
-            v.push(slot_v.clone());
-        }
-        Ok(Moments::Adam { m, v })
-    }
 }
 
 #[cfg(test)]
@@ -987,56 +836,22 @@ mod tests {
         assert_eq!(values(&into.fetch(&plan2, "m.w").unwrap()), before);
     }
 
+
+    /// A part that cannot be added leaves what was already waiting as it
+    /// was: the sums are built before they replace the old ones.
     #[test]
-    fn export_writes_one_models_parameters_with_prefix_stripped() {
-        // student.scale exports as "scale": the GraphConfig model name is
-        // the one thing a serving consumer does not carry.
-        let (plan, state) = open(fixtures::teacher_and_student(), sgd(0.1));
-        let dir = tempfile::tempdir().unwrap();
-        let export_to = dir.path().join("out").display().to_string();
+    fn a_part_that_fails_to_add_leaves_what_was_accumulated() {
+        let (_, mut state) = open(fixtures::scaled_mean(), sgd(0.5));
+        let loss = Array::from_f32(1.0).unwrap();
+        let fits = [Array::from_slice(&[1.0f32, 1.0], &[2]).unwrap()];
+        let does_not = [Array::from_slice(&[1.0f32, 1.0, 1.0], &[3]).unwrap()];
 
-        let renamed = state.export_model(&plan, "student", &export_to).unwrap();
-        assert_eq!(renamed, vec![("student.scale".to_string(), "scale".to_string())]);
+        state.accumulate(&loss, &fits).unwrap();
+        assert!(state.accumulate(&loss, &does_not).is_err(), "2 and 3 do not add");
 
-        let file = std::path::Path::new(&export_to).join("model.safetensors");
-        let arrays = Array::load_safetensors(&file).unwrap();
-        assert_eq!(arrays.len(), 1, "only the student's parameter is exported");
-        let array = &arrays["scale"];
-        assert_eq!(array.dtype(), Dtype::Float32);
-        assert_eq!(crate::tensor::to_tensor(array).unwrap().shape, vec![2]);
-        let exported = values(&crate::tensor::to_tensor(array).unwrap());
-        let held = values(&state.fetch(&plan, "student.scale").unwrap());
-        for (got, want) in exported.iter().zip(&held) {
-            assert!((got - want).abs() < 1e-6, "{exported:?} against {held:?}");
-        }
+        assert_eq!(state.accumulated(), 1);
+        state.apply().unwrap();
+        assert_eq!(state.step(), 1);
     }
 
-    #[test]
-    fn an_export_says_what_format_it_is_in() {
-        // A loader reads this before the tensors, and refuses a file whose
-        // format it cannot name. A published checkpoint carries the same.
-        let (plan, state) = open(fixtures::teacher_and_student(), sgd(0.1));
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("out");
-        state
-            .export_model(&plan, "student", &out.display().to_string())
-            .unwrap();
-
-        let bytes = std::fs::read(out.join("model.safetensors")).unwrap();
-        let length = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
-        let header: serde_json::Value =
-            serde_json::from_slice(&bytes[8..8 + length]).unwrap();
-
-        assert_eq!(header["__metadata__"]["format"], "pt");
-    }
-
-    #[test]
-    fn export_refuses_a_model_name_this_run_does_not_have() {
-        let (plan, state) = open(fixtures::scaled_mean(), sgd(0.1));
-        let dir = tempfile::tempdir().unwrap();
-        let e = state
-            .export_model(&plan, "elsewhere", &dir.path().display().to_string())
-            .unwrap_err();
-        assert!(e.to_string().contains("no model named"), "{e}");
-    }
 }
