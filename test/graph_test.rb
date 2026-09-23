@@ -141,4 +141,35 @@ class GraphTest < Minitest::Test
     assert_match(/\At: a source is/, e.message)
     assert_raises(Torobi::ConfigError) { IR::Source.batch("") }
   end
+
+  # The spec refusals that had no test: a hash key that is not a string
+  # (the canonical form would not be total), an input source of the wrong
+  # kind, a parameter that is neither trainable nor frozen, an initializer
+  # with no "type", and a spec of the wrong class in a list.
+  def test_the_rest_of_the_spec_refusals_are_made_where_they_are_written
+    e = assert_raises(Torobi::ConfigError) { IR::Json.primitive!({ 1 => "x" }, where: "t") }
+    assert_match(/hash keys must be strings/, e.message)
+
+    e = assert_raises(Torobi::ConfigError) do
+      IR::InputSpec.new(id: 0, name: "x", shape: [2], dtype: :f32, source: "batch")
+    end
+    assert_match(/source is a String, expected an IR::Source/, e.message)
+
+    e = assert_raises(Torobi::ConfigError) do
+      IR::ParameterSpec.new(id: 0, path: "w", shape: [2], dtype: :f32,
+                            initializer: { "type" => "zeros" }, trainable: :yes)
+    end
+    assert_match(/trainable must be true or false/, e.message)
+
+    e = assert_raises(Torobi::ConfigError) do
+      IR::ParameterSpec.new(id: 0, path: "w", shape: [2], dtype: :f32,
+                            initializer: { "kind" => "zeros" })
+    end
+    assert_match(/must have a "type" key/, e.message)
+
+    e = assert_raises(Torobi::ConfigError) do
+      IR::Graph.new(inputs: [Object.new], parameters: [], nodes: [], outputs: { "y" => "input:0" })
+    end
+    assert_match(/input at position 0 is a Object, expected Torobi::IR::InputSpec/, e.message)
+  end
 end

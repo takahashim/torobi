@@ -80,6 +80,14 @@ class GraphConfigTest < Minitest::Test
     end
   end
 
+  def test_train_must_be_an_array_of_model_names
+    e = assert_raises(Torobi::ConfigError) do
+      Torobi::GraphConfig.new(models: { "m" => Torobi::TestGraphs.linear_graph }, train: :all)
+    end
+
+    assert_match(/train must be an Array of model names, got :all/, e.message)
+  end
+
   # A model name qualifies everything the model declares, and an output's
   # own name may hold a dot ("queries.embedding"), so a dotted model name
   # would make "a.b.c" two things. The engine used to split such a name at

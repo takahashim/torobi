@@ -60,6 +60,38 @@ class DslTest < Minitest::Test
     assert_match(/dimension .* mismatch \(3 vs 4\)/, e.message)
   end
 
+  # A graph value is one kind of thing, and the DSL refuses to pretend
+  # otherwise: it cannot meet a number or an object it does not know, only
+  # a computed value can be named, and a head split needs its width.
+  def test_a_graph_value_refuses_what_it_cannot_be_combined_with
+    g = Torobi::DSL::Builder.new
+    x = g.input :x, [2]
+
+    e = assert_raises(Torobi::ConfigError) { x + Object.new }
+    assert_match(/cannot \+ a Object to a graph value/, e.message)
+
+    e = assert_raises(Torobi::ConfigError) { x.coerce("s") }
+    assert_match(/cannot combine a String with a graph value/, e.message)
+
+    e = assert_raises(Torobi::ConfigError) { g.emit("abs", inputs: ["nope"]) }
+    assert_match(/expected a graph value, got "nope"/, e.message)
+
+    e = assert_raises(Torobi::ConfigError) { x.named("y") }
+    assert_match(/only a computed value can be named/, e.message)
+
+    e = assert_raises(Torobi::ConfigError) { g.input(:wide, [1, nil, 2, 3]).merge_heads }
+    assert_match(/heads and their width must both be concrete/, e.message)
+  end
+
+  def test_from_model_refuses_a_model_that_is_not_here
+    model = Torobi.graph { |g| g.output :loss, g.mean(g.input(:x, [2])) }
+    e = assert_raises(Torobi::ConfigError) do
+      Torobi.objective("m" => model) { |g| g.from_model(:nope, :loss) }
+    end
+
+    assert_match(/no model named "nope"/, e.message)
+  end
+
   # A reshape may keep dimensions it does not know, which is the only way
   # to split the last axis of something whose batch *and* sequence are
   # both symbolic (docs/plan.md 15.63).
