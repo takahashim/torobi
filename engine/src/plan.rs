@@ -14,8 +14,8 @@ use std::ops::Range;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use mlx_rs::transforms::eval;
-use mlx_rs::Array;
+use crate::mlxc::transforms::eval;
+use crate::mlxc::Array;
 use serde::Deserialize;
 
 use crate::graph::{GraphConfig, InputSpec, ParameterSpec};
@@ -400,7 +400,7 @@ impl Source {
     fn seed(&mut self, seed: u64) -> Result<()> {
         if let Source::Pretrained { key, fresh, .. } = self {
             if !fresh.is_empty() {
-                *key = Some(mlx_rs::random::key(seed)?);
+                *key = Some(crate::mlxc::random::key(seed)?);
             }
         }
         Ok(())
@@ -456,7 +456,7 @@ impl Source {
                     // Its own key, split from the run's by the path, so a
                     // parameter draws the same numbers wherever it sits in
                     // the declaration order.
-                    let (_, mine) = mlx_rs::random::split(key, 2)?;
+                    let (_, mine) = crate::mlxc::random::split(key, 2)?;
                     return crate::init::build(spec, &mine);
                 }
                 let arrays = files.get(model).with_context(|| {
@@ -610,7 +610,7 @@ mod tests {
     use super::*;
     use crate::fixtures;
     use crate::tensor::Values;
-    use mlx_rs::Dtype;
+    use crate::mlxc::Dtype;
     use serde_json::{json, Value};
 
     /// The common case in these tests: parameters as JSON.

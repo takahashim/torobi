@@ -22,7 +22,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use mlx_rs::transforms::eval;
+use crate::mlxc::transforms::eval;
 
 use crate::executor;
 use crate::interp::{Stat, Taps, Tapped, Watch};
@@ -413,7 +413,7 @@ impl SessionCore {
     /// One step over already-bound inputs: differentiate, read the taps,
     /// then commit. The taps are converted before the state moves so that
     /// a step either happens whole or not at all.
-    fn update(&mut self, fields: &BTreeMap<String, mlx_rs::Array>) -> Result<f32> {
+    fn update(&mut self, fields: &BTreeMap<String, crate::mlxc::Array>) -> Result<f32> {
         let (loss, grads, tapped) =
             executor::differentiate(&self.plan, self.state.pass(), fields, &self.taps)?;
         // Brought back before the state moves, so a step either happens
@@ -1260,7 +1260,7 @@ mod evaluation_tests {
             .put(
                 "m.w",
                 &Tensor {
-                    dtype: mlx_rs::Dtype::Float32,
+                    dtype: crate::mlxc::Dtype::Float32,
                     shape: vec![2],
                     values: Values::F32(vec![1.0, 1.0]),
                 },
@@ -1517,7 +1517,7 @@ mod checkpoint_tests {
         let pairs = session.export_model("student", &out).unwrap();
         assert_eq!(pairs, vec![("student.scale".to_string(), "scale".to_string())]);
 
-        let arrays = mlx_rs::Array::load_safetensors(std::path::Path::new(&out).join("model.safetensors")).unwrap();
+        let arrays = crate::mlxc::Array::load_safetensors(std::path::Path::new(&out).join("model.safetensors")).unwrap();
         assert!(arrays.contains_key("scale"));
         assert!(!arrays.contains_key("student.scale"));
         assert!(!arrays.contains_key("teacher.scale"), "only one model is exported");

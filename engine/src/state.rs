@@ -11,8 +11,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use mlx_rs::transforms::eval;
-use mlx_rs::{Array, Dtype};
+use crate::mlxc::transforms::eval;
+use crate::mlxc::{Array, Dtype};
 
 use crate::checkpoint;
 use crate::optimizer::{global_norm, scaled, Config as OptimizerConfig, Optimizer};
@@ -103,7 +103,7 @@ impl TrainState {
             params,
             argnums,
             optimizer,
-            rng: mlx_rs::random::key(seed)?,
+            rng: crate::mlxc::random::key(seed)?,
             seed,
             step: 0,
             last_loss: f32::NAN,
@@ -182,7 +182,7 @@ impl TrainState {
     /// function of the new seed alone.
     pub fn set_seed(&mut self, seed: u64) -> Result<()> {
         self.seed = seed;
-        self.rng = mlx_rs::random::key(seed)?;
+        self.rng = crate::mlxc::random::key(seed)?;
         Ok(())
     }
 
@@ -298,7 +298,7 @@ impl TrainState {
     /// carries on has something clean to carry on from.
     pub fn advance(&mut self, loss: &Array, grads: &[Array]) -> Result<f32> {
         let value = loss.item_cast::<f32>();
-        let (rng, _) = mlx_rs::random::split(&self.rng, 2)?;
+        let (rng, _) = crate::mlxc::random::split(&self.rng, 2)?;
 
         if !value.is_finite() {
             eval(std::iter::once(&rng))?;
@@ -872,7 +872,7 @@ mod tests {
     fn put_writes_a_parameter_and_refuses_a_mismatch() {
         let (plan, mut state) = open(fixtures::scaled_mean(), sgd(0.1));
         let good = Tensor {
-            dtype: mlx_rs::Dtype::Float32,
+            dtype: crate::mlxc::Dtype::Float32,
             shape: vec![2],
             values: Values::F32(vec![9.0, 9.0]),
         };
@@ -880,7 +880,7 @@ mod tests {
         assert_eq!(values(&state.fetch(&plan, "m.w").unwrap()), vec![9.0, 9.0]);
 
         let wrong_shape = Tensor {
-            dtype: mlx_rs::Dtype::Float32,
+            dtype: crate::mlxc::Dtype::Float32,
             shape: vec![3],
             values: Values::F32(vec![0.0; 3]),
         };
@@ -896,7 +896,7 @@ mod tests {
         // the parameter holds rather than refused: what a caller can say
         // is the numbers, and the width is the graph's.
         let integers = Tensor {
-            dtype: mlx_rs::Dtype::Int32,
+            dtype: crate::mlxc::Dtype::Int32,
             shape: vec![2],
             values: Values::I32(vec![7, 8]),
         };

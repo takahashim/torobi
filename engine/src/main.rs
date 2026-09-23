@@ -12,7 +12,7 @@ use anyhow::{bail, Result};
 use torobi_engine::tensor::{Batch, Tensor, Values};
 use torobi_engine::{Session, Weights};
 
-use mlx_rs::Dtype;
+use torobi_engine::tensor::Dtype;
 use serde::Deserialize;
 
 /// The CLI's own JSON shape for a batch. The library's boundary carries a

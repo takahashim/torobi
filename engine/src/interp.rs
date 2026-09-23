@@ -1,5 +1,5 @@
 //! The interpreter: one pass over a resolved program's nodes, dispatching
-//! to mlx-rs.
+//! to MLX through the engine's own binding (`crate::mlxc`).
 //!
 //! Everything that could be decided without data was decided when the plan
 //! opened (`crate::op`): the op is a variant, its attributes are fields,
@@ -8,10 +8,10 @@
 
 use std::collections::BTreeMap;
 
-use mlx_rs::error::Exception;
-use mlx_rs::fast::ScaledDotProductAttentionMask as Mask;
-use mlx_rs::ops::indexing::take_along_axis;
-use mlx_rs::Array;
+use crate::mlxc::error::Exception;
+use crate::mlxc::fast::ScaledDotProductAttentionMask as Mask;
+use crate::mlxc::ops::indexing::take_along_axis;
+use crate::mlxc::Array;
 
 use crate::graph::Ref;
 use crate::op::{qualified, Node, Op, Program};
@@ -105,7 +105,7 @@ impl Stat {
             Stat::Extent => {
                 let min = value.min(false)?;
                 let max = value.max(false)?;
-                mlx_rs::ops::stack(&[min, max], 0)
+                crate::mlxc::ops::stack(&[min, max], 0)
             }
         }
     }
@@ -204,22 +204,22 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
         Op::Square => ins[0].square()?,
         Op::Exp => ins[0].exp()?,
         Op::Log => ins[0].log()?,
-        Op::Relu => mlx_rs::ops::maximum(&ins[0], Array::from_f32(0.0))?,
-        Op::Sigmoid => mlx_rs::ops::sigmoid(&ins[0])?,
-        Op::Tanh => mlx_rs::ops::tanh(&ins[0])?,
+        Op::Relu => crate::mlxc::ops::maximum(&ins[0], Array::from_f32(0.0))?,
+        Op::Sigmoid => crate::mlxc::ops::sigmoid(&ins[0])?,
+        Op::Tanh => crate::mlxc::ops::tanh(&ins[0])?,
         // The exact form, not the tanh approximation: erf is what the
         // reference implementations of these models use, and a parity
         // check against them is the point (docs/plan.md 9.2).
         Op::Gelu => {
             let half = ins[0].multiply(scalar(0.5))?;
             let inner = ins[0].divide(scalar(std::f32::consts::SQRT_2))?;
-            half.multiply(mlx_rs::ops::erf(&inner)?.add(scalar(1.0))?)?
+            half.multiply(crate::mlxc::ops::erf(&inner)?.add(scalar(1.0))?)?
         }
         // And the tanh approximation, which is a different function:
         // 0.5x(1 + tanh(sqrt(2/pi)(x + 0.044715x^3))). Gemma is trained
         // with it, so a graph that reached for the exact one above would
         // be a model that runs and is not the published one.
-        Op::GeluTanh => mlx_rs::nn::gelu_approximate(&ins[0])?,
+        Op::GeluTanh => crate::mlxc::nn::gelu_approximate(&ins[0])?,
 
         Op::Dropout(p) => {
             // No key means this is not a training pass. Inverted dropout
@@ -228,19 +228,19 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
             match key.as_ref() {
                 None => ins[0].clone(),
                 Some(current) => {
-                    let (next, draw) = mlx_rs::random::split(current, 2)?;
+                    let (next, draw) = crate::mlxc::random::split(current, 2)?;
                     *key = Some(next);
                     let keep = scalar(1.0 - p);
-                    let mask = mlx_rs::random::bernoulli(&keep, ins[0].shape(), &draw)?;
+                    let mask = crate::mlxc::random::bernoulli(&keep, ins[0].shape(), &draw)?;
                     ins[0]
-                        .multiply(mask.as_dtype(mlx_rs::Dtype::Float32)?)?
+                        .multiply(mask.as_dtype(crate::mlxc::Dtype::Float32)?)?
                         .divide(&keep)?
                 }
             }
         }
-        Op::StopGradient => mlx_rs::stop_gradient(&ins[0])?,
+        Op::StopGradient => crate::mlxc::stop_gradient(&ins[0])?,
 
-        Op::Softmax { axis } => mlx_rs::ops::softmax_axis(&ins[0], *axis, None)?,
+        Op::Softmax { axis } => crate::mlxc::ops::softmax_axis(&ins[0], *axis, None)?,
         Op::Rope { theta, freqs } => rope(&ins[0], *theta, freqs.as_deref())?,
 
         Op::Transpose(axes) => ins[0].transpose_axes(axes)?,
@@ -284,9 +284,9 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
 
 /// `length` elements of `axis`, starting at `start`.
 ///
-/// Through `take_axis` rather than a strided slice: mlx-rs keeps the
-/// latter to itself, and selecting a contiguous run of indices is the same
-/// function.
+/// Through `take_axis` rather than a strided slice: mlx-rs kept the latter
+/// to itself when this was written, and selecting a contiguous run of
+/// indices is the same function.
 fn slice(x: &Array, axis: i32, start: i32, length: i32) -> Result<Array> {
     let indices: Vec<i32> = (start..start + length).collect();
     x.take_axis(&Array::from_slice(&indices, &[length]), axis)
@@ -387,7 +387,7 @@ fn rope(x: &Array, theta: f32, freqs: Option<&[f32]>) -> Result<Array> {
     let second = slice(x, -1, half, half)?;
     let rotated_first = first.multiply(&cos)?.subtract(second.multiply(&sin)?)?;
     let rotated_second = second.multiply(&cos)?.add(first.multiply(&sin)?)?;
-    mlx_rs::ops::concatenate(&[rotated_first, rotated_second], -1)
+    crate::mlxc::ops::concatenate(&[rotated_first, rotated_second], -1)
 }
 
 /// Scaled dot-product attention: softmax(q k^T / sqrt(d) + mask) v.
@@ -430,7 +430,7 @@ fn sdpa(ins: &[Array], scale: Option<f32>, causal: bool) -> Result<Array> {
         }
     };
     // The last argument is attention sinks, which nothing here uses.
-    let out = mlx_rs::fast::scaled_dot_product_attention(&q, &k, &v, scale, mask, None)?;
+    let out = crate::mlxc::fast::scaled_dot_product_attention(&q, &k, &v, scale, mask, None)?;
     Ok(if flat { out.squeeze_axes(&[1])? } else { out })
 }
 
@@ -438,12 +438,12 @@ fn sdpa(ins: &[Array], scale: Option<f32>, causal: bool) -> Result<Array> {
 ///
 /// The largest logit comes out before anything is exponentiated, which is
 /// what `logsumexp` is; a vocabulary's logits overflow f32 without it.
-/// The same two lines as mlx-rs's own `CrossEntropy` with no reduction,
+/// The same two lines as mlx-rs's `CrossEntropy` with no reduction,
 /// written here because the reduction is the objective's to choose.
 fn cross_entropy(logits: &Array, targets: &Array) -> Result<Array> {
     let wanted = take_along_axis(logits, &targets.expand_dims_axes(&[-1])?, -1)?
         .squeeze_axes(&[-1])?;
-    Ok(mlx_rs::ops::logsumexp_axes(logits, &[-1], None)?.subtract(wanted)?)
+    Ok(crate::mlxc::ops::logsumexp_axes(logits, &[-1], None)?.subtract(wanted)?)
 }
 
 #[cfg(test)]
@@ -677,15 +677,15 @@ mod tests {
     /// untiled, which is the arrangement every decoder since Llama 2 has.
     #[test]
     fn the_fused_attention_differentiates_and_groups_queries() {
-        use mlx_rs::transforms::value_and_grad_with_argnums;
-        use mlx_rs::Array;
+        use crate::mlxc::transforms::value_and_grad_with_argnums;
+        use crate::mlxc::Array;
 
         let q = Array::from_slice(&[0.1f32; 24], &[1, 4, 2, 3]);
         let k = Array::from_slice(&[0.2f32; 12], &[1, 2, 2, 3]);
         let v = Array::from_slice(&[0.3f32; 12], &[1, 2, 2, 3]);
 
         let forward = |args: &[Array]| -> Vec<Array> {
-            let out = mlx_rs::fast::scaled_dot_product_attention(
+            let out = crate::mlxc::fast::scaled_dot_product_attention(
                 &args[0], &args[1], &args[2], 0.5, None, None,
             )
             .expect("fused attention");

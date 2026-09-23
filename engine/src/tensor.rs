@@ -7,8 +7,11 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use mlx_rs::transforms::eval;
-use mlx_rs::{Array, Dtype};
+use crate::mlxc::transforms::eval;
+use crate::mlxc::Array;
+/// MLX's dtypes, which a [`Tensor`] is labelled with. Re-exported because
+/// the binding that defines it is the engine's own and not public.
+pub use crate::mlxc::Dtype;
 
 /// A tensor as it crosses the boundary: a dtype, a shape, and the values.
 /// Always a copy, never a handle.

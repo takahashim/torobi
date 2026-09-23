@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use mlx_rs::Array;
+use crate::mlxc::Array;
 use serde::{Deserialize, Serialize};
 
 use crate::optimizer::Config as OptimizerConfig;

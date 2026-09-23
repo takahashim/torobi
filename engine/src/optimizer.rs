@@ -6,8 +6,8 @@
 //! must reproduce. The arithmetic is MLX's; the update rule is ours.
 
 use anyhow::Result;
-use mlx_rs::ops::zeros_like;
-use mlx_rs::{Array, Dtype};
+use crate::mlxc::ops::zeros_like;
+use crate::mlxc::{Array, Dtype};
 use serde::{Deserialize, Serialize};
 
 /// How an optimizer is configured, as it appears in a journal, a manifest
@@ -322,7 +322,7 @@ impl Optimizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mlx_rs::transforms::eval;
+    use crate::mlxc::transforms::eval;
 
     fn array(values: &[f32]) -> Array {
         Array::from_slice(values, &[values.len() as i32])

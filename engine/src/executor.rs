@@ -9,9 +9,9 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use mlx_rs::error::Exception;
-use mlx_rs::transforms::{eval, value_and_grad_with_argnums};
-use mlx_rs::Array;
+use crate::mlxc::error::Exception;
+use crate::mlxc::transforms::{eval, value_and_grad_with_argnums};
+use crate::mlxc::Array;
 
 use crate::interp::{self, Taps, Tapped, Watch};
 use crate::op::{Program, OBJECTIVE};
@@ -65,7 +65,7 @@ fn models(
         let inputs = resolve(program, fields, &produced, name)?;
         let mine = match &key {
             Some(current) => {
-                let (next, mine) = mlx_rs::random::split(current, 2)?;
+                let (next, mine) = crate::mlxc::random::split(current, 2)?;
                 key = Some(next);
                 Some(mine)
             }
