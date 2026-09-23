@@ -258,7 +258,7 @@ payload は native-endian の 4 byte 値。dtype が渡るのは、graph が i32
 - **`BatchRef`**: batch のフィールドを指す参照型 `{"batch": "teacher_logits"}`。
 - **model output の契約**: 名前・shape・dtype を model graph 側が宣言し、objective の
   shape 推論はそれを使う。不一致は構築時に拒否。
-- **`stop_gradient`**: op として IR に持ち、**明示的に呼ぶ**(`g.stop_gradient(x)`)。
+- **`stop_gradient`**: op として IR に持ち、**明示的に呼ぶ**(`x.stop_gradient`)。
   v3.1 は「teacher の出力は既定で通す」と書いていたが、暗黙の挿入は「どこで勾配が
   止まったか」を graph から読めなくするので採らない。凍結 model のパラメータは
   そもそも argnums に入らないため、既定にしなくても teacher は学習されない。

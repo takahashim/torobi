@@ -4,11 +4,15 @@ module Torobi
   module DSL
     # The `g` inside Torobi.graph: everything that adds to the graph.
     #
-    # The division of labour with Handle is one rule: what creates
-    # parameters or joins several values is a method here (linear, sdpa,
-    # matmul); what transforms one value is a method or operator on the
-    # handle. Layers apply immediately: `g.linear(x, 512, name: "wo")`
-    # creates the parameters and the nodes in one call.
+    # The division of labour with Handle: a handle has the one-value ops
+    # the manifest marks `handle: true`, whose attributes are all keywords
+    # (`x.gelu`, `x.softmax(axis: -1)`, `x.dropout(p: 0.1)`), its
+    # operators, and the shape helpers built from them (`split_heads`).
+    # Everything else is here: what declares parameters (`param` and the
+    # layers in `Layers`), what joins several values (`matmul`, `sdpa`),
+    # and the ops whose call is more than keywords on one value: the
+    # reductions, whose axes default to all of them, and `cast`, which is
+    # no node at all when the dtype is already the one asked for.
     class Builder
       include Layers
 
@@ -38,9 +42,7 @@ module Torobi
       # --- graph boundary ---
 
       # An input fed from the batch, by field name.
-      def input(name, shape, dtype: :f32)
-        declare_input(name, shape, dtype, IR::Source.batch(name))
-      end
+      def input(name, shape, dtype: :f32) = from_batch(name, shape, dtype:)
 
       # An input fed from the batch under a different field name than the
       # one it is known by here.
@@ -106,7 +108,7 @@ module Torobi
       # the scope it is called in.
       def parameter(name)
         path = scoped(name)
-        spec = @parameters.find { |p| p.path == path }
+        spec = declared(path)
         unless spec
           raise ConfigError,
                 "no parameter #{path.inspect} is declared yet (this graph has " \
@@ -162,7 +164,7 @@ module Torobi
         # weight is frozen, and asking whether it is the same parameter
         # has to ask about the same thing.
         trainable &&= @adapter.trains?(path)
-        if @sharing.positive? && (already = @parameters.find { |p| p.path == path })
+        if @sharing.positive? && (already = declared(path))
           return shared(already, shape:, dtype:, init:, trainable:)
         end
 
@@ -259,20 +261,16 @@ module Torobi
         emit("cross_entropy", inputs: [logits, targets])
       end
 
-      # --- values that do not train ---
-
-      # Values whose gradient does not flow back. A teacher's output goes
-      # through this (docs/plan.md section 5A.3).
-      def stop_gradient(x) = emit("stop_gradient", inputs: [x])
-
-      # Inverted dropout, drawing from the session's RNG state. `p` is the
-      # rate dropped; 0 is the identity.
-      def dropout(x, p) = emit("dropout", inputs: [x], attrs: { p: })
-
       # --- core ---
 
       # Adds one node: checks ownership, arity and attributes against the
       # manifest, infers shape and dtype, and returns the handle.
+      #
+      # Public because a handle adds its nodes through it. A model
+      # description does not reach it: `Models::Description::VOCABULARY`
+      # is what a description may say, and `emit` is left out of it on
+      # purpose, so a node no layer means cannot be put in a graph that
+      # way.
       def emit(op, inputs: [], params: [], attrs: {}, name: nil)
         where = "node #{@nodes.size} (#{op})"
         spec = Ops.fetch(op, where:)
@@ -290,13 +288,10 @@ module Torobi
         Handle.new(builder: self, ref: IR::Ref.node(node.id), shape:, dtype:)
       end
 
-      # Names a value, so a tap can ask for it later (docs/plan.md 6.4 and
-      # 8.3). The name is taken under the scopes in force, so the same
-      # component in a loop yields "layers.0.attn", "layers.1.attn".
-      #
-      #   h = g.name("attn", g.sdpa(q, k, v))
-      def name(label, handle)
-        own!(handle, where: "name #{label.to_s.inspect}")
+      # What `Handle#named` asks of the graph: the node behind `handle`,
+      # given a name no other value here has.
+      def named(handle, label)
+        own!(handle, where: "named #{label.to_s.inspect}")
         kind, id = IR::Ref.parse(handle.ref)
         if kind != :node
           raise ConfigError, "only a computed value can be named, and #{handle.ref} is an input"
@@ -305,11 +300,7 @@ module Torobi
         node = @nodes[id]
         raise ConfigError, "#{handle.ref} is already named #{node.name.inspect}" if node.name
 
-        @nodes[id] = IR::NodeSpec.new(
-          id: node.id, op: node.op, name: unique_name(label), inputs: node.inputs,
-          parameters: node.parameters, attributes: node.attributes,
-          shape: node.shape, dtype: node.dtype
-        )
+        @nodes[id] = node.with(name: unique_name(label))
         handle
       end
 
@@ -335,6 +326,8 @@ module Torobi
 
         emit("parameter", params: [already.id])
       end
+
+      def declared(path) = @parameters.find { |p| p.path == path }
 
       def unique_name(label)
         candidate = (@labels + [scoped(label)]).join(".")

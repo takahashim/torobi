@@ -130,7 +130,7 @@ module Torobi
             encoded = scope "model" do
               encode
             end
-            name "hidden", encoded
+            encoded.named("hidden")
           end
           output :logits, head(hidden)
         end

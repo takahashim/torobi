@@ -345,6 +345,16 @@ class DslTest < Minitest::Test
     assert_in_delta(2.0, graph.nodes.first.attributes["value"])
   end
 
+  # A count that is not one is the DSL's error, not Ruby's arithmetic.
+  def test_a_split_into_no_parts_is_refused_in_the_dsls_words
+    [0, -2, "two"].each do |count|
+      e = assert_raises(Torobi::ConfigError) do
+        Torobi.graph { |g| g.input(:x, [nil, 4]).split(count) }
+      end
+      assert_match(/is not a count/, e.message)
+    end
+  end
+
   def test_the_manifest_and_the_ruby_side_agree
     Torobi::Ops::REGISTRY.each_value do |spec|
       assert_includes Torobi::Shape::RULES, spec.shape_rule,

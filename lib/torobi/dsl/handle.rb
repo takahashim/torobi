@@ -95,20 +95,13 @@ module Torobi
       # for no particular batch or sequence splits heads the same way one
       # built for both does (docs/plan.md 15.63).
       def split_heads(count)
-        count = Integer(count)
-        raise ConfigError, "split_heads: #{count} heads is not a count" unless count.positive?
         unless shape.size == 3
           raise ConfigError,
                 "split_heads: expected [batch, seq, width], got #{dtype}#{shape.inspect}"
         end
 
-        width = shape.last or
-          raise ConfigError, "split_heads: the width being divided must be concrete"
-        unless (width % count).zero?
-          raise ConfigError, "split_heads: #{width} does not divide into #{count} heads"
-        end
-
-        builder.emit("reshape", inputs: [self], attrs: { shape: [0, 0, count, width / count] })
+        each = Shape.divide!(shape.last, count, into: "heads", where: "split_heads")
+        builder.emit("reshape", inputs: [self], attrs: { shape: [0, 0, Integer(count), each] })
                .transpose(axes: [0, 2, 1, 3])
       end
 
@@ -141,18 +134,19 @@ module Torobi
       # Splits into `count` equal parts along `axis`, as slice nodes.
       def split(count, axis: -1)
         normalized = Shape.axis!(axis, shape.size, where: "split")
-        dim = shape[normalized]
-        raise ConfigError, "split: cannot split symbolic dimension #{axis}" if dim.nil?
-        unless (dim % count).zero?
-          raise ConfigError, "split: dimension #{dim} does not divide into #{count} parts"
-        end
-
-        length = dim / count
-        Array.new(count) do |i|
+        length = Shape.divide!(shape[normalized], count, into: "parts", where: "split")
+        Array.new(Integer(count)) do |i|
           builder.emit("slice", inputs: [self],
                                 attrs: { axis: normalized, start: i * length, length: })
         end
       end
+
+      # Names this value, so a tap can ask for it later (docs/plan.md 6.4
+      # and 8.3). The name is taken under the scopes in force, so the same
+      # component in a loop yields "layers.0.attn", "layers.1.attn".
+      #
+      #   h = g.sdpa(q, k, v).named("attn")
+      def named(label) = builder.named(self, label)
 
       def inspect
         "#<Torobi::DSL::Handle #{ref} #{dtype}#{shape.inspect}>"

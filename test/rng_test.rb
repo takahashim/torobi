@@ -21,7 +21,7 @@ class RngTest < Minitest::Test
     model = Torobi.graph do |g|
       x = g.input :x, [nil, DIM]
       y = g.input :y, [nil, 1]
-      h = g.dropout(g.linear(x, DIM, name: "hidden"), p)
+      h = g.linear(x, DIM, name: "hidden").dropout(p:)
       g.output :loss, g.mse(g.linear(h, 1, name: "out"), y)
     end
     Torobi::GraphConfig.new(models: { "m" => model })
@@ -122,7 +122,7 @@ class RngTest < Minitest::Test
       x = g.input :x, [nil, DIM]
       # A trainable parameter, so the session has something to differentiate.
       h = g.linear(x, DIM, name: "l")
-      g.output :loss, g.mean((g.dropout(h, 0.5) - g.dropout(h, 0.5)).square)
+      g.output :loss, g.mean((h.dropout(p: 0.5) - h.dropout(p: 0.5)).square)
     end
     conf = Torobi::GraphConfig.new(models: { "m" => model })
     w = { params: {

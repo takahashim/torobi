@@ -29,7 +29,7 @@ class GradCacheTest < Minitest::Test
       x = g.input :x, [nil, DIM]
       seed = g.input :seed, [nil, nil]
       h = g.linear(x, WIDTH, name: "l", bias: false).tanh
-      e = g.name("e", h / g.sum(h.square, axes: [-1], keepdims: true).sqrt)
+      e = (h / g.sum(h.square, axes: [-1], keepdims: true).sqrt).named("e")
       g.output :loss, g.sum(e * seed)
     end
   end

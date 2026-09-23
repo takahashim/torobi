@@ -58,6 +58,23 @@ module Torobi
       raise ConfigError, "#{where}: mixed dtypes #{dtypes.join(", ")}"
     end
 
+    # `dim` divided into `count` equal parts, as the length of each: what
+    # splitting a value or its width into heads asks. Refused, in the DSL's
+    # own words, when `count` is not a positive count, when `dim` is
+    # symbolic, or when it does not divide.
+    def divide!(dim, count, into:, where:)
+      given = count
+      count = Integer(count, exception: false)
+      raise ConfigError, "#{where}: #{given.inspect} #{into} is not a count" unless count&.positive?
+      raise ConfigError, "#{where}: the dimension being divided must be concrete" if dim.nil?
+      unless (dim % count).zero?
+        raise ConfigError,
+              "#{where}: #{dim} does not divide into #{count} #{into}"
+      end
+
+      dim / count
+    end
+
     def axis!(axis, rank, where:)
       normalized = axis.negative? ? axis + rank : axis
       unless (0...rank).cover?(normalized)

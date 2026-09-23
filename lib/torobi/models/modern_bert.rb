@@ -241,7 +241,7 @@ module Torobi
 
         # The bare encoder, with its hidden state named and declared.
         def hidden
-          output :hidden, name("hidden", encode)
+          output :hidden, encode.named("hidden")
         end
 
         # The classifier's body, so that `adapting` has something to wrap.
@@ -391,10 +391,10 @@ module Torobi
         private
 
         def emit_embedding(as, pooling:, normalize:)
-          x = name("hidden", body)
+          x = body.named("hidden")
           pooled = pool(x, mode: pooling)
           pooled = normalized(pooled) if normalize
-          output as, name("embedding", pooled)
+          output as, pooled.named("embedding")
         end
       end
 

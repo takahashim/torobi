@@ -32,7 +32,7 @@ module Torobi
       # `linear(x, ...)` against `@config.hidden_size`.
       VOCABULARY = %i[
         input from_batch from_model output
-        scope name sharing adapting parameter
+        scope sharing adapting parameter
         linear embedding layer_norm rms_norm geglu
         matmul sdpa cross_entropy cast mean sum max
       ].freeze
