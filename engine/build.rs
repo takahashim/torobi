@@ -56,6 +56,7 @@ fn bind_mlx_c(prefix: Option<&Path>) {
         }
     } else {
         println!("cargo:rustc-link-lib=stdc++");
+        link_cpu_linux();
         link_cuda();
     }
 
@@ -79,6 +80,15 @@ fn bind_mlx_c(prefix: Option<&Path>) {
         .expect("mlx-c's headers should describe themselves")
         .write_to_file(out.join("bindings.rs"))
         .expect("the bindings should be writable");
+}
+
+/// MLX's CPU backend on Linux calls BLAS and LAPACK (`cblas_sgemm`,
+/// `sgetrf_`, `ssyevd_` and the rest), and a static `libmlx.a` leaves them
+/// to whoever links it. MLX's own CMake package names OpenBLAS for both
+/// (`share/cmake/MLX/MLXTargets.cmake`, which is what the archive was
+/// built against), so this names it too: `libopenblas-dev` on Ubuntu.
+fn link_cpu_linux() {
+    println!("cargo:rustc-link-lib=openblas");
 }
 
 /// A static MLX built for CUDA leaves these to whoever links it. `stubs`
