@@ -428,7 +428,7 @@ module Torobi
       merged!(model)
       atomically do
         written = @native.export_model(model.to_s, dir.to_s)
-        carried = Export.publish(dir.to_s, from:, pooling:, pooling_dim:)
+        carried = Export.new(dir, from:, pooling:, pooling_dim:).publish
         # Last, so that a record of an export is a record of one that is
         # on disk whole.
         @journal&.note(step: @native.step, event: "exported", model: model.to_s,
@@ -439,8 +439,8 @@ module Torobi
 
     # Writes the run's state to `dir`, atomically: parameters, optimizer
     # slots, the step counts, the description they belong to, and this
-    # run's provenance. Returns the path. Interrupting it leaves no
-    # half-checkpoint.
+    # run's provenance. Returns the `Torobi::Checkpoint` written.
+    # Interrupting it leaves no half-checkpoint.
     #
     # `at:` is where in the data the run is - epoch, batch, whatever a
     # sampler needs to carry on. Torobi is handed batches and never fetches
@@ -450,13 +450,13 @@ module Torobi
     #   s.checkpoint!("run/000200", at: { epoch: 2, batch: 1_400 })
     def checkpoint!(dir, at: nil)
       record = { "provenance" => @provenance&.to_h, "position" => stringify(at) }.compact
-      path = atomically do
-        written = @native.save(dir.to_s, JSON.generate(record))
-        @journal&.checkpoint(path: written, step: @native.step)
-        written
+      written = atomically do
+        path = @native.save(dir.to_s, JSON.generate(record))
+        @journal&.checkpoint(path:, step: @native.step)
+        Checkpoint.new(path)
       end
       @hooks.fire(:checkpoint_written, step: @native.step, loss: @native.loss)
-      path
+      written
     end
 
     # Restores what `checkpoint!` wrote. Refuses a checkpoint from another
@@ -465,7 +465,7 @@ module Torobi
     #
     # Returns the position that was recorded with it (or nil), so that
     # whoever owns the data can put its sampler back where it was. The
-    # whole record, provenance included, is `Torobi::Checkpoint.manifest`.
+    # whole record, provenance included, is `Torobi::Checkpoint#manifest`.
     def restore(dir)
       recorded = atomically do
         state = JSON.parse(@native.restore(dir.to_s))

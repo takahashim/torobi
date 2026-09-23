@@ -113,7 +113,7 @@ class Bf16Test < Minitest::Test
     written = Torobi::Session.open(graph_config(model), weights:) do |s|
       s.checkpoint!(File.join(@dir, "ckpt"))
     end
-    recorded = Torobi::Checkpoint.manifest(written).fetch("parameters")
+    recorded = written.manifest.fetch("parameters")
 
     assert_equal ["bf16"], recorded.map { |p| p.fetch("dtype") }.uniq
   end

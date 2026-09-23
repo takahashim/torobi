@@ -373,13 +373,14 @@ module Torobi
 
     # Keeps a checkpoint of the best the run has been.
     class BestCheckpoint
-      attr_reader :best, :path
+      # The best value seen, and the `Torobi::Checkpoint` holding it.
+      attr_reader :best, :checkpoint
 
       def initialize(dir, metric: nil)
         @dir = dir
         @metric = metric
         @best = nil
-        @path = nil
+        @checkpoint = nil
       end
 
       def call(event)
@@ -388,7 +389,7 @@ module Torobi
         return if @best && value >= @best
 
         @best = value
-        @path = event.session.checkpoint!(@dir)
+        @checkpoint = event.session.checkpoint!(@dir)
       end
     end
 

@@ -45,7 +45,7 @@ class RunnerTest < Minitest::Test
     assert_predicate outcome, :finished?, outcome.to_s
     refute_predicate outcome, :crashed?
     assert_equal 20, r.progress.step
-    assert_equal 20, r.checkpoint_manifest.fetch("step")
+    assert_equal 20, r.checkpoint.step
   end
 
   # The parent reads the journal rather than asking the child, so progress
@@ -122,7 +122,7 @@ class RunnerTest < Minitest::Test
 
     assert_predicate outcome, :stopped?, outcome.to_s
     refute_predicate outcome, :crashed?
-    manifest = r.checkpoint_manifest
+    manifest = r.checkpoint.manifest
 
     refute_nil manifest, "a stopped run leaves the state it reached"
     assert_operator manifest.fetch("step"), :>, 0
@@ -152,7 +152,7 @@ class RunnerTest < Minitest::Test
     refute_predicate outcome, :failed?, "a signal is not an exit status"
     assert_match(/SIGABRT/, outcome.to_s)
 
-    manifest = r.checkpoint_manifest
+    manifest = r.checkpoint.manifest
 
     refute_nil manifest, "the checkpoint written before the crash is still there"
     assert_operator manifest.fetch("step"), :>, 0
@@ -167,12 +167,12 @@ class RunnerTest < Minitest::Test
     first = runner("STEPS" => "20").start.wait
 
     assert_predicate first, :finished?, first.to_s
-    reached = Torobi::Checkpoint.manifest(File.join(@dir, "checkpoint")).fetch("step")
+    reached = Torobi::Checkpoint.new(File.join(@dir, "checkpoint")).step
 
     second = runner("STEPS" => "20").start
 
     assert_predicate second.wait, :finished?, second.outcome.to_s
-    assert_equal reached + 20, second.checkpoint_manifest.fetch("step"),
+    assert_equal reached + 20, second.checkpoint.step,
                  "the second run carried on from the first"
   end
 

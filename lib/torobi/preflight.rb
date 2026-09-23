@@ -27,9 +27,9 @@ module Torobi
     # them, and finding out at the GPU is finding out by aborting.
     ORIGIN_PID = Process.pid
 
-    module_function
-
-    def check!
+    # Refuses, before MLX is touched, what would otherwise fail at the GPU
+    # or end the process: a forked child, and a device that cannot start.
+    def self.check!
       unless Process.pid == ORIGIN_PID
         raise Torobi::EngineUnavailable,
               "this process (#{Process.pid}) inherited Torobi from a fork of " \
@@ -39,31 +39,25 @@ module Torobi
               "worker (Puma clustered, Sidekiq, Spring)."
       end
 
-      return if probe_result
+      probe = Probe.current
+      return if probe.ok?
 
-      raise Torobi::EngineUnavailable, "MLX cannot start on this machine: #{@probe_reason}"
+      raise Torobi::EngineUnavailable, "MLX cannot start on this machine: #{probe.reason}"
     end
 
-    # Whether MLX can actually initialize, asked once per process.
+    # Whether MLX could initialize, as one process found out: its pid, and
+    # nil or the reason it could not.
     #
     # Asked in a subprocess, because the failure it looks for is an abort:
     # asking in this process is the thing we are trying to avoid. The answer
-    # is memoized against the pid that learned it, so a forked child does
-    # not inherit its parent's answer (it would be answering about the
-    # parent's device, not its own).
-    def probe_result
-      return @probe_result if defined?(@probe_pid) && @probe_pid == Process.pid
-
-      @probe_pid = Process.pid
-      @probe_result = probe!
-    end
-
-    def probe!
-      require "open3"
-      script = <<~RUBY
+    # is kept against the pid that learned it (`current`), so a forked
+    # child does not inherit its parent's answer: it would be answering
+    # about the parent's device, not its own.
+    class Probe < Data.define(:pid, :reason)
+      # Enough to make MLX build a device and run a kernel.
+      SCRIPT = <<~RUBY.freeze
         $LOAD_PATH.unshift(#{File.expand_path("..", __dir__).inspect})
         require "torobi"
-        # Enough to make MLX build a device and run a kernel.
         model = Torobi.graph do |g|
           x = g.input :x, [nil, 1]
           g.output :loss, g.mean(g.linear(x, 1, name: "probe"))
@@ -71,6 +65,9 @@ module Torobi
         config = Torobi::GraphConfig.new(models: { "m" => model })
         weights = { params: { "m.probe.weight" => { shape: [1, 1], data: [0.0] },
                               "m.probe.bias" => { shape: [1], data: [0.0] } } }
+        # The engine directly, and nothing of the session around it: what
+        # this asks is whether the device starts, and a failure anywhere
+        # else would be reported as that.
         native = Torobi::Native::Session.open(
           config.canonical_json, JSON.generate(weights),
           JSON.generate(Torobi::Session::DEFAULT_OPTIMIZER),
@@ -79,37 +76,44 @@ module Torobi
         native.run_step({ "x" => ["f32", [1, 1], [1.0].pack("f*")] })
         print "ok"
       RUBY
-      output, status = Open3.capture2e(RbConfig.ruby, "-e", script)
-      ok = status.success? && output.end_with?("ok")
-      @probe_reason = ok ? nil : reason_from(output)
-      ok
-    rescue StandardError => e
-      @probe_reason = e.message
-      false
-    end
 
-    # The child's own words, when it had any. An engine refusal arrives as
-    # an exception message; an abort leaves whatever MLX printed on the way
-    # down; a silent death leaves nothing, and then the generic truth is
-    # all there is to say.
-    def reason_from(output)
-      line = output.lines.map(&:strip).reject(&:empty?).first
-      unless line
-        return "initializing its device ended a probe process rather than raising. " \
-               "Torobi needs a working GPU for the backend it was built against: " \
-               "Metal on Apple silicon, or an NVIDIA card and its driver " \
-               "elsewhere; see docs/vendoring.md."
+      # This process's answer, asked for the first time if it has not been.
+      def self.current
+        @current = run unless @current&.pid == Process.pid
+        @current
       end
 
-      # An unrescued Ruby exception prints as "-e:12:in '<main>': message".
-      line.sub(/\A.*?:\d+:in '.*?': /, "")
-    end
+      # Forgets the answer, for tests that need the probe run again.
+      def self.forget! = @current = nil
 
-    # For tests that need the probe run again.
-    def forget_probe!
-      @probe_pid = nil
-      @probe_result = nil
-      @probe_reason = nil
+      # Asks, in a subprocess, now.
+      def self.run
+        require "open3"
+        output, status = Open3.capture2e(RbConfig.ruby, "-e", SCRIPT)
+        ok = status.success? && output.end_with?("ok")
+        new(pid: Process.pid, reason: ok ? nil : reason_from(output))
+      rescue StandardError => e
+        new(pid: Process.pid, reason: e.message)
+      end
+
+      # The child's own words, when it had any. An engine refusal arrives as
+      # an exception message; an abort leaves whatever MLX printed on the way
+      # down; a silent death leaves nothing, and then the generic truth is
+      # all there is to say.
+      def self.reason_from(output)
+        line = output.lines.map(&:strip).reject(&:empty?).first
+        unless line
+          return "initializing its device ended a probe process rather than raising. " \
+                 "Torobi needs a working GPU for the backend it was built against: " \
+                 "Metal on Apple silicon, or an NVIDIA card and its driver " \
+                 "elsewhere; see docs/vendoring.md."
+        end
+
+        # An unrescued Ruby exception prints as "-e:12:in '<main>': message".
+        line.sub(/\A.*?:\d+:in '.*?': /, "")
+      end
+
+      def ok? = reason.nil?
     end
   end
 end

@@ -125,11 +125,9 @@ class HooksTest < Minitest::Test
         s.run([batch] * 6)
       end
 
-      assert_path_exists best.path
+      assert_predicate best.checkpoint, :exist?
       assert_operator best.best, :<, 1.0
-      manifest = JSON.parse(File.read(File.join(best.path, "manifest.json")))
-
-      assert_operator manifest.fetch("step"), :<=, 6
+      assert_operator best.checkpoint.step, :<=, 6
     end
   end
 

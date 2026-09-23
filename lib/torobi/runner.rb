@@ -85,7 +85,10 @@ module Torobi
     attr_reader :dir, :pid, :outcome
 
     def journal_path = File.join(@dir, JOURNAL)
-    def checkpoint = File.join(@dir, CHECKPOINT)
+
+    # Where the run checkpoints, as a `Torobi::Checkpoint`: whether one is
+    # there to resume from, and what it says, is asked of it.
+    def checkpoint = Checkpoint.new(File.join(@dir, CHECKPOINT))
 
     # Starts the run. The directory is made, but nothing in it is removed:
     # a runner started against a directory that already holds a checkpoint
@@ -126,11 +129,6 @@ module Torobi
     # child may be inside a step, or gone. A record on disk answers either
     # way (the journal flushes per entry for exactly this).
     def progress = last_entry(Journal::Span)
-
-    # Whether a checkpoint is there to resume from, and what it says.
-    def checkpoint_manifest
-      Checkpoint.manifest(checkpoint) if Checkpoint.exist?(checkpoint)
-    end
 
     # Asks the run to stop at the next step boundary and waits for it.
     #
@@ -341,7 +339,7 @@ module Torobi
 
       attr_reader :dir
 
-      def checkpoint = File.join(@dir, CHECKPOINT)
+      def checkpoint = Checkpoint.new(File.join(@dir, CHECKPOINT))
 
       # The journal to hand `Session.open(io:)`. Appended to, so a resumed
       # run adds to the record rather than replacing it.
