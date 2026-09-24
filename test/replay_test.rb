@@ -250,18 +250,69 @@ class ReplayTest < Minitest::Test
     assert_match(/observed nothing/, result.divergences.first.why)
   end
 
+  # A rerun that observes more than the journal recorded is a policy that
+  # started deciding on something new, and it is caught.
+  def test_a_rerun_that_observes_more_than_the_journal_is_caught
+    data = batches(4)
+    io = StringIO.new
+    silent = ->(session, all) { all.each { |b| session.step!(b) } }
+    extra = lambda do |session, all|
+      silent.call(session, all)
+      session.observe(loss: session.loss)
+    end
+
+    Torobi::Session.open(config, weights: weights, io:, optimizer:) { |s| silent.call(s, data) }
+    result = Torobi::Replay.rerun(io.string, config:, weights:, batches: data, &extra)
+
+    refute_predicate result, :agrees?
+    assert_match(/observed more than the journal/, result.divergences.first.why)
+  end
+
+  # And one that observes a different key, which the values alone would not
+  # show.
+  def test_a_rerun_that_observes_a_different_key_is_caught
+    data = batches(4)
+    io = StringIO.new
+    original = ->(session, all) { all.each { |b| session.observe(loss: session.step!(b)) } }
+    changed = lambda do |session, all|
+      all.each { |b| session.observe(loss: session.step!(b), lr: session.lr) }
+    end
+
+    Torobi::Session.open(config, weights: weights, io:, optimizer:) { |s| original.call(s, data) }
+    result = Torobi::Replay.rerun(io.string, config:, weights:, batches: data, &changed)
+
+    refute_predicate result, :agrees?
+    assert_match(/observed different things/, result.divergences.first.why)
+  end
+
   def test_a_journal_is_accepted_as_an_object_its_jsonl_or_its_entries
     data = batches(3)
-    io = StringIO.new
-    Torobi::Session.open(config, weights: weights, io:, optimizer:) { |s| s.run(data) }
+    journal = Torobi::Journal.new(Torobi::Provenance.of(config, optimizer:))
+    Torobi::Session.open(config, weights: weights, optimizer:, journal:) { |s| s.run(data) }
 
-    text = io.string
-    [text, Torobi::Journal.read(text)].each do |form|
+    [journal, journal.to_jsonl, journal.to_record].each do |form|
       result = Torobi::Replay.action(form, config:, weights:, batches: data)
 
       assert_predicate result, :agrees?, "#{form.class}: #{result}"
     end
     assert_raises(ArgumentError) { Torobi::Replay.action(42, config:, weights:, batches: data) }
+  end
+
+  # A freeze partway is a structural change the replay has to make again,
+  # not a step it may skip.
+  def test_action_replay_applies_a_freeze_and_a_thaw
+    data = batches(4)
+    io = StringIO.new
+    Torobi::Session.open(config, weights: weights, io:, optimizer:) do |s|
+      s.freeze!("m.l.bias")
+      s.run(data.first(2))
+      s.unfreeze!("m.l.bias")
+      s.run(data.drop(2))
+    end
+
+    result = Torobi::Replay.action(io.string, config:, weights:, batches: data)
+
+    assert_predicate result, :agrees?, result.to_s
   end
 
   # The optimizer a run used is in its journal, so a replay does not have

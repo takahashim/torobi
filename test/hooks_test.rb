@@ -381,4 +381,23 @@ class HooksTest < Minitest::Test
 
     assert_raises(ArgumentError) { hooks.use(watching, every: -1) }
   end
+
+  # The readings a run has seen are folded as they fall out, so a long run
+  # does not carry all of them: what fell out is only ever read as "the
+  # best before".
+  def test_the_history_folds_what_it_evicts_into_the_best_before
+    history = Torobi::Hooks::History.new(keep: 2)
+    [5.0, 4.0, 3.0, 2.0].each { |loss| history << loss }
+
+    assert_equal 4, history.size, "size counts every reading, not only what is kept"
+    assert_equal [3.0, 2.0], history.last(2)
+    assert_in_delta 4.0, history.best_before(2), 1e-12, "the min of what fell out"
+    assert_in_delta 3.0, history.best_before(1), 1e-12
+  end
+
+  def test_the_curve_base_has_no_rate_of_its_own
+    curve = Torobi::Policies::Curve.new(peak: 1e-3, total: 10)
+
+    assert_raises(NotImplementedError) { curve.at(0) }
+  end
 end
