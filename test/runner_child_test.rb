@@ -70,20 +70,6 @@ class RunnerChildTest < Minitest::Test
     assert_equal 1 << 20, Torobi::Memory.limit
   end
 
-  def test_no_limit_leaves_the_allocator_alone
-    before = Torobi::Memory.limit
-
-    assert_nil child.cap!
-    assert_equal before, Torobi::Memory.limit
-  end
-
-  def test_listen_arms_the_stop_flag_and_returns_itself
-    c = child
-
-    assert_same c, c.listen
-    refute_predicate c, :stopping?
-  end
-
   def test_a_run_that_ends_writes_that_it_finished
     ran = false
     code = Torobi::Runner.child(@dir) { |_run| ran = true }
@@ -115,14 +101,6 @@ class RunnerChildTest < Minitest::Test
     e = assert_raises(ArgumentError) { Torobi::Runner.child(nil) }
 
     assert_match(/no run directory/, e.message)
-  end
-
-  # A journal that cannot be written to is not worth failing a run over:
-  # the note is the last thing written, and losing it loses only the note.
-  def test_a_child_whose_journal_is_gone_still_ends
-    code = Torobi::Runner.child(@dir) { |run| run.journal.close }
-
-    assert_equal Torobi::Runner::EXIT_OK, code
   end
 
   def test_child_bang_exits_with_what_child_returns

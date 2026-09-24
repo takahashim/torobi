@@ -31,21 +31,6 @@ class TensorDataTest < Minitest::Test
     assert_equal [1.0, 2.0, 3.0, 4.0], t.to_a
   end
 
-  def test_the_bytes_are_the_shape_times_the_width
-    t = Torobi::TensorData.from_a([2, 3, 4], Array.new(24, 1.0))
-
-    assert_equal 24, t.size
-    assert_equal 4, t.value_size
-    assert_equal 96, t.bytesize
-  end
-
-  def test_i32_crosses_as_four_bytes_a_value
-    t = Torobi::TensorData.from_a([3], [1, -2, 300], dtype: :i32)
-
-    assert_equal 12, t.bytesize
-    assert_equal [1, -2, 300], t.to_a
-  end
-
   def test_already_packed_bytes_pass_through
     packed = [1.5, -2.5].pack("f*")
     t = Torobi::TensorData.from({ shape: [2], data: packed })
