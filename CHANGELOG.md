@@ -131,6 +131,8 @@ between two versions people have.
 - `Torobi::Memory.limit=` does not refuse an allocation that exceeds it;
   a run that must stay under a number wants `Policies::MemoryGuard`.
 - The targets are Apple Silicon and Linux + NVIDIA. The binding links
-  CUDA on Linux in CI and the Linux archive is pinned; no GPU run has
-  been made, and no Linux platform gem is built yet.
+  CUDA on Linux in CI, the Linux archive is pinned, and a first session on
+  an NVIDIA GPU built the extension, trained through both the engine's
+  command line and a Ruby session, and exited cleanly. No Linux platform
+  gem is built yet.
 - The API still moves. Nothing here is a compatibility promise yet.
