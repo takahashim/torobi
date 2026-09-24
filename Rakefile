@@ -103,6 +103,15 @@ def stage_runtime_headers
   end
 end
 
+# The Linux counterpart of `metallib`: MLX's CUDA backend compiles its
+# kernels at run time and looks for NVIDIA's headers one directory above
+# the extension, so a checkout stages them into `lib/include` the way a
+# platform gem carries them. A no-op on Apple, where the kernels are one
+# file `rake metallib` puts beside the bundle.
+task :runtime_headers do
+  stage_runtime_headers
+end
+
 # The engine's own tests. Serial, and not by preference: MLX's default
 # stream is one command queue, and two threads submitting to it at once
 # trips a Metal assertion that aborts the process.
@@ -476,7 +485,7 @@ rescue LoadError
 end
 
 task compile: [] # defined by RbSys::ExtensionTask above
-task test: %i[compile metallib]
+task test: %i[compile metallib runtime_headers]
 
 # The Ruby tests again, under line coverage. What it holds is that a
 # refusal, a branch or a value object does not quietly stop being
@@ -484,7 +493,7 @@ task test: %i[compile metallib]
 # the tests that spawn it, so the floor sits below the in-process figure
 # rather than at it.
 desc "run the Ruby tests under line coverage"
-task coverage: %i[compile metallib] do
+task coverage: %i[compile metallib runtime_headers] do
   sh RbConfig.ruby, "-Ilib", "-Itest", "tools/coverage.rb"
 end
 
