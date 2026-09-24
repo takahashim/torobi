@@ -3,6 +3,11 @@
 *.gem
 /notes/
 
+# A run's output: checkpoints, an exported model and a journal, which are
+# gigabytes of binaries rather than anything to commit. `Torobi::Runner`
+# writes here (docs/plan.md section 11.4).
+/runs/
+
 # Not anchored: cargo builds a target directory beside every manifest, and
 # an unanchored rule is the only one that covers the next one. engine/target
 # reached the history once, with a 100 MB metallib inside it.
