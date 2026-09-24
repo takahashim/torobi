@@ -15,7 +15,7 @@ Gem::Specification.new do |spec|
                      "no dependencies. What it does not implement, it refuses by name."
   spec.homepage = "https://github.com/takahashim/torobi"
   spec.license  = "MIT"
-  spec.required_ruby_version = ">= 3.2"
+  spec.required_ruby_version = ">= 3.3"
   spec.metadata = { "rubygems_mfa_required" => "true" }
 
   spec.files = Dir["lib/**/*.rb", "README.md"]
