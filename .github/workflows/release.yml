@@ -1,0 +1,175 @@
+name: release
+
+# Build the source gem and a precompiled ("fat") platform gem for
+# arm64-darwin, attach them to a GitHub Release, and (optionally, on manual
+# dispatch) publish to RubyGems.
+#
+# The platform gem is built natively on each Ruby's own runner - not
+# cross-compiled - because the extension links MLX from the pinned prebuilt
+# archive. Each runner compiles one Ruby ABI; the assemble job packs all of
+# them into one gem (`lib/torobi/<abi>/torobi.bundle`, chosen at require
+# time by `lib/torobi.rb`). `gem install` of the platform gem does not
+# recompile or need a Rust toolchain.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish_to_rubygems:
+        description: "Push the built gems to RubyGems (via Trusted Publishing / OIDC)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # create the GitHub Release and upload assets
+
+jobs:
+  # --- source gem (always builds; compiles from source at install time) -------
+  source-gem:
+    name: Source gem
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - name: Build source gem
+        run: |
+          mkdir -p pkg
+          gem build torobi.gemspec -o pkg/torobi-source.gem
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gem-source
+          path: pkg/*.gem
+          if-no-files-found: error
+
+  # --- compile the extension natively, one Ruby ABI per runner ---------------
+  compile:
+    name: Compile arm64-darwin (Ruby ${{ matrix.ruby }})
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ["3.3", "3.4", "4.0"]
+    steps:
+      - uses: actions/checkout@v7
+
+      # No Metal toolchain: MLX's kernels cannot be compiled without it, which
+      # is why this project takes a prebuilt MLX (lib/torobi/mlx_prebuilt.rb).
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+      - name: Cache the prebuilt MLX
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/torobi/mlx-prebuilt
+          key: mlx-${{ hashFiles('lib/torobi/mlx_prebuilt.json') }}
+      - name: Compile the extension
+        run: bundle exec rake compile
+      - name: Stage the compiled extension under its ABI subdir
+        run: |
+          minor="$(ruby -e 'print RUBY_VERSION[/\d+\.\d+/]')"
+          dlext="$(ruby -e 'print RbConfig::CONFIG["DLEXT"]')"
+          mkdir -p "artifact/${minor}"
+          cp "lib/torobi/torobi.${dlext}" "artifact/${minor}/torobi.${dlext}"
+          ls -l "artifact/${minor}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bin-arm64-darwin-${{ matrix.ruby }}
+          path: artifact/
+          if-no-files-found: error
+
+  # --- assemble one fat gem from the per-ABI extensions ----------------------
+  native-gem:
+    name: Native gem arm64-darwin
+    needs: compile
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - name: Download the per-ABI extensions
+        uses: actions/download-artifact@v8
+        with:
+          pattern: bin-arm64-darwin-*
+          merge-multiple: true
+          path: staged
+      - name: Place them under lib/torobi/<abi>/
+        run: |
+          mkdir -p lib/torobi
+          cp -r staged/* lib/torobi/
+          find lib/torobi -maxdepth 2 -name 'torobi.*' -print
+      - name: Build the platform gem
+        run: ruby script/build_platform_gem.rb arm64-darwin
+      - name: Verify it installs without recompiling
+        run: |
+          gem install torobi-*-arm64-darwin.gem --local
+          ruby -e 'require "torobi"; puts Torobi::VERSION'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gem-arm64-darwin
+          path: "*.gem"
+          if-no-files-found: error
+
+  # --- attach every gem to a GitHub Release (on a version tag) ----------------
+  release:
+    name: GitHub Release
+    needs: [source-gem, native-gem]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: gem-*
+          merge-multiple: true
+          path: dist
+      - run: ls -l dist
+      - name: Create / update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=""
+          case "$GITHUB_REF_NAME" in *rc*|*beta*|*alpha*|*pre*) pre="--prerelease" ;; esac
+          gh release create "${GITHUB_REF_NAME}" dist/*.gem \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Automated release for ${GITHUB_REF_NAME}. See CHANGELOG.md." \
+            $pre --verify-tag || \
+          gh release upload "${GITHUB_REF_NAME}" dist/*.gem --repo "${GITHUB_REPOSITORY}" --clobber
+
+  # --- publish to RubyGems, behind the `rubygems` environment approval gate ---
+  # Auth is RubyGems Trusted Publishing (OIDC): no stored API key. Configure a
+  # matching Trusted Publisher on RubyGems.org (owner=takahashim, repo=torobi,
+  # workflow=release.yml, Environment=rubygems) so the token is only accepted
+  # through this gated environment.
+  publish:
+    name: Publish to RubyGems
+    needs: [source-gem, native-gem]
+    if: >-
+      startsWith(github.ref, 'refs/tags/') ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_to_rubygems)
+    runs-on: ubuntu-latest
+    environment: rubygems
+    permissions:
+      contents: read
+      id-token: write       # OIDC identity token for Trusted Publishing
+    steps:
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: gem-*
+          merge-multiple: true
+          path: dist
+      - name: Configure RubyGems credentials (OIDC trusted publishing)
+        uses: rubygems/configure-rubygems-credentials@762a4b77c3300434bb57c7ce80b20e36231927aa # v2.0.0
+      - name: gem push
+        run: |
+          for g in dist/*.gem; do
+            echo "Pushing $g"
+            gem push "$g"
+          done
