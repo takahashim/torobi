@@ -583,23 +583,28 @@ RubyGems をチャネルとする。プラットフォームごとの platform g
 | artifact | backend | 利用者側の前提 |
 | --- | --- | --- |
 | `torobi-<ver>-arm64-darwin.gem` | Metal | Apple Silicon |
-| `torobi-<ver>-x86_64-linux.gem` | CUDA 12 | NVIDIA driver、CUDA runtime(`cudart` / `cublasLt` / `cufft` / `nvrtc`)、cuDNN 9、OpenBLAS |
+| `torobi-<ver>-x86_64-linux.gem` | CUDA 12 | NVIDIA driver、CUDA runtime(`cudart` / `cublasLt` / `cufft` / `nvrtc`)、cuDNN 9、OpenBLAS、CUDA toolkit のヘッダ(JIT 用) |
 | `torobi-<ver>.gem`(source) | 任意 | Rust toolchain(Linux は CUDA toolkit / cuDNN / OpenBLAS も) |
 
 - ネイティブ拡張は Ruby の ABI ごとに違う。各 Ruby minor 分を 1 gem に同梱する(fat gem)か、
   minor ごとに分ける。
 - **macOS**: `mlx.metallib`(Metal カーネル、129 MB)を初回利用時に取得する(§11.4)。
 - **Linux**: Metal の metallib は要らない。CUDA カーネルは MLX のビルドに含まれ、`nvrtc` で
-  JIT される。代わりに CUDA スタックが利用者の環境に要る(上の表)。
+  JIT されるが、その JIT は NVIDIA のヘッダ(`cccl` / `cute` / `cutlass`)を実行時に要する。
+  MLX は拡張の親の `include/` を見るので、platform gem は archive の
+  `include/{cccl,cute,cutlass}` を `lib/include` に同梱する(gz 3.3 MB、初回取得はしない)。
+  加えて CUDA スタックと CUDA toolkit のヘッダが利用者の環境に要る(上の表)。
 - **Linux CPU**: 別途 MLX の Linux CPU ビルドの archive が要る(今の pin は CUDA12 のみ)。
   出せば GPU 無しで CI テストできる。
 - **検証**: macOS は CI(macos-15)で全スイート。Linux は CI(ubuntu)で bind + link まで。
   GPU は CI に無いので、GPU での学習は手動セッション(`notes/gpu-session-checklist.md`)で
   確かめ、Linux のリリースはそれをゲートにする。
 - **リリース工程**: 2 プラットフォーム × Ruby minor。mlx-c / MLX を上げるたびに作り直す。
-- **notice**: 同梱物は共通(mlx-c / MLX / gguflib / mlx-rs のスニペット、§11.4)。
-- **配布元**: `takahashim/mlx-prebuilt` のリリース(MLX / mlx-c / gguflib / metallib / 各
-  license / `MANIFEST.txt` / `SHA256SUMS`)。
+- **notice**: mlx-c / MLX / gguflib / mlx-rs のスニペット(§11.4)。Linux はさらに CCCL
+  (Apache-2.0 with LLVM exception)と CUTLASS(BSD-3-Clause)。どちらも archive に入っている。
+- **配布元**: `takahashim/mlx-prebuilt` のリリース。platform gem はそこから libs をリンクし、
+  Linux では JIT ヘッダ(`include/{cccl,cute,cutlass}`)も取り出す。macOS の metallib は
+  初回取得のソース。
 
 ## 12. 検証の層(v1 §18 を本文化)
 
@@ -633,7 +638,7 @@ RubyGems をチャネルとする。プラットフォームごとの platform g
 | checkpoint 破損 | manifest + atomic rename + inventory 検証(§11.2) |
 | **致命が Ruby に届かない**(初期化失敗でプロセス死) | preflight の拒否リストを増やす、subprocess 異常系テスト、supervisor 前提を文書化(§4.1) |
 | **batch 経路の性能** | 計測済み(§5A.2.1): 呼び出しではなく JSON 直列化が支配的。対策は packed encoding であり、投入キューではない |
-| **配布(metallib 129 MB と配置制約)** | platform gem を正とし、metallib は利用時取得(§11.4)。配置制約は M1 の installed-gem smoke で確認済み |
+| **配布(metallib 129 MB / Linux の JIT ヘッダと配置制約)** | platform gem を正とする。macOS の metallib は利用時取得、Linux の `include/{cccl,cute,cutlass}` は `lib/include` に同梱(MLX は拡張の親の `include/` を見る)。metallib の配置制約は M1 の smoke で確認済み |
 | タップの常設によるメモリ / fusion 劣化 | stats 縮約を既定に、full タップは debug 用と明記 |
 | 窓能力の際限ない要望 | 能力は列挙制。新規はエンジンの名前付き機能として審査 |
 | DSL の自由度肥大 | op registry 制。escape hatch は §10 |
