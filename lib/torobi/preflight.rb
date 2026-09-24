@@ -45,10 +45,11 @@ module Torobi
               "worker (Puma clustered, Sidekiq, Spring)."
       end
 
-      # The kernels a platform gem did not ship, fetched before the probe
-      # below: without them MLX ends the process rather than raising, so
-      # this has to happen where the answer is still ours to give. Touches
-      # no device, so it is after the pid check, not before it.
+      # The kernels a platform gem did not ship, fetched and named before
+      # the probe below: without them MLX ends the process rather than
+      # raising, so this has to happen where the answer is still ours to
+      # give. Touches no device, so it is after the pid check, not before
+      # it.
       Metallib.ensure! if MlxPrebuilt.metal?
 
       probe = Probe.current
@@ -70,6 +71,10 @@ module Torobi
       SCRIPT = <<~RUBY.freeze
         $LOAD_PATH.unshift(#{File.expand_path("..", __dir__).inspect})
         require "torobi"
+        # The parent named the kernels; this process has not. Without it
+        # the probe would look beside its own bundle and, on a platform gem,
+        # find nothing.
+        Torobi::Metallib.ensure! if MlxPrebuilt.metal?
         model = Torobi.graph do |g|
           x = g.input :x, [nil, 1]
           g.output :loss, g.mean(g.linear(x, 1, name: "probe"))

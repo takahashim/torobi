@@ -94,6 +94,12 @@ between two versions people have.
   process of its own with a memory cap.
 - **`rake mlx:pin`**, and a prebuilt MLX fetched by digest rather than
   by URL alone.
+- **An `arm64-darwin` platform gem**, which installs with no Rust
+  toolchain: the compiled extension travels in the package, and
+  `mlx.metallib` is fetched on first use into a cache and named to MLX
+  (`mlx_metal_set_metallib_path`), so the installed gem's own directory
+  need not be writable. The notices it redistributes travel in
+  `licenses/`.
 - **mlx-c, bound by the engine itself** (MLX 0.32.2, mlx-c `c74db530`),
   rather than through mlx-rs. The engine used a few percent of mlx-rs,
   and mlx-rs cannot compile for x86_64 for a reason in mlx-c's headers

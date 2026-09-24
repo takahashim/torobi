@@ -556,8 +556,10 @@ toolchain を要求しない。source gem は prebuilt の無い Ruby / 環境�
 **mlx-c を依存を含めて焼き込む。** エンジンは mlx-c を bindgen でバインドし、mlx-c と
 その依存(MLX, gguflib)を静的リンクする(`engine/build.rs`)。platform gem はその
 コンパイル済み拡張(約 15.6 MB、Ruby minor ごと)を配る。`mlx.metallib`(129 MB)は
-初回利用時にダウンロードする(digest 検証、`lib/torobi/mlx_prebuilt.rb` と同じ仕組み)。
-dladdr で拡張バンドルの隣に要り、それが無いとプロセスが死ぬ(§4.1)。
+初回利用時にダウンロードし(digest 検証、`lib/torobi/mlx_prebuilt.rb` と同じ仕組み)、
+書き込み可能な cache に置いて `mlx_metal_set_metallib_path` で MLX にその場所を教える。
+gem のディレクトリに書けない環境があるため、バンドルの隣には書かない。カーネルが無いと
+プロセスが死ぬ(§4.1)。
 
 **再配布は受け入れる。** 配るのは mlx-c / MLX / gguflib のコンパイル済みコードで、
 すべて permissive(MIT。mlx-c / MLX は ml-explore、gguflib は antirez/gguf-tools)。
@@ -588,7 +590,8 @@ RubyGems をチャネルとする。プラットフォームごとの platform g
 
 - ネイティブ拡張は Ruby の ABI ごとに違う。各 Ruby minor 分を 1 gem に同梱する(fat gem)か、
   minor ごとに分ける。
-- **macOS**: `mlx.metallib`(Metal カーネル、129 MB)を初回利用時に取得する(§11.4)。
+- **macOS**: `mlx.metallib`(Metal カーネル、129 MB)を初回利用時に cache へ取得し、
+  `mlx_metal_set_metallib_path` で MLX に場所を教える(§11.4)。
 - **Linux**: Metal の metallib は要らない。CUDA カーネルは MLX のビルドに含まれ、`nvrtc` で
   JIT されるが、その JIT は NVIDIA のヘッダ(`cccl` / `cute` / `cutlass`)を実行時に要する。
   MLX は拡張の親の `include/` を見るので、platform gem は archive の
