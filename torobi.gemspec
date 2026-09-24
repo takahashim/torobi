@@ -28,7 +28,7 @@ Gem::Specification.new do |spec|
   spec.files = Dir["lib/**/*.rb", "lib/torobi/mlx_prebuilt.json", "config/ops.yml",
                    "ext/**/*.{rs,rb,toml,json}", "engine/**/*.{rs,toml}",
                    "Cargo.toml", "Cargo.lock", "README.md", "CHANGELOG.md", "LICENSE",
-                   "docs/plan.md", "docs/vendoring.md"]
+                   "licenses/**/*", "docs/plan.md", "docs/vendoring.md"]
   spec.require_paths = ["lib"]
   spec.extensions = ["ext/torobi/extconf.rb"]
 

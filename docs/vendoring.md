@@ -352,7 +352,7 @@ stream was set.
 | mlx-rs (upstream, oxiglade): the reference the binding follows, not a dependency | MIT **or** Apache-2.0, at the user's choice | its authors |
 | mlx-c | MIT | ml-explore |
 | MLX | MIT | ml-explore |
-| gguflib (the GGUF library MLX vendors) | MIT | Salvatore Sanfilippo (antirez/gguf-tools) |
+| gguflib (the GGUF library MLX vendors) | MIT | Georgi Gerganov (antirez/gguf-tools) |
 | CCCL (the CUDA headers MLX JITs against on Linux) | Apache-2.0 with LLVM exception | NVIDIA |
 | CUTLASS (the same) | BSD-3-Clause | NVIDIA |
 
@@ -362,9 +362,9 @@ MIT-or-Apache-2.0 terms; nothing of it is in the current build.)
 Everything in the chain is permissive, and MIT and Apache-2.0 both ask the
 same thing of a redistributor: carry the notice.
 
-**Torobi carries none of it today, and does not have to.** What the gem
-holds is `spec.files`: Ruby, the engine's own Rust, two manifests and the
-docs. No line of MLX or mlx-c is in it, and `mlx-rs` is neither in it nor
+**A source gem carries none of it, and does not have to.** What it holds
+is `spec.files`: Ruby, the engine's own Rust, two manifests and the docs.
+No line of MLX or mlx-c is in it, and `mlx-rs` is neither in it nor
 fetched: the binding follows its API, and the few small pieces taken from
 it (how an exception prints, two refusal messages) are in the engine's
 source under its own MIT notice. `lib/torobi/mlx_prebuilt.rb` fetches our
@@ -372,21 +372,15 @@ own pre-built MLX, mlx-c included, from `takahashim/mlx-prebuilt`; it
 arrives at the user's machine from its own authors, under their own
 licences. Torobi points, it does not ship.
 
-**That changed on 2026-09-24: the distribution question (docs/plan.md
-section 11.4) landed on a platform gem.** Nothing is built at install, so
-the package contains mlx-c's compiled code and its dependencies' (MLX,
-gguflib), and Torobi is a redistributor. What that costs, exactly:
-
-- ship mlx-c's MIT notice (ml-explore)
-- ship MLX's MIT notice and copyright (ml-explore)
-- ship gguflib's MIT notice (Salvatore Sanfilippo; MLX vendors it)
-- ship mlx-rs's notice under whichever of MIT or Apache-2.0 is chosen
-  (MIT is the simpler pairing with this project's own licence), for the
-  small pieces of the binding taken from it
-- say in the README what is inside the binary and under what terms
-
-The prebuilt ships `LICENSE.mlx` and `LICENSE.mlx-c`; it ships
-`libgguflib.a` too, so it owes gguflib's notice as well.
+**The platform gem does ship it, since 2026-09-24** (docs/plan.md
+section 11.4). Nothing is built at install, so the package contains
+mlx-c's compiled code and its dependencies' (MLX, gguflib), and Torobi is
+a redistributor. The notices travel with it, in `licenses/` - MLX, mlx-c
+and gguflib for the code it links, mlx-rs for the binding - and the README
+says what is inside the binary and under what terms. The prebuilt ships
+`LICENSE.mlx`, `LICENSE.mlx-c` and `LICENSE.gguflib`, which are what
+`licenses/` holds; the mlx-rs notice names the crate's authors, since its
+`LICENSE-MIT` carries the text without a copyright line.
 
 The `mlx.metallib` (129 MB) is not bundled: it is fetched on first use
 beside the installed bundle, so the package stays a few megabytes. What

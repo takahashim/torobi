@@ -238,9 +238,13 @@ The version is 0.0.1 and the API still moves.
 [MIT](./LICENSE).
 
 The engine builds against MLX (MIT, ml-explore) through mlx-c (MIT,
-ml-explore), which it binds itself; the binding was written with mlx-rs
-(MIT or Apache-2.0) as its reference. The gem ships none of their code:
-the pre-built MLX, mlx-c included, comes from `takahashim/mlx-prebuilt`,
-fetched and digest-checked at build time. `docs/vendoring.md` names all of them, with their licences and
-with what would have to be carried if Torobi were ever distributed as a
-compiled gem.
+ml-explore), which it binds itself; the binding follows mlx-rs (MIT or
+Apache-2.0) as its reference.
+
+The `arm64-darwin` platform gem links MLX's compiled code into
+`torobi.bundle`, so it redistributes it: the notices for MLX, mlx-c,
+gguflib and mlx-rs travel in [`licenses/`](./licenses). A source install
+fetches the pre-built MLX, mlx-c included, from `takahashim/mlx-prebuilt`
+and links it on your machine, so the package you download carries no MLX
+bytes. `docs/vendoring.md` names all of them, with their licences and with
+what a redistributor owes.

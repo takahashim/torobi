@@ -78,7 +78,7 @@ def platform_gem_spec
     "lib/torobi/torobi.{bundle,so,dylib}",
     "lib/include/**/*",
     "config/ops.yml",
-    "README.md", "CHANGELOG.md", "LICENSE", "docs/plan.md", "docs/vendoring.md"
+    "README.md", "CHANGELOG.md", "LICENSE", "licenses/**/*", "docs/plan.md", "docs/vendoring.md"
   ]
   spec
 end
