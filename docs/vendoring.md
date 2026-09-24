@@ -365,7 +365,7 @@ holds is `spec.files`: Ruby, the engine's own Rust, two manifests and the
 docs. No line of MLX or mlx-c is in it, and `mlx-rs` is neither in it nor
 fetched: the binding follows its API, and the few small pieces taken from
 it (how an exception prints, two refusal messages) are in the engine's
-source under its own MIT notice. `ext/torobi/mlx_prebuilt.rb` fetches our
+source under its own MIT notice. `lib/torobi/mlx_prebuilt.rb` fetches our
 own pre-built MLX, mlx-c included, from `takahashim/mlx-prebuilt`; it
 arrives at the user's machine from its own authors, under their own
 licences. Torobi points, it does not ship.
@@ -449,7 +449,7 @@ which exists in the build tree only when MLX is built there too; with a
 system MLX they fail to link (`_gguf_*` undefined) and stop the build.
 The library does not need them.
 
-`ext/torobi/mlx_prebuilt.rb` writes that file (into the cache, so no
+`lib/torobi/mlx_prebuilt.rb` writes that file (into the cache, so no
 machine-specific path is committed) and fetches and checks the prefix that
 it names. `extconf.rb` and the Rakefile set `CMAKE_TOOLCHAIN_FILE` for
 cargo. Two further variables come from the same place: `MLX_RS_METAL_PATH`
@@ -492,7 +492,7 @@ missing file is an error rather than an abort.
 
 bindgen runs in every mode, from the mlx-c headers in the submodule.
 
-**Torobi takes the first branch on purpose.** `ext/torobi/mlx_prebuilt.rb`
+**Torobi takes the first branch on purpose.** `lib/torobi/mlx_prebuilt.rb`
 fetches the archive itself, refuses anything whose SHA-256 is not the
 recorded one, unpacks it into `~/.cache/torobi/`, and hands that directory
 to cargo through the environment (`extconf.rb` exports it into the
@@ -506,7 +506,7 @@ the one GitHub publishes for the asset.
 
 **The generation is now stated by the dependency itself.** `mlx-sys 0.6.0`
 pins mlx-c `c74db530` (v0.6.0-7) over **MLX 0.32.2**, its submodule and its
-`CHANGELOG.md` both say so, and `ext/torobi/mlx_prebuilt.json`'s `requires`
+`CHANGELOG.md` both say so, and `lib/torobi/mlx_prebuilt.json`'s `requires`
 refuses a pre-built archive that reports anything else. The rest of this
 section is the investigation that made that the deciding question; the
 `v0.4.1` / `v0.30.1` pair below is what was current before the move.

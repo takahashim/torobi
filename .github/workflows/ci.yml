@@ -46,7 +46,7 @@ jobs:
 
       # No Metal toolchain is installed here on purpose. MLX's kernels
       # cannot be compiled without it, which is why this project takes a
-      # prebuilt MLX (ext/torobi/mlx_prebuilt.rb); a run that needed the
+      # prebuilt MLX (lib/torobi/mlx_prebuilt.rb); a run that needed the
       # toolchain would be testing a path installs do not take.
       - name: Cache the prebuilt MLX
         uses: actions/cache@v6
@@ -54,7 +54,7 @@ jobs:
           path: ~/.cache/torobi/mlx-prebuilt
           # The pin file holds the digest, so moving the pin misses the
           # cache rather than reusing the archive it no longer names.
-          key: mlx-${{ hashFiles('ext/torobi/mlx_prebuilt.json') }}
+          key: mlx-${{ hashFiles('lib/torobi/mlx_prebuilt.json') }}
 
       - name: Cache what cargo builds
         uses: actions/cache@v6
@@ -79,7 +79,7 @@ jobs:
     # organizations, and a CUDA MLX needs a card. Training on one is the
     # manual session in notes/gpu-session-checklist.md.
     #
-    # It needs a Linux archive in ext/torobi/mlx_prebuilt.json, and until
+    # It needs a Linux archive in lib/torobi/mlx_prebuilt.json, and until
     # one is pinned it fails saying so, rather than skipping: a check that
     # quietly does not happen reads as a pass.
     runs-on: ubuntu-22.04
@@ -110,7 +110,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/torobi/mlx-prebuilt
-          key: mlx-linux-${{ hashFiles('ext/torobi/mlx_prebuilt.json') }}
+          key: mlx-linux-${{ hashFiles('lib/torobi/mlx_prebuilt.json') }}
 
       - name: Cache what cargo builds
         uses: actions/cache@v6

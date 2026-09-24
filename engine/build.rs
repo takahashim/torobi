@@ -38,7 +38,7 @@ fn bind_mlx_c(prefix: Option<&Path>) {
     let prefix = prefix.unwrap_or_else(|| {
         panic!(
             "TOROBI_MLX_PREFIX is not set. `rake` and `rake compile` set it to the \
-             pre-built MLX they fetch (ext/torobi/mlx_prebuilt.rb); a plain cargo \
+             pre-built MLX they fetch (lib/torobi/mlx_prebuilt.rb); a plain cargo \
              build needs it pointed at an MLX install prefix that holds mlx-c"
         )
     });

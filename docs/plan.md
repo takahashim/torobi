@@ -556,7 +556,7 @@ toolchain を要求しない。source gem は prebuilt の無い Ruby / 環境�
 **mlx-c を依存を含めて焼き込む。** エンジンは mlx-c を bindgen でバインドし、mlx-c と
 その依存(MLX, gguflib)を静的リンクする(`engine/build.rs`)。platform gem はその
 コンパイル済み拡張(約 15.6 MB、Ruby minor ごと)を配る。`mlx.metallib`(129 MB)は
-初回利用時にダウンロードする(digest 検証、`ext/torobi/mlx_prebuilt.rb` と同じ仕組み)。
+初回利用時にダウンロードする(digest 検証、`lib/torobi/mlx_prebuilt.rb` と同じ仕組み)。
 dladdr で拡張バンドルの隣に要り、それが無いとプロセスが死ぬ(§4.1)。
 
 **再配布は受け入れる。** 配るのは mlx-c / MLX / gguflib のコンパイル済みコードで、
@@ -2101,7 +2101,7 @@ mlx-sys が prebuilt を、それぞれの配布元から取ってくる。Torob
 A は取ってきたものを確かめて cargo に渡す仕掛けである。自前 release を作っても、
 Torobi 側にそれを指す口が無ければ届かない。**A は B の前提**である。
 
-**A: `ext/torobi/mlx_prebuilt.rb`。** mlx-sys は誰も指定しなければ自分で
+**A: `lib/torobi/mlx_prebuilt.rb`。** mlx-sys は誰も指定しなければ自分で
 `curl -L -f` して、TLS 以外の検査をせずにリンクする。それを先回りして、
 
 1. streaming で落とし (open-uri は本体を Tempfile に丸ごと落としてから渡すので、
@@ -2210,7 +2210,7 @@ v0.30.1 のヘッダを渡したための不一致である。
 なっていた (URL・digest・版の 5 つ)。digest はビルドごとに変わる値で、写し間違えても
 気付くのは後である。
 
-**値を `ext/torobi/mlx_prebuilt.json` に出した。** コードは読むだけになり、書くのは
+**値を `lib/torobi/mlx_prebuilt.json` に出した。** コードは読むだけになり、書くのは
 `rake mlx:pin` である。
 
     rake mlx:pin          # そのリポジトリが最後に出したもの
@@ -3623,7 +3623,7 @@ fork が必要だったのは upstream が MLX 0.32 に追随していなかっ�
 | `Cargo.lock` | OminiX の git URL が消え、registry の 0.32.0 / 0.6.0 になった |
 | `engine/Cargo.lock` | **削除**。workspace member なので cargo は root lock だけを使い、この中古は OminiX の commit を名乗ったままだった |
 | `engine/build.rs` | 記録するのは rev ではなく version (`mlx_rs` / `mlx_sys`)。metallib の在り処は `MLX_RS_METAL_PATH`(無ければ従来どおり profile dir) |
-| `ext/torobi/mlx_prebuilt.rb` | 「prebuilt の準備」から「**system MLX prefix の取得と検証**」へ。`MLX_PREBUILT_PATH` は消え、`TOROBI_MLX_PREFIX` が手元ビルド用の逃げ道 |
+| `lib/torobi/mlx_prebuilt.rb` | 「prebuilt の準備」から「**system MLX prefix の取得と検証**」へ。`MLX_PREBUILT_PATH` は消え、`TOROBI_MLX_PREFIX` が手元ビルド用の逃げ道 |
 | `ext/torobi/extconf.rb` / `Rakefile` | cargo に `CMAKE_TOOLCHAIN_FILE`(生成した toolchain file)、`MLX_RS_METAL_PATH`、`-L native=<prefix>/lib` を渡す |
 
 **API の差は 4 つ**だった。OminiX の rev は upstream の少し手前を指しており、読んで見つけた

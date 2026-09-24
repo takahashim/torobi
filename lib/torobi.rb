@@ -33,6 +33,7 @@ begin
 rescue LoadError
   # Not compiled yet (rake compile); Torobi::Session is simply absent.
 else
+  require_relative "torobi/metallib"
   require_relative "torobi/preflight"
   require_relative "torobi/tensor_data"
   require_relative "torobi/weights"

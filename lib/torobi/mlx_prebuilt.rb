@@ -3,7 +3,6 @@
 require "digest"
 require "fileutils"
 require "json"
-require "net/http"
 
 # The MLX every cargo build here links, as a system install prefix.
 #
@@ -210,6 +209,50 @@ module MlxPrebuilt
     File.join(prefix, METALLIB)
   end
 
+  # The kernels on their own, as a platform gem fetches them: the same
+  # `mlx.metallib`, tarred, so the first use pulls tens of megabytes rather
+  # than the whole archive and unpacks no SDK. macOS only; a Linux build
+  # compiles its CUDA kernels at run time and has no such file to fetch.
+  def metallib_entry
+    entry.fetch("metallib") do
+      raise Refused, "#{platform} has no standalone metallib asset pinned in " \
+                     "#{PIN_PATH}, so a platform gem cannot fetch one. The full " \
+                     "archive holds it; `rake mlx:pin` records what a release " \
+                     "carries."
+    end
+  end
+
+  def metallib_asset = metallib_entry.fetch("asset")
+  def metallib_digest = metallib_entry.fetch("digest")
+  def metallib_url = "https://github.com/#{repo}/releases/download/#{release}/#{metallib_asset}"
+
+  # Fetches `mlx.metallib` into `into` and returns where it landed. The
+  # asset is a tar.gz holding `mlx.metallib` at its root, so this is the
+  # same download, verify and untar the archive takes, for one file.
+  def fetch_metallib(into:, io: $stderr)
+    require "tmpdir"
+    Dir.mktmpdir("torobi-metallib") do |work|
+      archive = File.join(work, metallib_asset)
+      io.puts "torobi: fetching #{metallib_asset} from #{metallib_url}"
+      File.open(archive, "wb") { |file| stream(URI.parse(metallib_url), file, io) }
+      verify_digest(archive, metallib_digest, what: metallib_asset)
+      unless system("tar", "-xzf", archive, "-C", work)
+        raise Refused, "could not unpack #{metallib_asset}"
+      end
+
+      found = File.join(work, "mlx.metallib")
+      raise Refused, "#{metallib_asset} holds no mlx.metallib at its root" unless File.file?(found)
+
+      # Alongside, then moved into place: MLX must never see a half-written
+      # file, and a run that dies here should leave the old one alone.
+      target = File.join(into, "mlx.metallib")
+      FileUtils.mkdir_p(into)
+      FileUtils.cp(found, "#{target}.part")
+      FileUtils.mv("#{target}.part", target)
+      target
+    end
+  end
+
   # Whether a previous run left a complete, checked copy here.
   def ready?(dir)
     return false unless File.read(File.join(dir, STAMP)).strip == digest
@@ -255,6 +298,10 @@ module MlxPrebuilt
   HOPS = 5
 
   def stream(uri, file, io, hops: HOPS)
+    # Required where it is used rather than at the top: a platform gem
+    # loads this module for `Torobi::Metallib`, which needs the network
+    # only on the first use, and net/http is not small.
+    require "net/http"
     raise Refused, "#{url} redirects further than #{HOPS} hops" if hops.zero?
 
     Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https") do |http|
@@ -296,16 +343,18 @@ module MlxPrebuilt
     end
   end
 
-  def verify(archive)
-    got = Digest::SHA256.file(archive).hexdigest
-    return if got == digest
+  def verify(archive) = verify_digest(archive, digest, what: asset)
 
-    raise Refused, "#{asset} is not the archive this was built against.\n  " \
-                   "expected #{digest}\n  " \
+  def verify_digest(path, expected, what:)
+    got = Digest::SHA256.file(path).hexdigest
+    return if got == expected
+
+    raise Refused, "#{what} is not the file this was built against.\n  " \
+                   "expected #{expected}\n  " \
                    "received #{got}\n" \
                    "Nothing was installed. If the release was replaced on " \
                    "purpose, the new digest belongs in " \
-                   "ext/torobi/mlx_prebuilt.json, next to the version of MLX " \
+                   "lib/torobi/mlx_prebuilt.json, next to the version of MLX " \
                    "it holds; `rake mlx:pin` puts it there."
   end
 

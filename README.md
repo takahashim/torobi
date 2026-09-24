@@ -13,7 +13,7 @@ A Rust engine (via MLX) owns the execution, and the boundary between them is abo
 - Ruby 3.2 or newer
 - Rust toolchain
 - no Metal toolchain: a pre-built MLX is fetched and checked at build time
-  (`ext/torobi/mlx_prebuilt.rb`), and the engine binds its mlx-c directly
+  (`lib/torobi/mlx_prebuilt.rb`), and the engine binds its mlx-c directly
 
 ## Install
 
@@ -206,7 +206,7 @@ bundle exec rake smoke   # build the gem, install it somewhere clean, take a ste
 ```
 
 The Ruby tests build the extension, which links a prebuilt MLX fetched
-once and checked against the digest in `ext/torobi/mlx_prebuilt.json`
+once and checked against the digest in `lib/torobi/mlx_prebuilt.json`
 (`rake mlx:pin` moves it). CI runs the same `rake` on a `macos-15`
 runner, on the oldest Ruby the gemspec claims and on the newest.
 

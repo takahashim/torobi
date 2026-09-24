@@ -2,10 +2,10 @@
 
 require "mkmf"
 require "rb_sys/mkmf"
-require_relative "mlx_prebuilt"
+require_relative "../../lib/torobi/mlx_prebuilt"
 
 # Before cargo runs: fetch the pre-built MLX and check it, so the engine's
-# build.rs has a prefix to bind and link (ext/torobi/mlx_prebuilt.rb).
+# build.rs has a prefix to bind and link (lib/torobi/mlx_prebuilt.rb).
 prefix =
   begin
     MlxPrebuilt.ensure!

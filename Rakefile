@@ -8,10 +8,10 @@ GEMSPEC = Gem::Specification.load("torobi.gemspec")
 
 # The pre-built MLX every cargo build here links, fetched once and checked
 # against a recorded digest and the mlx-c generation it was built for
-# (ext/torobi/mlx_prebuilt.rb). `rake compile` reaches it through
+# (lib/torobi/mlx_prebuilt.rb). `rake compile` reaches it through
 # extconf.rb; the engine's own builds reach it here, and both share one
 # copy.
-require_relative "ext/torobi/mlx_prebuilt"
+require_relative "lib/torobi/mlx_prebuilt"
 
 # Points cargo at that MLX. engine/build.rs reads the prefix for everything
 # it needs: the headers it generates bindings from, the archives it links,
@@ -74,6 +74,7 @@ def platform_gem_spec
   spec.extensions = []
   spec.files = Dir[
     "lib/**/*.rb",
+    "lib/torobi/mlx_prebuilt.json",
     "lib/torobi/torobi.{bundle,so,dylib}",
     "lib/include/**/*",
     "config/ops.yml",
@@ -292,7 +293,7 @@ end
 #
 # What it automates is transcription, which is the part a person does
 # badly: it asks GitHub for the release, takes the asset and the digest
-# GitHub computed, writes ext/torobi/mlx_prebuilt.json, and then fetches
+# GitHub computed, writes lib/torobi/mlx_prebuilt.json, and then fetches
 # through the same code an install uses, so the download is verified
 # against the digest that was just recorded. If those bytes are not those
 # bytes, nothing is installed and the pin is left as it was.
@@ -302,7 +303,7 @@ end
 namespace :mlx do
   desc "pin MLX to a release of the prebuilt archive (default: the latest)"
   task :pin, [:tag] do |_task, args|
-    require_relative "ext/torobi/mlx_prebuilt"
+    require_relative "lib/torobi/mlx_prebuilt"
     require "json"
     require "net/http"
 
@@ -332,16 +333,30 @@ namespace :mlx do
     digest = asset["digest"].to_s.delete_prefix("sha256:")
     abort "#{asset["name"]} carries no sha256 digest" if digest.empty?
 
+    # The kernels on their own, where the release carries them: a platform
+    # gem fetches this rather than the whole archive. Absent on Linux, whose
+    # kernels are compiled at run time.
+    kernels = assets.find do |a|
+      a.fetch("name").match?(/-#{Regexp.escape(platform)}\.metallib\.tar\.gz\z/)
+    end
+    entry = { "asset" => asset.fetch("name"), "digest" => digest }
+    if kernels
+      kernel_digest = kernels["digest"].to_s.delete_prefix("sha256:")
+      abort "#{kernels["name"]} carries no sha256 digest" if kernel_digest.empty?
+
+      entry["metallib"] = { "asset" => kernels.fetch("name"), "digest" => kernel_digest }
+    end
+
     was = pin.slice("release").merge(pin.dig("platforms", platform) || {})
     pin["release"] = release.fetch("tag_name")
     pin["platforms"] ||= {}
-    pin["platforms"][platform] = { "asset" => asset.fetch("name"), "digest" => digest }
+    pin["platforms"][platform] = entry
 
     # The pin is written before it is fetched, because the fetch reads it;
     # but a pin that does not survive its own check is put back. A wrong
     # or wrong-generation archive must leave the file as it was, since the
     # next `rake` is what would otherwise build against it.
-    before = File.read("ext/torobi/mlx_prebuilt.json")
+    before = File.read("lib/torobi/mlx_prebuilt.json")
     begin
       write_pin(pin)
       # Through the same path an install takes, so the digest is checked
@@ -357,7 +372,7 @@ namespace :mlx do
         warn "torobi: the archive has no MANIFEST.txt, so the versions are unchanged"
       end
     rescue MlxPrebuilt::Refused => e
-      File.write("ext/torobi/mlx_prebuilt.json", before)
+      File.write("lib/torobi/mlx_prebuilt.json", before)
       abort "torobi: #{e.message}\nthe pin is unchanged"
     end
 
@@ -366,12 +381,12 @@ namespace :mlx do
     puts "  platform: #{platform}"
     now.each { |key, value| puts "  #{key}: #{value}" }
     %w[mlx mlx_c].each { |key| puts "  #{key}: #{pin[key]}" }
-    puts "now run `rake`, and commit ext/torobi/mlx_prebuilt.json if it passes"
+    puts "now run `rake`, and commit lib/torobi/mlx_prebuilt.json if it passes"
   end
 end
 
 def write_pin(pin)
-  File.write("ext/torobi/mlx_prebuilt.json", "#{JSON.pretty_generate(pin)}\n")
+  File.write("lib/torobi/mlx_prebuilt.json", "#{JSON.pretty_generate(pin)}\n")
 end
 
 # One GitHub API read, following its redirects and saying what went wrong

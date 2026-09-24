@@ -39,6 +39,12 @@ module Torobi
               "worker (Puma clustered, Sidekiq, Spring)."
       end
 
+      # The kernels a platform gem did not ship, fetched before the probe
+      # below: without them MLX ends the process rather than raising, so
+      # this has to happen where the answer is still ours to give. Touches
+      # no device, so it is after the pid check, not before it.
+      Metallib.ensure! if MlxPrebuilt.metal?
+
       probe = Probe.current
       return if probe.ok?
 

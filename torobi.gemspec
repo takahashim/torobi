@@ -22,10 +22,13 @@ Gem::Specification.new do |spec|
   # The extension is built from source at install time, so the crates and
   # the workspace manifest ship with it. docs/vendoring.md is in here
   # because it is the record of what the engine is built against.
-  spec.files = Dir["lib/**/*.rb", "config/ops.yml", "ext/**/*.{rs,rb,toml,json}",
-                   "engine/**/*.{rs,toml}", "Cargo.toml", "Cargo.lock",
-                   "README.md", "CHANGELOG.md", "LICENSE", "docs/plan.md",
-                   "docs/vendoring.md"]
+  # `lib/torobi/mlx_prebuilt.json` is the pin the build reads and, in a
+  # platform gem, the runtime fetches the kernels through; it is not a `.rb`,
+  # so it is named rather than caught by the glob.
+  spec.files = Dir["lib/**/*.rb", "lib/torobi/mlx_prebuilt.json", "config/ops.yml",
+                   "ext/**/*.{rs,rb,toml,json}", "engine/**/*.{rs,toml}",
+                   "Cargo.toml", "Cargo.lock", "README.md", "CHANGELOG.md", "LICENSE",
+                   "docs/plan.md", "docs/vendoring.md"]
   spec.require_paths = ["lib"]
   spec.extensions = ["ext/torobi/extconf.rb"]
 
