@@ -588,8 +588,10 @@ RubyGems をチャネルとする。プラットフォームごとの platform g
 | `torobi-<ver>-x86_64-linux.gem` | CUDA 12 | NVIDIA driver、CUDA runtime(`cudart` / `cublasLt` / `cufft` / `nvrtc`)、cuDNN 9、OpenBLAS、CUDA toolkit のヘッダ(JIT 用) |
 | `torobi-<ver>.gem`(source) | 任意 | Rust toolchain(Linux は CUDA toolkit / cuDNN / OpenBLAS も) |
 
-- ネイティブ拡張は Ruby の ABI ごとに違う。各 Ruby minor 分を 1 gem に同梱する(fat gem)か、
-  minor ごとに分ける。
+- ネイティブ拡張は Ruby の ABI ごとに違う。**fat gem にする**: 3.3 / 3.4 / 4.0 の ABI を
+  1 gem に同梱し(`lib/torobi/<abi>/torobi.bundle`)、`lib/torobi.rb` が require 時に選ぶ。
+  ビルドは各 Ruby の runner で行い、`script/build_platform_gem.rb` が 1 つに組み立てる
+  (`.github/workflows/release.yml`、cross-compile はしない)。
 - **macOS**: `mlx.metallib`(Metal カーネル、129 MB)を初回利用時に cache へ取得し、
   `mlx_metal_set_metallib_path` で MLX に場所を教える(§11.4)。
 - **Linux**: Metal の metallib は要らない。CUDA カーネルは MLX のビルドに含まれ、`nvrtc` で
@@ -2359,8 +2361,8 @@ pooling 側 (`test/pooling_test.rb`) は padding 不変性を **seq 6 と seq 3 
 **CHANGELOG.md。** まだ 1 度もリリースしていないので、「版の間で何が動いたか」ではなく
 **「0.0.1 が何を持つか」**を書いた。理由は plan.md §15 に残す、という分担も書いてある。
 
-**CI (`.github/workflows/ci.yml`)。** macos-15 で `bundle exec rake` を、Ruby 3.2
-(gemspec が主張する下限) と 3.4 で。**Metal toolchain を入れないのが要点**で、
+**CI (`.github/workflows/ci.yml`)。** macos-15 で `bundle exec rake` を、Ruby 3.3
+(gemspec が主張する下限) / 3.4 / 4.0 で。**Metal toolchain を入れないのが要点**で、
 入れてしまうと install が通る経路ではない道を試すことになる。prebuilt MLX の cache
 key は pin ファイルの hash なので、pin を動かすと自動で外れる。`rake smoke` と
 oracle 系は入れていない (前者は gem をもう一度建てるので数分、後者は公開
@@ -2953,7 +2955,7 @@ tokenize しない (§15.19) という線は動かしていない。Python 側�
 
 前処理を Ruby で完結させるのに、最後に残ったのが parquet だった。既存の道は 2 つとも
 塞がっている: `red-parquet` は Homebrew の apache-arrow-glib を要り、Rust 製の
-`parquet` gem は **precompiled が 3.3 までで 3.4 が無い** (この repo は 3.2 / 3.4 / 4.0
+`parquet` gem は **precompiled が 3.3 までで 3.4 が無い** (この repo は 3.3 / 3.4 / 4.0
 を CI で回している)。
 
 **決定 1: 実装する範囲は測って決めた。** 相手の 2 ファイルのメタデータを読むと、

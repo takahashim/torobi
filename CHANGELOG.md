@@ -95,7 +95,8 @@ between two versions people have.
 - **`rake mlx:pin`**, and a prebuilt MLX fetched by digest rather than
   by URL alone.
 - **An `arm64-darwin` platform gem**, which installs with no Rust
-  toolchain: the compiled extension travels in the package, and
+  toolchain: the compiled extension travels in the package, one per Ruby
+  ABI (3.3, 3.4, 4.0) in a single gem and chosen at require time, and
   `mlx.metallib` is fetched on first use into a cache and named to MLX
   (`mlx_metal_set_metallib_path`), so the installed gem's own directory
   need not be writable. The notices it redistributes travel in

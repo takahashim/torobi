@@ -10,12 +10,21 @@ A Rust engine (via MLX) owns the execution, and the boundary between them is abo
 ## Requirements
 
 - Apple Silicon Mac
-- Ruby 3.2 or newer
-- Rust toolchain
+- Ruby 3.3 or newer
 - no Metal toolchain: a pre-built MLX is fetched and checked at build time
   (`lib/torobi/mlx_prebuilt.rb`), and the engine binds its mlx-c directly
+- a Rust toolchain, only for a source install (a precompiled gem needs none)
 
 ## Install
+
+The precompiled gem for Apple Silicon installs with no Rust toolchain:
+
+```sh
+gem install torobi
+```
+
+A source install (another platform, or a checkout) builds the extension and
+needs Rust:
 
 ```ruby
 gem "torobi", github: "takahashim/torobi"
