@@ -32,7 +32,7 @@ class JevTokenizerTest < Minitest::Test
   def setup
     raise "#{ORACLE} is missing; run `rake oracle:jev_tokenizer`" unless File.file?(ORACLE)
 
-    @oracle = JSON.parse(File.read(ORACLE))
+    @oracle = JSON.parse(File.read(ORACLE, encoding: "UTF-8"))
     skip "tokenizers gem not installed" unless gem_available?
     skip "no tokenizer.json (set JEV_TOKENIZER)" unless tokenizer_path
   end

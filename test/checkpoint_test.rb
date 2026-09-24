@@ -224,9 +224,13 @@ class CheckpointTest < Minitest::Test
 
     assert_equal 2, manifest.fetch("step")
     # Rust's names for these, not Ruby's: the engine wrote them, and a
-    # checkpoint should say what actually produced it.
-    assert_equal "aarch64", manifest.dig("platform", "arch")
-    assert_equal "macos", manifest.dig("platform", "os")
+    # checkpoint should say what actually produced it. `std::env::consts`
+    # spells Apple's arm64 "aarch64" and Darwin "macos".
+    host_os = { "darwin" => "macos" }.fetch(Gem::Platform.local.os, Gem::Platform.local.os)
+    host_arch = { "arm64" => "aarch64" }.fetch(Gem::Platform.local.cpu, Gem::Platform.local.cpu)
+
+    assert_equal host_arch, manifest.dig("platform", "arch")
+    assert_equal host_os, manifest.dig("platform", "os")
   end
 
   def test_a_graph_that_is_not_the_one_the_manifest_claims_is_refused

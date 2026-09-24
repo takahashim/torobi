@@ -53,7 +53,20 @@ class InterruptTest < Minitest::Test
       weights = #{weights.inspect}
       batch = #{batch.inspect}
     PREAMBLE
-    IO.popen([RbConfig.ruby, "-e", script], err: %i[child out], &:read)
+    run_ruby(script)
+  end
+
+  # A fresh process with the script in a file rather than `-e`: Linux caps
+  # a single argument well below what weights and a batch make a script,
+  # and `Argument list too long` is the wrong way to learn that.
+  def run_ruby(script)
+    require "tempfile"
+    file = Tempfile.new(["torobi-interrupt", ".rb"])
+    file.write(script)
+    file.close
+    IO.popen([RbConfig.ruby, file.path], err: %i[child out], &:read)
+  ensure
+    file&.unlink
   end
 
   def test_a_timeout_during_a_span_leaves_the_session_usable
@@ -218,7 +231,7 @@ class InterruptTest < Minitest::Test
       puts "STILL USABLE at \#{session.step}"
       puts "CLOSED \#{session.close}"
     SCRIPT
-    output = IO.popen([RbConfig.ruby, "-e", script], err: %i[child out], &:read)
+    output = run_ruby(script)
 
     assert_match(/INTERRUPTED after [1-9]/, output, output)
     assert_match(/STILL USABLE/, output, output)
