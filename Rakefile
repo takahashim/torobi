@@ -497,6 +497,11 @@ task coverage: %i[compile metallib runtime_headers] do
   sh RbConfig.ruby, "-Ilib", "-Itest", "tools/coverage.rb"
 end
 
-# Lint first: it is five seconds, and the rest is a compile.
-DEFAULT = %w[coverage parquet:test rust_test rust_test:facade engine:check].freeze
+# Lint first: it is five seconds, and the rest is a compile. The suite
+# runs plainly; the coverage gate is deliberately not here - it is a local
+# guard (`rake coverage`) - because a file moving into `lib/torobi` moves
+# the in-process figure under a floor that has to catch a file losing its
+# tests, not a module that is mostly network and environment
+# (`mlx_prebuilt.rb`). See JM-140.
+DEFAULT = %w[test parquet:test rust_test rust_test:facade engine:check].freeze
 task default: (Rake::Task.task_defined?(:rubocop) ? ["rubocop", *DEFAULT] : DEFAULT)
