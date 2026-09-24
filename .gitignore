@@ -18,3 +18,5 @@ target/
 engine/check/*.json
 lib/torobi/torobi.bundle
 lib/torobi/mlx.metallib
+# NVIDIA's JIT headers, staged here to travel in the Linux platform gem.
+lib/include/

@@ -46,6 +46,62 @@ task :metallib do
   puts "copied #{source} -> #{destination}"
 end
 
+# The platform gem: the extension already built and, on Linux, the JIT
+# headers MLX's CUDA backend needs at run time. No `extensions`, so
+# installing compiles nothing and a Rust toolchain is not required
+# (docs/plan.md section 11.5, notes/plan-linux-platform-gem.md).
+desc "build the platform gem for this machine"
+task :platform_gem do
+  require "rubygems/package"
+  Rake::Task[:compile].invoke
+  stage_runtime_headers
+  spec = platform_gem_spec
+  built = Gem::Package.build(spec)
+  puts "built #{built} (#{(File.size(built) / 1024.0 / 1024).round(1)} MB)"
+end
+
+# The gem is the same Ruby either way; what differs is the platform and
+# the compiled artifacts beside it. `spec.files` is narrowed to what runs,
+# so the platform gem does not carry the crates it was built from.
+def platform_gem_spec
+  spec = Gem::Specification.load("torobi.gemspec")
+  spec.platform = case RUBY_PLATFORM
+                  when /\Aarm64-darwin/ then "arm64-darwin"
+                  when /\Ax86_64-linux/ then "x86_64-linux"
+                  else Gem::Platform.local.to_s
+                  end
+  # The whole point: nothing is built at install.
+  spec.extensions = []
+  spec.files = Dir[
+    "lib/**/*.rb",
+    "lib/torobi/torobi.{bundle,so,dylib}",
+    "lib/include/**/*",
+    "config/ops.yml",
+    "README.md", "CHANGELOG.md", "LICENSE", "docs/plan.md", "docs/vendoring.md"
+  ]
+  spec
+end
+
+# MLX's CUDA backend compiles its kernels at run time and looks for
+# NVIDIA's headers one directory above the extension (its parent's
+# `include/`). They come from the same prefix the build linked, and they
+# are small (a few megabytes gzipped), so they travel in the gem rather
+# than being fetched. macOS has no equivalent: its kernels are one file,
+# `mlx.metallib`, which is fetched on first use.
+def stage_runtime_headers
+  return if MlxPrebuilt.metal?
+
+  prefix = with_mlx
+  require "fileutils"
+  %w[cccl cute cutlass].each do |name|
+    source = File.join(prefix, "include", name)
+    next unless File.directory?(source)
+
+    FileUtils.mkdir_p("lib/include")
+    FileUtils.cp_r(source, "lib/include")
+  end
+end
+
 # The engine's own tests. Serial, and not by preference: MLX's default
 # stream is one command queue, and two threads submitting to it at once
 # trips a Metal assertion that aborts the process.
