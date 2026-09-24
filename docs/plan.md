@@ -548,20 +548,31 @@ Ruby へ返すのは loss・metrics・明示的に copy したテンソルに限
 まとめて eval する、MLX の active / peak / cache memory を Ruby へ公開する、
 1,000 / 10,000 step の plateau テストを持つ。
 
-### 11.4 配布(方針は未確定。ただし feasibility は M1 で確かめる)
+### 11.4 配布(決定: platform gem。source は fallback)
 
-選択肢は開いたまま進める:
+**決定(2026-09-24): arm64-darwin の platform gem を正とする。** インストールに Rust
+toolchain を要求しない。source gem は prebuilt の無い Ruby / 環境向けの fallback として
+残す。
 
-- arm64-darwin platform gem(拡張ビルド済み。導入は最軽量、リリース工程は重い)
-- source gem(要 Rust toolchain + cmake。工程は軽いが導入者に要求が乗る)
-- 併用(source を正、platform を利便として)
+**mlx-c を依存を含めて焼き込む。** エンジンは mlx-c を bindgen でバインドし、mlx-c と
+その依存(MLX, gguflib)を静的リンクする(`engine/build.rs`)。platform gem はその
+コンパイル済み拡張(約 15.6 MB、Ruby minor ごと)を配る。`mlx.metallib`(129 MB)は
+初回利用時にダウンロードする(digest 検証、`ext/torobi/mlx_prebuilt.rb` と同じ仕組み)。
+dladdr で拡張バンドルの隣に要り、それが無いとプロセスが死ぬ(§4.1)。
 
-**ただし決定を遅らせることと、可能性を確かめないことは別である。** 現時点で判明している
-制約(`docs/vendoring.md`):
+**再配布は受け入れる。** 配るのは mlx-c / MLX / gguflib のコンパイル済みコードで、
+すべて permissive(MIT。mlx-c / MLX は ml-explore、gguflib は antirez/gguf-tools)。
+要求は notice の同梱だけ(`docs/vendoring.md`
+「Licences」)。mlx-rs は依存でも実行時でもなく、参照として数スニペットをソースに
+取り込んでいる分の notice が要る。**再配布自体は新しい負担ではない**: prebuilt
+(`takahashim/mlx-prebuilt`)が既に MLX を再配布している。
 
-- MLX の exact revision が不明(OminiX のビルド済みバイナリを使っている)
-- `mlx.metallib` が約 100 MB あり、**dladdr で拡張バンドルの隣に置く必要がある**
-- それが無いとプロセスが死ぬ(§4.1)
+**再ビルドの駆動因は mlx-c の C API と Ruby の ABI。** MLX / gguflib は mlx-c の依存
+として従属する。mlx-c / MLX を上げるたびに platform gem を作り直す(× Ruby minor)。
+
+前提の更新: MLX / mlx-c の exact revision は prebuilt の `MANIFEST.txt` から `build.rs`
+が読むようになり既知(§15.75)。cmake はビルド時に走らない(§15.75)。source gem が
+要求するのは Rust toolchain で、cmake ではない。
 
 よって **M1 の出口条件に「隔離環境へ gem install → require → 1 step」の smoke test を
 含める**(§9.1)。開発期は source checkout で進める。Python ランナーは optional な開発依存。
@@ -598,7 +609,7 @@ Ruby へ返すのは loss・metrics・明示的に copy したテンソルに限
 | checkpoint 破損 | manifest + atomic rename + inventory 検証(§11.2) |
 | **致命が Ruby に届かない**(初期化失敗でプロセス死) | preflight の拒否リストを増やす、subprocess 異常系テスト、supervisor 前提を文書化(§4.1) |
 | **batch 経路の性能** | 計測済み(§5A.2.1): 呼び出しではなく JSON 直列化が支配的。対策は packed encoding であり、投入キューではない |
-| **配布(metallib 100 MB と配置制約)** | M1 の installed-gem smoke で早期に確かめる(§11.4) |
+| **配布(metallib 129 MB と配置制約)** | platform gem を正とし、metallib は利用時取得(§11.4)。配置制約は M1 の installed-gem smoke で確認済み |
 | タップの常設によるメモリ / fusion 劣化 | stats 縮約を既定に、full タップは debug 用と明記 |
 | 窓能力の際限ない要望 | 能力は列挙制。新規はエンジンの名前付き機能として審査 |
 | DSL の自由度肥大 | op registry 制。escape hatch は §10 |
@@ -645,8 +656,8 @@ M0 と M1 の一部(§9.1 の M1 のうち single-step とその境界の初期�
 | 境界コストの実測 | **済**(§5A.2.1)。測って設計判断を覆した |
 | installed-gem smoke | **済**。56 KB の source gem がビルドされ、metallib が dladdr の見る場所に入り、checkout の外から 1 step が動く。当初は絶対パス依存のため「このマシンでのみ」だったが、pinned git 依存(§5)に変更し、**ローカル checkout を隠した状態でビルド・インストール・実行が通ることを確認**(`docs/vendoring.md`)|
 
-配布は形も事実も成立した。残るのは方針の決定(§11.4)であり、
-それは利用者像が見えてからでよい。
+配布は形も事実も成立した。方針は §11.4 で決定した(platform gem を正、source は
+fallback)。
 
 ### 15.2.1 外部レビュー(2026-09-03)で見つかった穴と対処
 

@@ -338,7 +338,7 @@ stream was set.
 | mlx-rs / mlx-sys | **not dependencies.** The engine binds mlx-c itself ("mlx-c, bound here"). `mlx-rs 0.32.0` (source commit `9c2fd72e`) is the reference the binding was written and checked against, and nothing of it is compiled. `Cargo.lock` holds no `mlx` crate |
 | mlx-c | **built into the pre-built archive** at commit `c74db5307cc8`, and bound by `engine/build.rs`: bindgen reads the headers in the prefix and the build links `libmlxc.a` from the same prefix, so what is declared is what is linked. Nothing compiles or fetches mlx-c here |
 | MLX core | **not built from source here**: there is no Metal compiler on this machine, so a pre-built archive is used instead. `takahashim/mlx-prebuilt`, built from stated inputs on a runner with the toolchain rather than taken from a third party's release. It must carry the generation the binding was written against - **MLX 0.32.2 over mlx-c `c74db5307cc8`** - and `mlx_prebuilt.json`'s `requires` is what holds it to that. It names the mlx-c **commit**, not `v0.6.0`: the tag pins MLX 0.31.1 and seven later commits pin 0.32.2, and those commits change headers under `mlx/c/`, so a build from the tag is the wrong generation even though it says 0.6.0. The pin names **`takahashim/mlx-prebuilt` `v0.6.0.1`** (MLX 0.32.2 / mlx-c `c74db530`), which is what a build fetches: `macos-arm64` (digest `b21fd96d…`) and `linux-x86_64`, which is the `linux-x86_64-cuda12` archive (CUDA 12.9, sm 80/86/89/90a, digest `699f50ef…`). `rake mlx:pin` pins the archive of the machine it runs on, having checked its bytes there, so each entry was pinned on its own platform |
-| mlx.metallib | 105 MB. MLX locates it through `dladdr`, i.e. **beside whichever library holds the MLX symbols**: the installed bundle, or `lib/torobi/` for a checkout. It comes from the prefix at `<prefix>/lib/mlx.metallib`; `ext/torobi/extconf.rb` installs it beside the bundle, `rake metallib` copies it into the checkout, and `engine/build.rs` links it beside the engine's own binaries. Any distribution must ship it beside the bundle |
+| mlx.metallib | 129 MB. MLX locates it through `dladdr`, i.e. **beside whichever library holds the MLX symbols**: the installed bundle, or `lib/torobi/` for a checkout. It comes from the prefix at `<prefix>/lib/mlx.metallib`; `ext/torobi/extconf.rb` installs it beside the bundle, `rake metallib` copies it into the checkout, and `engine/build.rs` links it beside the engine's own binaries. Any distribution must ship it beside the bundle |
 | Linux | the same binding, the same bindgen blocklist, and a link against the CUDA toolkit (cudart, cuBLASLt, cuFFT, NVRTC, the driver), cuDNN and **OpenBLAS**, which MLX's CPU backend calls for BLAS and LAPACK and which its own CMake package names. Checked in an amd64 container with CUDA 12.9 and cuDNN 9 against the archive mlx-prebuilt's CI built: 650 functions bound, none of them half-precision, and the engine's test binary and command line link and start. A machine that runs it needs `libopenblas0` as well as the driver. The `linux` job in CI fetches and checks the pinned archive and repeats the bind and link on a GitHub runner, with no GPU; it first passed on 2026-09-23 |
 | the prefix, how it is handed over | one variable, `TOROBI_MLX_PREFIX`, which `rake` and `extconf.rb` set to the checked prefix and `engine/build.rs` reads for headers, archives, `MANIFEST.txt` and the metallib. A caller who sets it themselves is left alone |
 
@@ -350,6 +350,7 @@ stream was set.
 | mlx-rs (upstream, oxiglade): the reference the binding follows, not a dependency | MIT **or** Apache-2.0, at the user's choice | its authors |
 | mlx-c | MIT | ml-explore |
 | MLX | MIT | ml-explore |
+| gguflib (the GGUF library MLX vendors) | MIT | Salvatore Sanfilippo (antirez/gguf-tools) |
 
 (OminiX-MLX, used from 2026-09-03 to 2026-09-21, was under the same
 MIT-or-Apache-2.0 terms; nothing of it is in the current build.)
@@ -367,21 +368,29 @@ own pre-built MLX, mlx-c included, from `takahashim/mlx-prebuilt`; it
 arrives at the user's machine from its own authors, under their own
 licences. Torobi points, it does not ship.
 
-**One decision changes that.** If the distribution question
-(docs/plan.md section 11.4) lands on a **platform gem** (compiled, so that
-nothing is built at install), then the package contains MLX's compiled
-code and its 105 MB `mlx.metallib`, and Torobi becomes a redistributor.
-What that costs, exactly:
+**That changed on 2026-09-24: the distribution question (docs/plan.md
+section 11.4) landed on a platform gem.** Nothing is built at install, so
+the package contains mlx-c's compiled code and its dependencies' (MLX,
+gguflib), and Torobi is a redistributor. What that costs, exactly:
 
-- ship MLX's MIT notice and copyright (ml-explore)
 - ship mlx-c's MIT notice (ml-explore)
+- ship MLX's MIT notice and copyright (ml-explore)
+- ship gguflib's MIT notice (Salvatore Sanfilippo; MLX vendors it)
 - ship mlx-rs's notice under whichever of MIT or Apache-2.0 is chosen
   (MIT is the simpler pairing with this project's own licence), for the
   small pieces of the binding taken from it
 - say in the README what is inside the binary and under what terms
 
-Not hard, and not something to discover afterwards: it is written here so
-that the platform-gem decision is made with it in view.
+The prebuilt ships `LICENSE.mlx` and `LICENSE.mlx-c`; it ships
+`libgguflib.a` too, so it owes gguflib's notice as well.
+
+The `mlx.metallib` (129 MB) is not bundled: it is fetched on first use
+beside the installed bundle, so the package stays a few megabytes. What
+the redistribution does not cost is a new obligation: the prebuilt
+(`takahashim/mlx-prebuilt`) already redistributes MLX's compiled code.
+
+Not hard, and not discovered afterwards: it is written here so that the
+decision was made with it in view.
 
 ## Why a pinned dependency rather than a vendored copy
 
@@ -600,10 +609,10 @@ archive's business.
 0.32 generation and the version pair stopped being the obstacle. Its cost
 turned out to be a number (the MLX/mlx-c pair the archive must carry)
 rather than a fork or a patch, which is what made taking it cheap. What
-remains is the distribution question (docs/plan.md 11.4): a platform gem
-builds nothing at install time either way, so the value of any pre-built
-path changes with it. The dependency and the distribution question are
-still two faces of one decision.
+remained was the distribution question (docs/plan.md 11.4), now decided
+there: a platform gem, which builds nothing at install and so leans the
+whole of it on the pre-built path. The dependency and the distribution
+question were two faces of one decision.
 
 ## Updating the pin
 
