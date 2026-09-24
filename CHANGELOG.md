@@ -130,7 +130,7 @@ between two versions people have.
   attention are not implemented (docs/plan.md section 9.1, M6).
 - `Torobi::Memory.limit=` does not refuse an allocation that exceeds it;
   a run that must stay under a number wants `Policies::MemoryGuard`.
-- Apple Silicon only. The binding is the same on Linux and the build
-  script links CUDA, but no Linux build has been run, and no Linux
-  archive is pinned yet.
+- The targets are Apple Silicon and Linux + NVIDIA. The binding links
+  CUDA on Linux in CI and the Linux archive is pinned; no GPU run has
+  been made, and no Linux platform gem is built yet.
 - The API still moves. Nothing here is a compatibility promise yet.

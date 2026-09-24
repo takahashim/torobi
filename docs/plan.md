@@ -99,15 +99,14 @@ v1(mlx-graph-rb 案)の GraphConfig 設計と op registry manifest の考え方�
   順次追加する。語彙はアーキテクチャ非依存に設計し、特定モデルへの特化を避ける。
 - 実務家の面(実験定義・データ・台帳・評価・介入)が 100% Ruby である。
 - 学習の観測と介入が「窓の契約」(§8)の範囲で足りる。
+- Apple Silicon と Linux + NVIDIA の両方で、同じ Graph DSL で FT / 蒸留ができる。
 
 ### Non-goals
 
 - step 内部での Ruby コード実行(数式・微分経路への介入)。行き先は §8.4 / §10
 - in-process の広い eager Array API、custom VJP、Metal カーネル注入
 - リモートエンジン、分散
-- スループット競争、および CUDA / Linux 対応。MLX 自体には CUDA と Linux CPU の backend が
-  あるので「使えないから」ではなく、**製品スコープ上の選択**として当面対象外にする
-  (対象は手元の Mac での FT / 蒸留)
+- スループット競争。速さを競わない(§0)
 - 以下は引き続き対象外: Python MLX API 互換、Python dunder の再現、学習中の任意 Ruby
   forward、DLPack、custom Metal kernel、任意 Ruby オブジェクトを含む parameter tree、
   MLX の全 dtype / 全 op / 全 optimizer の公開、`Marshal` による保存、初期段階での
@@ -576,6 +575,31 @@ dladdr で拡張バンドルの隣に要り、それが無いとプロセスが�
 
 よって **M1 の出口条件に「隔離環境へ gem install → require → 1 step」の smoke test を
 含める**(§9.1)。開発期は source checkout で進める。Python ランナーは optional な開発依存。
+
+### 11.5 出荷形態
+
+RubyGems をチャネルとする。プラットフォームごとの platform gem と、fallback の source gem。
+
+| artifact | backend | 利用者側の前提 |
+| --- | --- | --- |
+| `torobi-<ver>-arm64-darwin.gem` | Metal | Apple Silicon |
+| `torobi-<ver>-x86_64-linux.gem` | CUDA 12 | NVIDIA driver、CUDA runtime(`cudart` / `cublasLt` / `cufft` / `nvrtc`)、cuDNN 9、OpenBLAS |
+| `torobi-<ver>.gem`(source) | 任意 | Rust toolchain(Linux は CUDA toolkit / cuDNN / OpenBLAS も) |
+
+- ネイティブ拡張は Ruby の ABI ごとに違う。各 Ruby minor 分を 1 gem に同梱する(fat gem)か、
+  minor ごとに分ける。
+- **macOS**: `mlx.metallib`(Metal カーネル、129 MB)を初回利用時に取得する(§11.4)。
+- **Linux**: Metal の metallib は要らない。CUDA カーネルは MLX のビルドに含まれ、`nvrtc` で
+  JIT される。代わりに CUDA スタックが利用者の環境に要る(上の表)。
+- **Linux CPU**: 別途 MLX の Linux CPU ビルドの archive が要る(今の pin は CUDA12 のみ)。
+  出せば GPU 無しで CI テストできる。
+- **検証**: macOS は CI(macos-15)で全スイート。Linux は CI(ubuntu)で bind + link まで。
+  GPU は CI に無いので、GPU での学習は手動セッション(`notes/gpu-session-checklist.md`)で
+  確かめ、Linux のリリースはそれをゲートにする。
+- **リリース工程**: 2 プラットフォーム × Ruby minor。mlx-c / MLX を上げるたびに作り直す。
+- **notice**: 同梱物は共通(mlx-c / MLX / gguflib / mlx-rs のスニペット、§11.4)。
+- **配布元**: `takahashim/mlx-prebuilt` のリリース(MLX / mlx-c / gguflib / metallib / 各
+  license / `MANIFEST.txt` / `SHA256SUMS`)。
 
 ## 12. 検証の層(v1 §18 を本文化)
 
