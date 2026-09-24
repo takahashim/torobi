@@ -269,7 +269,9 @@ inputs and compared the results to the bit: the free functions, gelu in
 f32 and bf16, attention under each kind of mask and its gradient, and
 safetensors written by one and read by the other. It went with `mlx-rs`.
 What outlives it is the draws from seed 42, pinned as constants recorded
-through `mlx-rs`, and a before-and-after comparison on ruri-v3-130m (the
+through `mlx-rs` (exact on Metal, where they were recorded, and within f32
+rounding on CUDA, whose sampler is the same algorithm in another
+arithmetic), and a before-and-after comparison on ruri-v3-130m (the
 same SHA-256 for a forward, three losses and the weights they leave)
 recorded in docs/plan.md section 15.75.
 

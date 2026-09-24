@@ -70,6 +70,12 @@ mod tests {
     /// change: a checkpoint written before the move resumes into the same
     /// dropout masks after it. These are what mlx-rs 0.32.0 drew from
     /// seed 42, recorded through it before the move.
+    ///
+    /// The keys and the keep/drop mask are integers and exact on every
+    /// backend. The float draws are MLX's sampler in that backend's
+    /// arithmetic: on Metal they match the recording to the bit, and on
+    /// CUDA they differ in the last place or two. The same seed is the
+    /// same stream, not the same bits (docs/plan.md section 9.2).
     #[test]
     fn a_seed_draws_what_it_drew_through_mlx_rs() {
         let (key, first, second, normal, uniform, kept) = run(|| {
@@ -90,9 +96,27 @@ mod tests {
         assert_eq!(key, RECORDED.key);
         assert_eq!(first, RECORDED.first);
         assert_eq!(second, RECORDED.second);
-        assert_eq!(normal, RECORDED.normal);
-        assert_eq!(uniform, RECORDED.uniform);
+        assert_draw(&normal, &RECORDED.normal);
+        assert_draw(&uniform, &RECORDED.uniform);
         assert_eq!(kept, RECORDED.kept);
+    }
+
+    /// The recorded draw to the bit on the backend it was recorded on,
+    /// and within f32 rounding elsewhere.
+    #[cfg(target_os = "macos")]
+    fn assert_draw(got: &[f32], want: &[f32]) {
+        assert_eq!(got, want);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn assert_draw(got: &[f32], want: &[f32]) {
+        assert_eq!(got.len(), want.len());
+        for (got, want) in got.iter().zip(want) {
+            assert!(
+                (got - want).abs() <= 1e-6 * want.abs().max(1.0),
+                "{got} is not within f32 rounding of {want}"
+            );
+        }
     }
 
     struct Recorded {
