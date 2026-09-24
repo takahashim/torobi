@@ -11,8 +11,11 @@
 #   ruby -Ilib -Itest tools/coverage.rb
 require "coverage"
 
-# Below this, something stopped being tested rather than being deleted.
-# Overridable so the gate itself can be exercised without moving the floor.
+# Below this, something stopped being tested rather than being deleted. A
+# coarse guard and not a target: the subprocess layer and a few defensive
+# branches are not reachable in this process, and chasing the last percent
+# is not worth it. Overridable so the gate can be exercised without moving
+# it.
 FLOOR = Float(ENV.fetch("TOROBI_COVERAGE_FLOOR", "97.0"))
 
 ROOT = File.expand_path("..", __dir__)
