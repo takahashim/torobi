@@ -74,6 +74,28 @@ class LlamaTest < Minitest::Test
     refute s.attention_bias, "and Llama's attention has no biases"
   end
 
+  def test_from_config_file_reads_a_checkpoints_own_config
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "config.json")
+      File.write(path, JSON.generate(oracle.fetch("config")))
+
+      assert_equal published, Torobi::Models::Llama.from_config_file(path)
+    end
+  end
+
+  def test_a_config_it_cannot_build_is_refused
+    base = { "vocab_size" => 32, "hidden_size" => 9, "intermediate_size" => 16,
+             "num_hidden_layers" => 2, "num_attention_heads" => 3,
+             "num_key_value_heads" => 2, "head_dim" => 3 }
+    e = assert_raises(Torobi::ConfigError) do
+      described.from_hash(base.merge("hidden_size" => 8))
+    end
+    assert_match(/is not hidden_size/, e.message)
+
+    e = assert_raises(Torobi::ConfigError) { described.from_hash(base) }
+    assert_match(/do not divide into/, e.message)
+  end
+
   # The claim that makes `pretrained:` work with no renaming, for both of
   # them, from one description.
   def test_each_graph_declares_exactly_what_its_checkpoint_holds

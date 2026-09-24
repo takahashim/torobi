@@ -52,6 +52,46 @@ class Gemma3Test < Minitest::Test
     assert_in_delta 0.0625, c.scale, 1e-9
   end
 
+  def test_from_config_file_reads_a_checkpoints_own_config
+    raw = { "vocab_size" => 11, "hidden_size" => 8, "intermediate_size" => 16,
+            "num_hidden_layers" => 3, "num_attention_heads" => 2,
+            "num_key_value_heads" => 1, "head_dim" => 4, "rms_norm_eps" => 1e-6,
+            "rope_theta" => 1_000_000.0, "rope_local_base_freq" => 10_000.0,
+            "sliding_window" => 3, "sliding_window_pattern" => 3,
+            "query_pre_attn_scalar" => 4, "eos_token_id" => 10 }
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "config.json")
+      File.write(path, JSON.generate(raw))
+
+      assert_equal described.from_hash(raw), described.from_config_file(path)
+    end
+  end
+
+  def test_a_config_it_cannot_build_is_refused
+    base = { "vocab_size" => 11, "hidden_size" => 8, "intermediate_size" => 16,
+             "num_hidden_layers" => 3, "num_attention_heads" => 2,
+             "num_key_value_heads" => 1, "head_dim" => 4 }
+    e = assert_raises(Torobi::ConfigError) do
+      described.from_hash(base.merge("layer_types" => ["full_attention"]))
+    end
+    assert_match(/1 layer types for 3 layers/, e.message)
+
+    e = assert_raises(Torobi::ConfigError) do
+      described.from_hash(base.merge("num_attention_heads" => 3, "num_key_value_heads" => 2,
+                                     "layer_types" => ["full_attention"] * 3))
+    end
+    assert_match(/do not divide into/, e.message)
+  end
+
+  def test_an_untied_model_declares_its_own_output_projection
+    tied = described.causal_lm(small, seq: SEQ).parameters.map(&:path)
+    untied_model = described.causal_lm(small.with(tie_word_embeddings: false), seq: SEQ)
+    untied = untied_model.parameters.map(&:path)
+
+    refute_includes tied, "lm_head.weight"
+    assert_includes untied, "lm_head.weight"
+  end
+
   # The claim that makes `pretrained:` work with no renaming: 13 tensors
   # a layer, which is the four norms and the two head norms over what a
   # Llama layer has.

@@ -186,6 +186,17 @@ class CheckpointTest < Minitest::Test
     assert_nil Torobi::Session.open(config, weights: weights) { |s| s.restore(written) }
   end
 
+  # A position is arbitrary JSON the caller owns, so it may be nested and
+  # may hold symbols; both are written as JSON and read back the same way.
+  def test_a_position_keeps_its_nesting_and_writes_symbols_as_strings
+    written = Torobi::Session.open(config, weights: weights) do |s|
+      s.run(batches(1))
+      s.checkpoint!(File.join(@dir, "c"), at: { epoch: 2, batches: [1, :two] })
+    end
+
+    assert_equal({ "epoch" => 2, "batches" => [1, "two"] }, written.position)
+  end
+
   def test_a_checkpoint_records_the_runs_provenance
     dataset = { "name" => "spike", "digest" => "abc" }
     written = Torobi::Session.open(config, weights: weights, dataset:) do |s|

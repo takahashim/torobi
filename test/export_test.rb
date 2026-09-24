@@ -182,6 +182,12 @@ class ExportTest < Minitest::Test
     assert_match(/pooling_dim/, e.message)
   end
 
+  def test_a_pooling_mode_that_is_not_one_is_refused
+    e = assert_raises(ArgumentError) { Torobi::Export::Pooling.new(mode: :max) }
+
+    assert_match(/pooling must be one of/, e.message)
+  end
+
   # The model name comes from what the run holds, which the engine settled
   # at open, rather than from anything written down beside it.
   def test_which_model_is_asked_of_the_run

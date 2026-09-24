@@ -72,6 +72,33 @@ class ModernBertTest < Minitest::Test
     assert_includes paths, "layers.1.attn_norm.weight"
   end
 
+  def test_from_config_file_reads_a_checkpoints_own_config
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "config.json")
+      File.write(path, JSON.generate(oracle.fetch("config")))
+
+      assert_equal config, Torobi::Models::ModernBERT.from_config_file(path)
+    end
+  end
+
+  def test_a_pooling_mode_it_does_not_know_is_refused
+    e = assert_raises(Torobi::ConfigError) do
+      Torobi::Models::ModernBERT.embedder(config, seq: 8, pooling: :max)
+    end
+
+    assert_match(/unknown pooling :max/, e.message)
+  end
+
+  # A configuration with no local layer asks for no window, so the mask is
+  # the padding alone.
+  def test_a_configuration_with_no_local_layer_needs_no_window
+    global = config.with(global_attn_every_n_layers: 1)
+    names = Torobi::Models::ModernBERT.graph(global, seq: 8).inputs.map(&:name)
+
+    assert_includes names, "mask"
+    refute_includes names, "window"
+  end
+
   def test_the_graph_is_built_and_shaped_before_anything_runs
     g = graph(seq: 32)
 
