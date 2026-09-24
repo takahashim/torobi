@@ -1,6 +1,6 @@
 {
   "repo": "takahashim/mlx-prebuilt",
-  "release": "v0.6.0.1",
+  "release": "v0.6.0.2",
   "mlx": "0.32.2",
   "mlx_c": "c74db5307cc8ce122f48d97ef951b30578674e7f",
   "requires": {
@@ -10,11 +10,15 @@
   "platforms": {
     "macos-arm64": {
       "asset": "mlx-v0.32.2-mlxc-c74db5307cc8ce122f48d97ef951b30578674e7f-macos-arm64.tar.gz",
-      "digest": "b21fd96d2d62f712b1818e38f8bb8e2420e7c7dacd81dff52eab6728da4d732f"
+      "digest": "290331d6dc848cbbf18453a5e3bbc095ec234c9dc528339d3dd4bfc7731dca97",
+      "metallib": {
+        "asset": "mlx-v0.32.2-mlxc-c74db5307cc8ce122f48d97ef951b30578674e7f-macos-arm64.metallib.tar.gz",
+        "digest": "20d3b7e10c90a5ce73fe53a8a1b780c11cc67fa04468a8d5d06c5dd4a0f5cf3b"
+      }
     },
     "linux-x86_64": {
       "asset": "mlx-v0.32.2-mlxc-c74db5307cc8ce122f48d97ef951b30578674e7f-linux-x86_64-cuda12.tar.gz",
-      "digest": "699f50efb3908fb6f0d7916d6bccc6870044152f38ac7617b1886420834372da"
+      "digest": "060f2757a32c819e4bc67098f4000bc8c24a2fc3458f14c151da024fb01d8245"
     }
   }
 }

@@ -92,8 +92,16 @@ class BoundaryTest < Minitest::Test
     assert_match(/dimension 1 is 3, declared 2/, output)
   end
 
-  def test_a_missing_metallib_is_refused_before_mlx_is_touched
+  # The pin carries the kernels as an asset of their own, so a missing
+  # file is normally fetched rather than refused. What must still hold is
+  # the failure when it cannot be fetched: an exception before MLX is
+  # touched, not the abort a missing metallib would cause at the device.
+  # The fetch is stubbed to fail so the test reaches no network.
+  def test_a_metallib_that_cannot_be_fetched_is_refused_before_mlx_is_touched
     body = <<~RUBY
+      module MlxPrebuilt
+        def self.fetch_metallib(**) = raise Refused, "no network (test)"
+      end
       config, weights, batch = build
       begin
         Torobi::Session.open(config, weights: weights)
@@ -106,7 +114,7 @@ class BoundaryTest < Minitest::Test
 
     assert_predicate status, :success?, output
     assert_match(/REFUSED/, output)
-    assert_match(/metallib|kernels/i, output, "the message should say what is missing")
+    assert_match(/kernels/i, output, "the message should say what is missing")
   end
 
   # The route that used to die. `Torobi::Native` called directly goes

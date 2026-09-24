@@ -3,6 +3,7 @@
 require "digest"
 require "fileutils"
 require "json"
+require "uri"
 
 # The MLX every cargo build here links, as a system install prefix.
 #
