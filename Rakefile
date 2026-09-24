@@ -407,6 +407,16 @@ end
 task compile: [] # defined by RbSys::ExtensionTask above
 task test: %i[compile metallib]
 
+# The Ruby tests again, under line coverage. What it holds is that a
+# refusal, a branch or a value object does not quietly stop being
+# exercised; the subprocess layer does not appear in it, and is covered by
+# the tests that spawn it, so the floor sits below the in-process figure
+# rather than at it.
+desc "run the Ruby tests under line coverage"
+task coverage: %i[compile metallib] do
+  sh RbConfig.ruby, "-Ilib", "-Itest", "tools/coverage.rb"
+end
+
 # Lint first: it is five seconds, and the rest is a compile.
-DEFAULT = %w[test parquet:test rust_test rust_test:facade engine:check].freeze
+DEFAULT = %w[coverage parquet:test rust_test rust_test:facade engine:check].freeze
 task default: (Rake::Task.task_defined?(:rubocop) ? ["rubocop", *DEFAULT] : DEFAULT)

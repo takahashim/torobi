@@ -2,10 +2,11 @@ name: ci
 
 # What `rake` does on a machine that is not the author's.
 #
-# The whole of it: rubocop, the Ruby tests (which build the extension),
-# the engine's Rust tests, and the engine's closed-form check. Not
-# `rake smoke`, which builds the gem a second time and installs it, and
-# not the oracle tasks, which need published checkpoints on disk.
+# The whole of it: rubocop, the Ruby tests under line coverage (which
+# build the extension), the engine's Rust tests, and the engine's
+# closed-form check. Not `rake smoke`, which builds the gem a second time
+# and installs it, and not the oracle tasks, which need published
+# checkpoints on disk.
 on:
   push:
     branches: [main]
