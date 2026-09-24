@@ -22,6 +22,12 @@ module Torobi
     # file is not there; this constant remains for the tests that hide it.
     METALLIB = File.expand_path("mlx.metallib", __dir__)
 
+    # The Linux counterpart: the NVIDIA headers MLX's CUDA backend compiles
+    # its kernels against at run time, one directory above the extension
+    # (its parent's `include/`). Same purpose as METALLIB, and the same
+    # reason for a constant - the tests that hide it.
+    JIT_HEADERS = File.expand_path("../include/cccl", __dir__)
+
     # The process that loaded the extension. A Metal device and its command
     # queues do not survive fork, so a child that inherited them cannot use
     # them, and finding out at the GPU is finding out by aborting.

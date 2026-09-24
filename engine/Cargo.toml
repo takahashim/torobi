@@ -17,10 +17,11 @@ sha2 = "0.10"
 # headers and archives of the prefix build.rs is pointed at. No Rust crate
 # stands between the engine and mlx-c; docs/vendoring.md ("mlx-c, bound
 # here") says why.
-[target.'cfg(target_os = "macos")'.dependencies]
-# dladdr, for refusing a missing metallib before MLX aborts over it
-# (src/runtime.rs). Apple's alone: there is no metallib to go missing
-# anywhere else.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+# dladdr, for finding this object and refusing a missing runtime artifact
+# before MLX fails less clearly (src/runtime.rs): the metallib on Apple,
+# which MLX aborts over, and NVIDIA's JIT headers on Linux, which MLX only
+# fails the first kernel over.
 libc = "0.2"
 
 [build-dependencies]

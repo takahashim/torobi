@@ -197,12 +197,12 @@ fn available() -> Result<(), RuntimeError> {
     }
 }
 
-/// What is missing, if MLX would fail to find its kernels here.
-#[cfg(target_os = "macos")]
-fn missing_metallib() -> Option<String> {
-    // An anchor in this object's data segment: dladdr on it names the
-    // binary or bundle this code is linked into, which is exactly where
-    // MLX will look (its code is statically linked into the same object).
+/// The path this code is loaded from, through `dladdr` on an anchor in its
+/// own data segment. MLX is statically linked into the same object, so its
+/// own `current_binary_dir()` names the same place, and what it loads at
+/// run time is found relative to it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn object_path() -> Option<std::path::PathBuf> {
     static ANCHOR: u8 = 0;
     let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
     let found =
@@ -213,27 +213,64 @@ fn missing_metallib() -> Option<String> {
         return None;
     }
     let object = unsafe { std::ffi::CStr::from_ptr(info.dli_fname) };
-    let object = std::path::PathBuf::from(object.to_string_lossy().into_owned());
+    Some(std::path::PathBuf::from(object.to_string_lossy().into_owned()))
+}
+
+/// The name of an object, for a refusal that says where it looked.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn object_name(object: &std::path::Path) -> String {
+    object.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// What is missing, if MLX would fail to find its kernels here.
+///
+/// Apple aborts the process over a missing metallib; Linux only fails the
+/// first JIT-compiled kernel. Both say so here, where a caller can still
+/// act, rather than a step later or not at all.
+#[cfg(target_os = "macos")]
+fn missing_metallib() -> Option<String> {
+    let object = object_path()?;
     let expected = object.parent()?.join("mlx.metallib");
     if expected.exists() {
         return None;
     }
     // Someone pointing MLX elsewhere knows more than this check does;
-    // defer to them rather than refuse a setup that might work.
+    // defer to them rather than refuse a setup that might work. There is no
+    // such escape on Linux: MLX bakes the header path in.
     if std::env::var_os("MLX_METAL_PATH").is_some() {
         return None;
     }
     Some(format!(
         "MLX's Metal kernels are not where it will look for them: expected \
          {} beside {}. Without that file MLX aborts the process rather than \
-         raising, so this refuses first. The gem's install step puts it \
-         there; in a checkout, run `rake metallib`.",
+         raising, so this refuses first. A platform gem fetches it on first \
+         use; in a checkout, run `rake metallib`.",
         expected.display(),
-        object.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        object_name(&object)
     ))
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Linux's counterpart: MLX compiles its CUDA kernels at run time through
+/// NVRTC and reads NVIDIA's headers (`cccl`, `cute`, `cutlass`) from one
+/// directory above the extension - its parent's `include/`. The platform
+/// gem ships them there; a checkout gets them from the MLX prefix.
+#[cfg(target_os = "linux")]
+fn missing_metallib() -> Option<String> {
+    let object = object_path()?;
+    let expected = object.parent()?.parent()?.join("include").join("cccl");
+    if expected.is_dir() {
+        return None;
+    }
+    Some(format!(
+        "MLX's CUDA kernels are compiled at run time and cannot find NVIDIA's \
+         headers: expected {} beside {}. A platform gem carries them; in a \
+         checkout they come from the MLX prefix.",
+        expected.display(),
+        object_name(&object)
+    ))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn missing_metallib() -> Option<String> {
     None
 }

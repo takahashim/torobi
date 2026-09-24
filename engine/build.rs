@@ -10,6 +10,7 @@ fn main() {
     record_mlx_version(prefix.as_deref());
     bind_mlx_c(prefix.as_deref());
     link_metallib_beside_test_binaries(prefix.as_deref());
+    link_jit_headers_beside_test_binaries(prefix.as_deref());
 }
 
 /// The four functions whose declarations mlx-c gates on the architecture
@@ -175,6 +176,35 @@ fn link_metallib_beside_test_binaries(prefix: Option<&Path>) {
     let deps = profile_dir.join("deps");
     if deps.is_dir() {
         link(&named, &deps.join("mlx.metallib"));
+    }
+}
+
+/// Linux's counterpart to the metallib: MLX compiles the CUDA kernels it
+/// did not build ahead of time at run time, and reads NVIDIA's headers
+/// (`cccl`, `cute`, `cutlass`) from one directory above the object that
+/// loads them. The prefix holds them under `include/`; point the two
+/// places a binary looks - `target/<profile>/include` for the test
+/// binaries, `target/include` for the command line - at that directory.
+///
+/// A symlink to the whole `include`, not a copy: the tree is tens of
+/// megabytes, and MLX reads only the three directories out of it.
+fn link_jit_headers_beside_test_binaries(prefix: Option<&Path>) {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
+        return;
+    }
+    let (Some(profile_dir), Some(prefix)) = (profile_dir(), prefix) else {
+        return;
+    };
+    let include = prefix.join("include");
+    if !include.join("cccl").is_dir() {
+        // The print is the point: without these, the first JIT-compiled
+        // kernel fails a long way from here.
+        println!("cargo:warning=no cccl headers at {}", include.display());
+        return;
+    }
+    link(&include, &profile_dir.join("include"));
+    if let Some(target) = profile_dir.parent() {
+        link(&include, &target.join("include"));
     }
 }
 
