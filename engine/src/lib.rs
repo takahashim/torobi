@@ -40,7 +40,7 @@ pub mod tensor;
 
 pub use optimizer::Config as Optimizer;
 pub use plan::Weights;
-pub use runtime::{initialize, RuntimeError};
+pub use runtime::{initialize, set_metallib_path, RuntimeError};
 pub use session::Session;
 
 /// What this engine was built from. The vendoring ledger (docs/vendoring.md)

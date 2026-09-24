@@ -933,6 +933,15 @@ fn build_info(ruby: &Ruby) -> Result<Value, Error> {
     plainly(ruby, || json_to_ruby(ruby, torobi_engine::build_info()))
 }
 
+/// Tells MLX where `mlx.metallib` is, before it looks. Called before any
+/// session opens; a no-op off Apple, where there is no metallib.
+fn set_metallib_path(ruby: &Ruby, path: String) -> Result<(), Error> {
+    plainly(ruby, || {
+        torobi_engine::set_metallib_path(std::path::Path::new(&path))
+            .map_err(|error| from_engine(ruby, error))
+    })
+}
+
 /// What a checkpoint says about itself, without opening it into a session.
 /// For a caller deciding which one to resume from, and for anyone asking
 /// what a directory on disk actually holds.
@@ -955,6 +964,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     let torobi = ruby.define_module("Torobi")?;
     let native = torobi.define_module("Native")?;
     native.define_singleton_method("build_info", function!(build_info, 0))?;
+    native.define_singleton_method("set_metallib_path", function!(set_metallib_path, 1))?;
     native.define_singleton_method("checkpoint_manifest", function!(checkpoint_manifest, 1))?;
     native.define_singleton_method("memory", function!(memory, 0))?;
     native.define_singleton_method("clear_cache", function!(clear_cache, 0))?;

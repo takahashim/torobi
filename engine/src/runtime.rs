@@ -191,10 +191,42 @@ pub fn usable() -> bool {
 /// answer is the same for every session.
 fn available() -> Result<(), RuntimeError> {
     static ANSWER: OnceLock<Option<String>> = OnceLock::new();
-    match ANSWER.get_or_init(missing_metallib) {
+    match ANSWER.get_or_init(|| missing_metallib(recorded_metallib_path())) {
         None => Ok(()),
         Some(what) => Err(RuntimeError::Unavailable(what.clone())),
     }
+}
+
+/// Where a caller has told MLX the kernels are, if it has.
+///
+/// Set through [`set_metallib_path`] before MLX is first asked anything:
+/// [`available`] answers once per process, so a path named after that is
+/// not consulted.
+static METALLIB_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+fn recorded_metallib_path() -> Option<&'static std::path::Path> {
+    METALLIB_PATH.get().map(std::path::PathBuf::as_path)
+}
+
+/// Tells MLX where `mlx.metallib` is, before it looks.
+///
+/// The point is a caller that cannot write beside the engine: a platform
+/// gem fetches the kernels into a cache and names them here, rather than
+/// writing into the installed bundle's directory. Apple only - the file is
+/// Metal's - and a no-op elsewhere.
+#[cfg(target_os = "macos")]
+pub fn set_metallib_path(path: &std::path::Path) -> Result<(), RuntimeError> {
+    // The error handler first: mlx-c's default would exit the process.
+    let _ = runtime();
+    crate::mlxc::metal::set_metallib_path(&path.to_string_lossy())
+        .map_err(|error| RuntimeError::Engine(error.into()))?;
+    let _ = METALLIB_PATH.set(path.to_path_buf());
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_metallib_path(_path: &std::path::Path) -> Result<(), RuntimeError> {
+    Ok(())
 }
 
 /// The path this code is loaded from, through `dladdr` on an anchor in its
@@ -228,16 +260,22 @@ fn object_name(object: &std::path::Path) -> String {
 /// first JIT-compiled kernel. Both say so here, where a caller can still
 /// act, rather than a step later or not at all.
 #[cfg(target_os = "macos")]
-fn missing_metallib() -> Option<String> {
+fn missing_metallib(named: Option<&std::path::Path>) -> Option<String> {
+    // A caller that named a file knows more than this check does, so the
+    // name is the answer: if the file is not there, that is the refusal.
+    if let Some(path) = named {
+        return (!path.exists()).then(|| {
+            format!(
+                "the named mlx.metallib is not there: {}. Without kernels MLX \
+                 aborts the process rather than raising, so this refuses \
+                 first.",
+                path.display()
+            )
+        });
+    }
     let object = object_path()?;
     let expected = object.parent()?.join("mlx.metallib");
     if expected.exists() {
-        return None;
-    }
-    // Someone pointing MLX elsewhere knows more than this check does;
-    // defer to them rather than refuse a setup that might work. There is no
-    // such escape on Linux: MLX bakes the header path in.
-    if std::env::var_os("MLX_METAL_PATH").is_some() {
         return None;
     }
     Some(format!(
@@ -255,7 +293,7 @@ fn missing_metallib() -> Option<String> {
 /// directory above the extension - its parent's `include/`. The platform
 /// gem ships them there; a checkout gets them from the MLX prefix.
 #[cfg(target_os = "linux")]
-fn missing_metallib() -> Option<String> {
+fn missing_metallib(_named: Option<&std::path::Path>) -> Option<String> {
     let object = object_path()?;
     let expected = object.parent()?.parent()?.join("include").join("cccl");
     if expected.is_dir() {
@@ -271,7 +309,7 @@ fn missing_metallib() -> Option<String> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn missing_metallib() -> Option<String> {
+fn missing_metallib(_named: Option<&std::path::Path>) -> Option<String> {
     None
 }
 
@@ -291,11 +329,31 @@ mod tests {
         // code is. Ours is in the same object, so if it finds nothing to
         // complain about, MLX will find the file.
         assert!(
-            missing_metallib().is_none(),
+            missing_metallib(None).is_none(),
             "the test binary should have mlx.metallib beside it \
              (engine/build.rs links it into deps/): {:?}",
-            missing_metallib()
+            missing_metallib(None)
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_named_metallib_that_exists_is_taken_as_the_answer() {
+        // What a platform gem does: fetch the kernels somewhere writable
+        // and name them, instead of writing beside the bundle.
+        let dir = std::env::temp_dir().join(format!("torobi-metallib-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("mlx.metallib");
+        std::fs::write(&file, b"kernels").unwrap();
+
+        assert!(missing_metallib(Some(&file)).is_none(), "a file that is there is used");
+
+        std::fs::remove_file(&file).unwrap();
+        assert!(
+            missing_metallib(Some(&file)).is_some(),
+            "a name for a file that is not there is refused, not waved through"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

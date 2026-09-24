@@ -43,6 +43,8 @@ pub mod fast;
 pub(crate) mod handle;
 mod io;
 pub mod memory;
+#[cfg(target_os = "macos")]
+pub mod metal;
 pub mod nn;
 pub mod ops;
 pub mod random;
