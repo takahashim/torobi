@@ -29,7 +29,15 @@ require_relative "torobi/models/llama"
 # a right one (`benchmark` stopped being a default gem in Ruby 4.0, and
 # that is the shape it would have arrived in).
 begin
-  require_relative "torobi/torobi"
+  begin
+    # A checkout and a source build have one extension beside this file; a
+    # precompiled gem carries one per Ruby minor, under `torobi/<abi>/`,
+    # chosen here. The flat path is tried first so a checkout always loads
+    # what `rake compile` just built, not a staged copy.
+    require_relative "torobi/torobi"
+  rescue LoadError
+    require_relative "torobi/#{RUBY_VERSION[/\d+\.\d+/]}/torobi"
+  end
 rescue LoadError
   # Not compiled yet (rake compile); Torobi::Session is simply absent.
 else

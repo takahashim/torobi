@@ -17,6 +17,8 @@ target/
 # holding the engine to a shape it no longer produces.
 engine/check/*.json
 lib/torobi/torobi.bundle
+lib/torobi/*/torobi.bundle
+lib/torobi/*/torobi.so
 lib/torobi/mlx.metallib
 # NVIDIA's JIT headers, staged here to travel in the Linux platform gem.
 lib/include/

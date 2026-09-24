@@ -9,7 +9,7 @@ plugins:
   - rubocop-minitest
 
 AllCops:
-  TargetRubyVersion: "3.2"
+  TargetRubyVersion: "3.3"
   NewCops: enable
   # Which plugins to load is a decision, not a thing to be reminded of
   # on every run.

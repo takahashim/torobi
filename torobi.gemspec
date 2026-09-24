@@ -17,7 +17,7 @@ Gem::Specification.new do |spec|
   spec.homepage = "https://github.com/takahashim/torobi"
   spec.license  = "MIT"
   spec.metadata = { "rubygems_mfa_required" => "true" }
-  spec.required_ruby_version = ">= 3.2"
+  spec.required_ruby_version = ">= 3.3"
 
   # The extension is built from source at install time, so the crates and
   # the workspace manifest ship with it. docs/vendoring.md is in here

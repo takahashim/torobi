@@ -46,41 +46,43 @@ task :metallib do
   puts "copied #{source} -> #{destination}"
 end
 
-# The platform gem: the extension already built and, on Linux, the JIT
-# headers MLX's CUDA backend needs at run time. No `extensions`, so
-# installing compiles nothing and a Rust toolchain is not required
-# (docs/plan.md section 11.5, notes/plan-linux-platform-gem.md).
+# The platform gem: the extension already built, one per Ruby ABI under
+# `lib/torobi/<abi>/`, and on Linux the JIT headers MLX's CUDA backend
+# needs at run time. No `extensions`, so installing compiles nothing and a
+# Rust toolchain is not required (docs/plan.md section 11.5,
+# notes/plan-linux-platform-gem.md).
+#
+# Locally this stages the one ABI this machine's Ruby built. The release
+# workflow builds each ABI on its own runner and runs the same assembly
+# script (script/build_platform_gem.rb), which is what makes a fat gem.
 desc "build the platform gem for this machine"
 task :platform_gem do
-  require "rubygems/package"
   Rake::Task[:compile].invoke
   stage_runtime_headers
-  spec = platform_gem_spec
-  built = Gem::Package.build(spec)
-  puts "built #{built} (#{(File.size(built) / 1024.0 / 1024).round(1)} MB)"
+  stage_extension
+  sh RbConfig.ruby, "script/build_platform_gem.rb", platform_tag
 end
 
-# The gem is the same Ruby either way; what differs is the platform and
-# the compiled artifacts beside it. `spec.files` is narrowed to what runs,
-# so the platform gem does not carry the crates it was built from.
-def platform_gem_spec
-  spec = Gem::Specification.load("torobi.gemspec")
-  spec.platform = case RUBY_PLATFORM
-                  when /\Aarm64-darwin/ then "arm64-darwin"
-                  when /\Ax86_64-linux/ then "x86_64-linux"
-                  else Gem::Platform.local.to_s
-                  end
-  # The whole point: nothing is built at install.
-  spec.extensions = []
-  spec.files = Dir[
-    "lib/**/*.rb",
-    "lib/torobi/mlx_prebuilt.json",
-    "lib/torobi/torobi.{bundle,so,dylib}",
-    "lib/include/**/*",
-    "config/ops.yml",
-    "README.md", "CHANGELOG.md", "LICENSE", "licenses/**/*", "docs/plan.md", "docs/vendoring.md"
-  ]
-  spec
+# The compiled extension under its Ruby minor, the way a fat gem carries it
+# (`lib/torobi/<abi>/torobi.<dlext>`), so the assembly script finds it. The
+# loader in `lib/torobi.rb` looks here first.
+def stage_extension
+  require "fileutils"
+  abi = RUBY_VERSION[/\d+\.\d+/]
+  dlext = RbConfig::CONFIG["DLEXT"]
+  destination = "lib/torobi/#{abi}/torobi.#{dlext}"
+  FileUtils.mkdir_p(File.dirname(destination))
+  FileUtils.cp("lib/torobi/torobi.#{dlext}", destination)
+  puts "staged #{destination}"
+end
+
+# The gem's platform, as `Gem::Platform` and the gem filename spell it.
+def platform_tag
+  case RUBY_PLATFORM
+  when /\Aarm64-darwin/ then "arm64-darwin"
+  when /\Ax86_64-linux/ then "x86_64-linux"
+  else Gem::Platform.local.to_s
+  end
 end
 
 # MLX's CUDA backend compiles its kernels at run time and looks for
