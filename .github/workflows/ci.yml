@@ -124,7 +124,7 @@ jobs:
 
       - name: Fetch and check the pinned MLX
         run: |
-          prefix=$(ruby -r./ext/torobi/mlx_prebuilt -e 'print MlxPrebuilt.ensure!')
+          prefix=$(ruby -r./lib/torobi/mlx_prebuilt -e 'print MlxPrebuilt.ensure!')
           echo "TOROBI_MLX_PREFIX=$prefix" >> "$GITHUB_ENV"
 
       - name: Bind and link the engine
