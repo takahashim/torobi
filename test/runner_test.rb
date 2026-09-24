@@ -128,6 +128,17 @@ class RunnerTest < Minitest::Test
     assert_operator manifest.fetch("step"), :>, 0
   end
 
+  # And when the run will not answer, `stop` insists: a step that has
+  # wedged the GPU does not read the flag, and the grace is how long to
+  # allow before KILL.
+  def test_stop_insists_when_the_run_will_not_answer
+    r = runner("STEPS" => "1000000", "IGNORE_TERM" => "1").start
+    moving(r)
+    outcome = r.stop(grace: 0.1)
+
+    assert_predicate outcome, :crashed?, outcome.to_s
+  end
+
   # The point of the arrangement: a run that fails is an exit status here,
   # not the end of this process.
   def test_a_failed_run_is_an_exit_status_and_a_reason
@@ -230,5 +241,17 @@ class RunnerTest < Minitest::Test
 
     assert_nil r.outcome
     assert_raises(Torobi::Error) { r.wait }
+  end
+
+  # The parent reads forwards and skips what it cannot use: a line that is
+  # not JSON, or a kind this version does not know, says nothing about this
+  # run's progress and must not stop the reading.
+  def test_the_reading_skips_a_line_it_cannot_use
+    path = File.join(@dir, "journal.jsonl")
+    File.write(path, "not json\n" \
+                     "{\"kind\":\"improvise\",\"step\":1}\n" \
+                     "{\"kind\":\"span\",\"step\":2,\"loss\":0.5}\n")
+
+    assert_equal 2, Torobi::Runner::Reading.new(path).last(Torobi::Journal::Span).step
   end
 end

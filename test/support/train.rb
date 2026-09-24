@@ -12,6 +12,8 @@ STEPS = Integer(ENV.fetch("STEPS", "40"))
 EVERY = Integer(ENV.fetch("CHECKPOINT_EVERY", "10"))
 
 Torobi::Runner.child! do |run|
+  # A run that will not answer TERM is what `Runner#stop`'s grace is for.
+  Signal.trap("TERM", "IGNORE") if ENV["IGNORE_TERM"]
   raise ENV["RAISE"] if ENV["RAISE"]
 
   model = Torobi.graph do |g|
