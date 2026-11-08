@@ -101,9 +101,8 @@ end
 stride = long_enough.size / options[:holdout]
 held = (0...options[:holdout]).map { |i| i * stride }
 heldout = held.map { |d| chunks_of.call(long_enough[d]).first }
-training = long_enough.each_index.reject do |d|
-  held.include?(d)
-end.flat_map { |d| chunks_of.call(long_enough[d]) }
+trained = long_enough.each_index.reject { |d| held.include?(d) }
+training = trained.flat_map { |d| chunks_of.call(long_enough[d]) }
 warn "#{training.size} training chunks, #{heldout.size} held out from as many documents, " \
      "#{seq} tokens each"
 
