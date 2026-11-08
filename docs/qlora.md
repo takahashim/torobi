@@ -1,8 +1,8 @@
 # Torobi QLoRA 対応 仕様と計画
 
-- Status: **Phase 0〜3 を実装、Rust のテストは GPU で全部通過**(2026-11-08、plan.md
-  §15.76)。実物の比較(inventory、mlx-lm との forward、7B / 32B の実測)と PEFT での
-  読み戻しが残る(§9)
+- Status: **Phase 0〜3 を実装。Rust のテストは GPU で全部通過、実物の 4 bit ファイルは
+  inventory と mlx-lm との forward の比較まで通過**(2026-11-08、plan.md §15.76)。残るのは
+  7B / 32B の実測と PEFT での読み戻し(§9)
 - Date: 2026-11-08(同日、コードと突き合わせたレビューを反映。§8)
 - 対象: `docs/plan.md` の M6 に「量子化 op」として据え置かれていたもの
 - 前提: Ruby が言語を所有し、Rust は実行だけを所有する(plan.md の原則)
@@ -615,7 +615,8 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
   mlx-lm とは、次のトークンが一致し、logits の差 8.2e-3(`PARITY_BF16 = 5e-2`)、hidden は
   3.3e-2 と 5.9e-2(`PARITY_BF16_HIDDEN = 1e-1`。hidden は残差ストリームの外れ値次元の
   ulp の揺れをそのまま受け、logits はその射影で平均される)。上位 10 の集合は bf16 では
-  要求しない(丸めで入れ替わり得る)。
+  要求しない(丸めで入れ替わり得る)。**3 回目で 3 本とも通った。** Phase 1 の表の
+  「forward が mlx-lm と一致する」はこれで実測で埋まり、残りは下の 2 つだけである。
 - **Linux の `cargo test --no-run`(link)** もこの箱では未確認。CI の ubuntu が見る。
 - **Phase 2 の実測**(7B を RTX 3080 で、32B を Mac 48 GB で開いて `Torobi::Memory` を
   読む)は未着手。§1.2 の表はまだ見込みのまま。Rust の memory テストは小さい行列で
