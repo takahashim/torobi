@@ -533,7 +533,7 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
 | CUDA の `affine_quantize` に g64 が無い | §2.3 のシンボル一覧に 32 と 128 しか見えない | Phase 0 の Linux の行で g64 を名指しで確かめる。無ければ (B) は CUDA で g32 / g128 に限る(読む方 (A) / (A') は `dequantize` と `quantized_matmul` のカーネル次第) |
 | 配布物との量子化の bit 一致 | mlx-community のファイルは古い MLX で量子化されている | 比較対象を手元の同じ版の MLX にする(Phase 2) |
 | `d_in` が `group_size` で割り切れないモデル | Gemma3 の head_dim 256 系は大丈夫。小さいモデルの一部 | `shape.rb` で宣言時に断る。`group_size: 32` に落とす選択肢を示す |
-| QLoRA の品質(4 bit base での学習が bf16 LoRA に劣るか) | 原論文は NF4 + double quant。MLX の affine 4 bit は別物 | `tools/qlora_curve.rb` が同じ checkpoint・同じ batch・同じ seed で bf16 base と 4 bit base の LoRA を並べ、loss 曲線と held-out loss を出す(0.5B なら数分)。差が数 % 以内なら成立、大きければ `--bits 8` / `--group-size 32` を試す。データは `tools/tokenize_ids.py` の ids か `--synthetic` |
+| QLoRA の品質(4 bit base での学習が bf16 LoRA に劣るか) | 原論文は NF4 + double quant。MLX の affine 4 bit は別物 | **合成データでは劣らない**(held-out の差 −0.3 %、§9)。言語での確認が残る。`tools/qlora_curve.rb` が同じ checkpoint・同じ batch・同じ seed で bf16 base と 4 bit base の LoRA を並べ、loss 曲線と held-out loss を出す(0.5B なら数分)。差が数 % 以内なら成立、大きければ `--bits 8` / `--group-size 32` を試す。データは `tools/tokenize_ids.py` の ids か `--synthetic` |
 | `quantized_matmul` の VJP が weight について無いこと | scales / biases は MLX が微分できる(見込み)。将来 MLX が w の勾配を足しても、量子化重みを学習する動機は無い | `GraphConfig` で断る側に倒す。scales / biases を断るのは Torobi の方針(§3.2) |
 
 ## 7. やらないこと
@@ -642,8 +642,30 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
   再計測待ち。
 - **「うまくできそうか」の判断**は、載るか(上の計測)・学習が進むか・速いか、の 3 つに
   分けた。学習が進むかは `tools/qlora_curve.rb`(§6 の品質の行)で 0.5B の bf16 LoRA と
-  4 bit LoRA を同条件で並べる。速さは同じスクリプトの `seconds_per_step` の比。数字は
-  まだ無い。
+  4 bit LoRA を同条件で並べる。速さは同じスクリプトの `seconds_per_step` の比。
+- **学習の比較の初回(2026-11-08、16 GB の Mac、Qwen2.5-0.5B、`--synthetic`、300 step、
+  seq 128、batch 4、rank 8 で q_proj / v_proj、4 bit g64)**:
+
+  | | bf16 base | 4 bit base | 差 |
+  | --- | ---: | ---: | ---: |
+  | held-out(学習前) | 10.634 | 10.783 | +1.4 % |
+  | held-out(100 step) | 8.237 | 8.267 | +0.4 % |
+  | held-out(300 step) | 7.798 | 7.778 | −0.3 % |
+  | train(末尾 20 step 平均) | 7.159 | 7.243 | +1.2 % |
+  | 秒 / step | 1.16 | 0.97 | 0.84 倍 |
+  | peak | 5.12 GiB | 3.36 GiB | |
+
+  量子化そのものが学習前の held-out を 1.4 % 悪くし、学習でその差はほぼ消えた。2 本の
+  曲線は全区間で 1 % 前後の幅で並走している。**MLX の affine 4 bit g64 の base は、この
+  条件では bf16 の base と同じように学習する。** 4 bit の方が速いのは、Mac では重みの
+  読み出し帯域が効くからと考えられる(RTX 3080 では未測定)。peak は seq 128 × batch 4 の
+  活性(f32 の logits だけで 0.3 GB)が大半で、base の差(0.48 GiB)より開いている理由は
+  まだ詰めていない。
+  **限界**: 合成データは 300 個の id の 2 次マルコフ連鎖で、組の数(9 万)に対して学習
+  データの遷移が 7 千しかないので、held-out が測っているのは主に「どの id が出るか」で
+  あって言語ではない。held-out は 250 step で底を打って上がり始めており(56 chunk を
+  約 21 周)、過学習に入っている。言語での判断には `--ids`(日本語のテキストを
+  `tools/tokenize_ids.py` で)の再実行が要る。
 - **PEFT で adapter を読み戻して logits を比べる**(Phase 3 の出口)は未着手。
   `adapter_config.json` の綴りは PEFT の `LoraConfig` の記憶に基づくので、読めなければ
   `Export.adapter_config` を直す。mlx-lm の adapter 形式(`adapters.safetensors`、
