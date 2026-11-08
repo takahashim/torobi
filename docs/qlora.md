@@ -1,6 +1,7 @@
 # Torobi QLoRA 対応 仕様と計画
 
-- Status: Proposal(着手前。§15.50 LoRA、§15.51 bf16 の続き)
+- Status: **Phase 0 と Phase 1 を実装**(2026-11-08、plan.md §15.76)。Rust のテストと
+  実物の比較は GPU のある機械でまだ走らせていない(§9)。Phase 2 以降は未着手
 - Date: 2026-11-08(同日、コードと突き合わせたレビューを反映。§8)
 - 対象: `docs/plan.md` の M6 に「量子化 op」として据え置かれていたもの
 - 前提: Ruby が言語を所有し、Rust は実行だけを所有する(plan.md の原則)
@@ -127,9 +128,9 @@ int mlx_gather_qmm(...);   /* MoE 用。本計画では使わない */
 
 `libmlx.a`(CUDA 12 版)のシンボル:
 
-- `mlx::core::cu::affine_quantize<__nv_bfloat16, 32|128, 2..8>` — 量子化の GPU カーネル。
-  **group_size 64 の実体化がこの一覧に見えない。** 省略かもしれないが、実物の checkpoint は
-  g64 なので、Phase 0 の Linux の行で g64 を名指しで確かめる
+- `mlx::core::cu::affine_quantize<__nv_bfloat16|__half, 32|64|128, 2..8>` — 量子化の GPU
+  カーネル(`nm -C` で確認、`affine_dequantize` も同じ組)。最初の写しに g64 が無かったのは
+  省略で、実体はある
 - `qmm_sm80_mainloop` / `make_qmm_sm90_kernel` — `quantized_matmul` の GPU カーネル。
   RTX 3080 は sm86 なので sm80 経路
 - `fp_quantize_dequantize<float|f16|bf16>`、`CublasQQMM` — `mxfp4` / `mxfp8` / `nvfp4` 用
@@ -224,8 +225,11 @@ u32 の `.weight` `[d_out, d_in × bits / 32]` と `.scales`(と `.biases`)。`s
 形で断るので、その手前に 1 つ規則を足す:
 
 > 宣言が浮動小数で、ファイルの `.weight` が u32、同じ名前の `.scales` があれば、
-> `mlx_dequantize` して宣言 dtype にする。`group_size` / `bits` は `Quantization` から
-> 取る(graph の属性として渡す。§4.1)。
+> `mlx_dequantize` して宣言 dtype にする。`group_size` / `bits` は**ファイルの形から
+> 逆算する**: packed `[d_out, d_in × bits / 32]` と宣言 `[d_out, d_in]` で bits が、
+> scales の `[d_out, d_in / group_size]` で group_size が決まる。mode は affine
+> (biases を持つ唯一の mode で、mlx-lm が配るのもこれ)。逆算が §3.3 の範囲に
+> 収まらなければ、両方の形を書いて断る。
 
 これが無いと、選んだ実物(Qwen2.5-0.5B、tied)は Phase 1 で開けない。dequantize の束縛は
 Phase 0 で作るので、足すのは規則 1 つである。**Phase 1 の engine 側はこの規則が本体**になる。
@@ -331,7 +335,7 @@ tied embedding(Qwen2.5-0.5B がそう)では `lm_head` は `linear` ではなく
 | `fetch(".weight")` | **dequantize した値**を f32 で返す(Phase 1 から)。「ラベルは payload が何であるかを言う」(§15.51)に従い、返るのはその重みが表す数であって packed ではない。Phase 1 の「base は 1 バイトも動かない」のテストがこれを使うので、断るだけの段階は置かない |
 | `fetch(".scales")` など | bf16 なので今まで通り f32 で返る |
 | `put` | 断る。量子化重みは置き換えるものではない(置き換えるなら bf16 で宣言し直す) |
-| `freeze` / `thaw` | `thaw` が量子化パラメータに当たったら断る(trainable に戻せない) |
+| `freeze` / `thaw` | 届かない。`set_frozen` は宣言 trainable の集合の中だけを動かす(§4.4) |
 | `param_norm` | `self.params` 全体のノルム(§2.1)に packed u32 が混ざる。**u32 を除く**(ノルムは「重みの大きさ」で、packed はそれではない) |
 | checkpoint 保存 | 全パラメータを書くので u32 の packed もそのまま書かれる。manifest の dtype に `"u32"` が増える。再開は形と dtype の一致で通る |
 | checkpoint 容量 | base 4.5 bit + adapter。32B で 17 GiB。「adapter だけを書く」は QLoRA 固有ではなく LoRA 全体の話なので、ここでは扱わない(§7) |
@@ -364,9 +368,11 @@ CPU backend(Linux CPU の MLX build)は pin に無い(plan.md §5)。本計画�
   ```
 - `GraphConfig` の構築時検査に 2 つ: 「u32 の parameter が trainable である」「`fresh:` に
   u32 の parameter が含まれる」は `ConfigError`。dtype だけで判る検査にする(§3.2)。
-- 読み込み時の dequantize(§3.4 (A'))と量子化(§3.4 (B))が使う `group_size` / `bits` /
-  `mode` は、graph の JSON に `quantization` として 1 回書く。`quantized_matmul` の属性と
-  同じ値で、engine は読み込み時にこれを見る。
+- 読み込み時の dequantize(§3.4 (A'))はファイルの形から `group_size` / `bits` を
+  逆算するので、graph に書くものは無い。`fetch` の dequantize は、`Plan` が
+  `quantized_matmul` の入力を parameter node まで辿って作る表(packed → scales /
+  biases / quantization)を使う。量子化(§3.4 (B)、Phase 2)は宣言側の u32 と
+  `quantized_matmul` の属性が目標を言う。
 
 ### 4.2 engine
 
@@ -381,8 +387,8 @@ CPU backend(Linux CPU の MLX build)は pin に無い(plan.md §5)。本計画�
 - `engine/src/plan.rs` `Source::Pretrained`(Phase 1): §3.4 (A') の規則(dequantize して
   宣言 dtype に)。(Phase 2): §3.4 (B) の規則。量子化は `{name}` 単位で一度。どちらも
   `materialize` がファイルの配列を map から取り出してから eval する形に直す(§3.4)。
-- `engine/src/session.rs` / `state.rs`: `fetch` が u32 を dequantize して f32 で返す(Phase 1)。
-  `put` と `set_frozen(…, false)` が u32 を断る。`param_norm` が u32 を除く。
+- `engine/src/state.rs`: `fetch` が u32 を dequantize して f32 で返す(Phase 1)。
+  `put` が u32 を断る。`param_norm` が u32 を除く。`set_frozen` は変えない(§4.4)。
 - `engine/src/export.rs`: u32 を含むモデルは断る(Phase 1)。Phase 3 で merge の経路を得る。
 - checkpoint: dtype 綴りに `u32` が増える以外は変更なし。
 
@@ -390,9 +396,11 @@ CPU backend(Linux CPU の MLX build)は pin に無い(plan.md §5)。本計画�
 
 - `Torobi::Quantization = Data.define(:bits, :group_size, :mode, :on)`。
   `wraps?(path)` は `LoRA` と同じ最後のセグメント照合。`on:` は配列か `:linears`。
-  `Quantization.read(config, file:)` が `config.json` の `quantization` から `bits` /
-  `group_size` を、**safetensors のヘッダ(JSON)から `.scales` を持つ linear の一覧**を
-  読んで `on:` を決める。`config.json` だけでは何が量子化されているか判らない(§6)。
+  `Quantization.from_config(raw)` が `config.json` の `quantization` から `bits` /
+  `group_size` を、`from_header(raw, header)` が **safetensors のヘッダ(JSON)から
+  `.scales` を持つモジュールの一覧**を読んで `on:` を決める。`from_directory(dir)` は
+  両方を checkpoint のディレクトリから。`config.json` だけでは何が量子化されているか
+  判らない(§6)。
 - `DSL::Builder#quantized(quant) { }`、`NoQuantization`(`adapting` / `NoAdapter` と同形)。
 - `DSL::Layers#linear` の分岐(§3.5)。
 - `Models::{Llama, Gemma3}.causal_lm(…, quantization: nil)`。ModernBERT は対象外
@@ -408,8 +416,9 @@ CPU backend(Linux CPU の MLX build)は pin に無い(plan.md §5)。本計画�
 | `d_in % group_size != 0` | `shape.rb` | その `linear` の名前と `d_in`、使える `group_size` |
 | ファイルの weight が宣言の元の形でも量子化形でもない | `plan.rs` | 両方の形を書いて見せる |
 | 宣言が浮動小数、ファイルが packed なのに `.scales` が無い | `plan.rs` | 「量子化された weight だが scales が無い」と、ファイルにある名前を並べる |
-| u32 を含むモデルの `export_model!` | `session.rb` / `export.rs` | 「量子化された base は書けない」。Phase 3 の merge を指す |
-| `thaw` が量子化パラメータに当たる | `session.rs` | 「量子化された重みは学習できない」 |
+| u32 を含むモデルの `export_model!` | `export.rs` | 「量子化された base は書けない」。Phase 3 の merge を指す |
+| `fresh:` が u32 を名指す | `Weights#check_fresh!`(`Session.open`) | 「量子化された重みは初期化できない。量子化済みのファイルを与えるか、bf16 で宣言する」 |
+| `thaw` が量子化パラメータに当たる | (起こらない) | `set_frozen` は宣言 trainable の集合(`candidates`)の中だけを動かし、量子化パラメータは `trainable: false` なので最初から外にある。u32 だけに当たる pattern は「no parameter matches」になる |
 
 ## 5. 計画
 
@@ -430,6 +439,10 @@ CPU backend(Linux CPU の MLX build)は pin に無い(plan.md §5)。本計画�
 | **Linux CUDA で同じ 6 つが通る、g64 で** | bear1(RADV は MLX に無いので対象外)ではなく RTX 3080 機で。`group_size` は 32 / 64 / 128 の 3 つとも(§2.3 のシンボルに 64 が見えない)。CI の ubuntu は bind + link まで |
 
 出口: 上の 7 行。Linux で通らなければ、計画はここで止めて原因を plan.md §15 に書く。
+
+**結果(2026-11-08)**: `engine/src/mlxc/quantized.rs`。7 行のうち 6 行をテストに書いた。
+g64 の CUDA カーネルは `nm` で確認した(§2.3)。**どの行もまだ GPU で走らせていない**
+(§9)。
 
 ### Phase 1: 量子化済み checkpoint を読んで LoRA を当てる
 
@@ -455,6 +468,14 @@ CPU backend(Linux CPU の MLX build)は pin に無い(plan.md §5)。本計画�
 | 読み込み後にファイルの配列が残っていない | `Torobi::Memory` で、開いた直後の常駐が 0.44 GiB 側であって bf16 の表 + packed の合計ではないこと |
 
 出口: 上の 9 行と、Linux で同じスイートが通ること。
+
+**結果(2026-11-08)**: 9 行のうち、engine 無しで言えるもの(バイト数、宣言の形、構築時の
+拒否、`cast`、ヘッダの読み方)は `test/quantization_test.rb` で通っている。engine が要る
+もの((A') の読み込み、fetch の dequantize、step で base が動かないこと、export の拒否)は
+`plan.rs` / `state.rs` / `export.rs` の Rust テストに書いたが、まだ走らせていない(§9)。
+forward の mlx-lm との比較と、実物の inventory との突き合わせ
+(`test/oracle/qwen2.5-0.5b-instruct-4bit.json`、無ければ skip)は、Hub に届く機械で
+inventory を生成してから。
 
 ### Phase 2: bf16 checkpoint を読み込み時に量子化する
 
@@ -540,3 +561,19 @@ CPU backend(Linux CPU の MLX build)は pin に無い(plan.md §5)。本計画�
 - §2.3 のシンボル一覧に `affine_quantize` の g64 が無いこと。Phase 0 で確かめる。
 - `cast` の検査は `IR::Dtype.check!` が `ALL` を見るので、u32 の明示の除外が要ること。
 - `GraphConfig` の検査は「u32 が trainable」の dtype 検査に絞った。DSL では起こり得ない。
+
+## 9. 実装の記録と、まだ言えないこと
+
+実装は plan.md §15.76。この節は「何がまだ確かめられていないか」の一覧で、確かめたら消す。
+
+- **Rust のテストを GPU で走らせていない。** 実装した箱は GPU の無い Linux で、NVIDIA の
+  リポジトリにも届かず、`cargo check --tests`(bindgen と型検査)までしか通せなかった。
+  Phase 0 の 6 本、Phase 1 の 8 本(`plan.rs` 3、`state.rs` 3、`export.rs` 1、`op.rs` 2)
+  は `rake rust_test` で Mac か RTX 3080 機で走らせる。特に **scales / biases の勾配を
+  MLX が返す**という行は記憶に基づくので、通らなければ §3.2 とテストを一緒に直す。
+- **実物の inventory が無い。** `ruby tools/inventory.rb mlx-community/Qwen2.5-0.5B-Instruct-4bit
+  test/oracle/qwen2.5-0.5b-instruct-4bit.json` を Hub に届く機械で一度。それまで
+  `test_the_description_declares_what_the_published_4bit_file_holds` は skip する。
+- **forward の mlx-lm との比較**(Phase 1 の表の 3 行目)は未着手。oracle の生成手順を
+  `tools/` に置くところから。
+- **Linux の `cargo test --no-run`(link)** もこの箱では未確認。CI の ubuntu が見る。

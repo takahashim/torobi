@@ -48,6 +48,30 @@ module Torobi
     # Which of the three this is: :weights, :weights_file or :pretrained.
     attr_reader :kind
 
+    # A packed quantized weight (u32) comes from a file and from nowhere
+    # else: there is no initializer that draws a 4-bit integer and the
+    # scale that reads it. `fresh:` naming one is refused here, where it
+    # is said, rather than as zeros that quietly stand for a model.
+    def check_fresh!(config)
+      packed = config.parameters.select do |parameter|
+        parameter.spec.dtype == :u32 && @fresh.any? do |pattern|
+          Weights.matches?(pattern, parameter.qualified_path)
+        end
+      end
+      return self if packed.empty?
+
+      raise ConfigError,
+            "fresh: names #{packed.first.qualified_path.inspect}, which is a packed quantized " \
+            "weight (u32) and cannot be initialized. Give a quantized file, or declare the " \
+            "model in bf16 and let it be quantized when it is read."
+    end
+
+    # The engine's pattern language (`plan.rs` `Pattern`): a path, or a
+    # prefix ending in `*`.
+    def self.matches?(pattern, path)
+      pattern.end_with?("*") ? path.start_with?(pattern.delete_suffix("*")) : path == pattern
+    end
+
     # Opens the engine the way this source is read.
     def open(config, optimizer, seed)
       rule = JSON.generate(optimizer)

@@ -3808,3 +3808,44 @@ safetensors + 1_Pooling)は無変換で載る」を満たす出口を `Session#e
   で読むと `__metadata__` が `null` で入る (mlx-rs の仕様) ことに注意。
 
 この時点で Ruby 231 件 / Rust 121 件 (lib、`--test-threads=1`)。
+
+### 15.76 QLoRA、Phase 0 と Phase 1(2026-11-08)
+
+計画と仕様は docs/qlora.md。ここには段取りの結果だけ書く。
+
+**Phase 0。** `engine/src/mlxc/quantized.rs` に `quantize` / `dequantize` /
+`quantized_matmul` の 3 束縛。`mlx_optional_int` は struct の値渡しで、bindgen が
+そのまま出した型に `{ value, has_value: true }` を詰めるだけだった(§6 の懸念は杞憂)。
+`libmlx.a` の CUDA カーネルは `affine_quantize<bf16|half, 32|64|128, 2..8>` が全部
+実体化されていて、qlora.md §2.3 で「見えない」と書いた g64 もあった。テストは
+往復誤差、packed と dequantize → matmul の一致、x の勾配、**weight の勾配は MLX が断る**、
+**scales / biases の勾配は MLX が返す**(方針として Torobi が断る)、の 6 つ。
+
+**Phase 1。** 足したのは op 1 つ(`quantized_matmul`)、dtype 1 つ(`u32`)、読み込みの
+規則 1 つ(qlora.md §3.4 (A'))。設計で 2 つ変えた。
+
+- (A') の `group_size` / `bits` は graph から渡さず、**ファイルの形から逆算する**。
+  packed `[d_out, d_in × bits / 32]` と宣言 `[d_out, d_in]` で bits が、scales の
+  `[d_out, d_in / group_size]` で group_size が決まる。ファイルがどう量子化されたかを
+  知っているのはファイルだけで、graph に書かせると 2 つの真実ができる。
+- `Source::materialize` は `self` を消費する。ファイルの配列ハンドルは map から
+  `remove` して parameter に渡し、eval の前に source ごと手放す。dequantize した
+  embedding の元の packed が、eval が終わっても map に残る形を塞いだ。
+
+`fetch` は packed を dequantize した f32 を返す(Phase 3 から前倒し)。そのために
+`Plan` が `quantized_matmul` の入力を parameter node まで辿って、packed → (scales,
+biases, quantization) の表を持つ。`put` と `export` は u32 を断り、`param_norm` は
+u32 を除く。`thaw` は candidates(宣言 trainable)だけを動かすので、u32 には元から
+届かない。`GraphConfig` は「u32 が trainable」を、`Weights#check_fresh!` は
+「fresh: が u32 を名指す」を断る。
+
+数字: Qwen2.5-0.5B の宣言は bf16 0.92 GiB → 4 bit g64 で **0.44 GiB**(embedding は
+bf16 のまま。全部 4.5 bit なら 0.26 GiB だが、embedding は量子化しない)。テストは
+Ruby 15 件(全部 engine 無しで走る)、Rust 14 件。
+
+**まだ確かめていないこと。** この作業は GPU の無い Linux の箱で行い、Rust は
+`cargo check --tests` まで(CI の ubuntu と同じ「bind まで」、link はこの箱では
+CUDA のライブラリが入らず未確認)。Rust のテストと、`mlx-community/Qwen2.5-0.5B-Instruct-4bit`
+の inventory(`tools/inventory.rb`、Hub に届く機械が要る)と forward の比較は、
+Mac か RTX 3080 機で走らせて初めて言える。qlora.md Phase 1 の表の「Linux で同じスイート」
+はまだ空欄である。

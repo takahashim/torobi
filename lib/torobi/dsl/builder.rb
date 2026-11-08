@@ -25,6 +25,12 @@ module Torobi
         def self.wraps?(_path) = false
       end
 
+      # The same for how the base is held when nothing is quantized:
+      # every linear holds its weight as declared (`Torobi::Quantization`).
+      module NoQuantization
+        def self.wraps?(_path) = false
+      end
+
       # `models` is the set an objective may read outputs from; a model
       # graph is built with none.
       def initialize(models: {})
@@ -37,6 +43,7 @@ module Torobi
         @sharing = 0
         @labels = []
         @adapter = NoAdapter
+        @quantization = NoQuantization
       end
 
       # --- graph boundary ---
@@ -200,6 +207,38 @@ module Torobi
         end
       end
 
+      # Builds a graph with the base held quantized, so that every linear
+      # the quantization names is three frozen parameters and a packed
+      # matmul rather than a weight (`Torobi::Quantization`,
+      # docs/qlora.md).
+      #
+      # Written outside `adapting`, as "how the base is held" comes
+      # before "what is trained", though either order builds the same
+      # graph: a quantized parameter is frozen by declaration, and the
+      # adapter's own parameters are not linears.
+      #
+      #   Torobi.graph do |g|
+      #     g.quantized(quant) do
+      #       g.adapting(adapter) { ... the model ... }
+      #     end
+      #   end
+      #
+      # `nil` quantizes nothing, so a builder that always writes this
+      # reads the same either way.
+      def quantized(quantization)
+        return yield if quantization.nil?
+        unless @quantization.equal?(NoQuantization)
+          raise ConfigError, "a quantization is already in scope"
+        end
+
+        @quantization = quantization
+        begin
+          yield
+        ensure
+          @quantization = NoQuantization
+        end
+      end
+
       # --- primitive joins ---
 
       def matmul(a, b) = emit("matmul", inputs: [a, b])
@@ -349,8 +388,10 @@ module Torobi
       def scoped(name) = (@scopes + [name.to_s]).join(".")
 
       # The adapter in scope (`NoAdapter` when there is none), for a layer
-      # that may be adapted.
-      attr_reader :adapter
+      # that may be adapted, and the quantization in scope
+      # (`NoQuantization` when there is none), for a layer that may be
+      # held packed.
+      attr_reader :adapter, :quantization
 
       def own!(handle, where:)
         unless handle.is_a?(Handle)

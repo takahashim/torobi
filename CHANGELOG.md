@@ -48,6 +48,19 @@ between two versions people have.
   exactly the model it adapts, and training leaves the base bytes alone.
   On Qwen2.5-0.5B with rank 8 over q_proj and v_proj that is 0.109% of
   the parameters.
+- **`Torobi::Quantization`**, a base held at a few bits a weight
+  (QLoRA, docs/qlora.md): `g.quantized(quant) { ... }` in the model
+  description and `causal_lm(quantization:)` for whoever is doing the
+  fine-tune. A quantized linear is three frozen parameters named as
+  mlx-lm's `*-4bit` checkpoints name them and one `quantized_matmul`,
+  so a published 4-bit file imports with no renaming; a weight the file
+  holds packed and the graph holds as numbers (the embedding, tied head
+  included) is dequantized as it is read. `fetch` returns the numbers a
+  packed weight stands for; `put` and `export_model!` refuse it. On
+  Qwen2.5-0.5B at 4 bits in groups of 64 that is 0.92 GiB to 0.44 GiB,
+  the embedding still in bf16. Reading a bf16 checkpoint into a
+  quantized model (quantizing as it is read) and exporting an adapter
+  are not in yet.
 - **`Torobi::Models::Gemma3`**, which is deliberately not one of the
   above: four norms a layer rather than two, q and k normalized per
   head, norms that scale by `1 + w`, the tanh approximation of GELU, and

@@ -268,6 +268,11 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
         // the graph says where a model's precision changes.
         Op::Cast(to) => ins[0].as_dtype(*to)?,
         Op::Matmul => ins[0].matmul(&ins[1])?,
+        // The weight is a linear's [d_out, d_in], so it is always read
+        // transposed; the IR has no attribute for it (config/ops.yml).
+        Op::QuantizedMatmul(quantization) => {
+            crate::mlxc::quantized::quantized_matmul(&ins[0], &ins[1], &ins[2], ins.get(3), true, *quantization)?
+        }
         // An embedding: rows of the table, selected by i32 ids. The
         // gradient reaches only the rows that were read.
         Op::Take => ins[0].take_axis(&ins[1], 0)?,

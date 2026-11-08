@@ -15,10 +15,17 @@ module Torobi
     module Layers
       def linear(x, d_out, name:, bias: true)
         d_in = concrete_last_dim!(x, "linear #{scoped(name).inspect}")
-        # PyTorch layout [d_out, d_in], so pretrained checkpoints map 1:1.
-        w = param("#{name}.weight", [d_out, d_in], dtype: x.dtype,
-                  init: { "type" => "kaiming_uniform" })
-        y = matmul(x, w.transpose(axes: [1, 0]))
+        y = if quantization.wraps?(scoped(name))
+              # Three frozen parameters and a packed matmul
+              # (`Torobi::Quantization#apply`). The bias below and the
+              # adapter's contribution are untouched: neither is quantized.
+              quantization.apply(self, x, d_in:, d_out:, name:)
+            else
+              # PyTorch layout [d_out, d_in], so pretrained checkpoints map 1:1.
+              w = param("#{name}.weight", [d_out, d_in], dtype: x.dtype,
+                        init: { "type" => "kaiming_uniform" })
+              matmul(x, w.transpose(axes: [1, 0]))
+            end
         y += param("#{name}.bias", [d_out], dtype: x.dtype, init: { "type" => "zeros" }) if bias
         y += adapter.contribution(self, x, d_in:, d_out:, name:) if adapter.wraps?(scoped(name))
         y.named(name)

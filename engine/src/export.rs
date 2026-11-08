@@ -91,6 +91,23 @@ pub fn write(plan: &Plan, params: &[Array], model: &str, dir: &str) -> Result<Ve
 /// that prefix and the keys line up with the published layout.
 fn published(plan: &Plan, params: &[Array], model: &Model) -> Result<Vec<(String, Array)>> {
     let prefix = format!("{}.", model.name);
+    // A packed quantized weight written as f32 would be its words as
+    // numbers: a file that loads and is not the model. Until an export
+    // can merge an adapter into a dequantized base (docs/qlora.md,
+    // Phase 3), a quantized model is not exported.
+    if let Some(path) = plan.paths[model.slice.clone()]
+        .iter()
+        .zip(&params[model.slice.clone()])
+        .find(|(_, array)| array.dtype() == Dtype::Uint32)
+        .map(|(path, _)| path)
+    {
+        anyhow::bail!(
+            "model {:?} holds {path:?} quantized (a packed u32 weight), and an export writes \
+             f32 numbers. A quantized base is not exported; the checkpoint holds it, and what \
+             a fine-tune of one produces is its adapter.",
+            model.name
+        );
+    }
     let owned: Vec<(String, Array)> = plan.paths[model.slice.clone()]
         .iter()
         .zip(&params[model.slice.clone()])
@@ -113,6 +130,21 @@ mod tests {
     use crate::fixtures;
     use crate::plan::Weights;
     use crate::tensor::{to_tensor, Values};
+
+    /// A quantized base written as f32 would be its words as numbers:
+    /// refused, naming the parameter, until an export can merge.
+    #[test]
+    fn a_quantized_model_is_not_exported() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = std::collections::BTreeMap::from([("m".to_string(), fixtures::quantized::file(dir.path(), false))]);
+        let (plan, params) =
+            Plan::open(&fixtures::quantized::config(), Weights::Pretrained { files: &files, fresh: &[] }).unwrap();
+        let said = write(&plan, &params, "m", dir.path().join("out").to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(said.contains("\"m.proj.weight\" quantized"), "{said}");
+        assert!(!dir.path().join("out").join("model.safetensors").exists(), "nothing was written");
+    }
 
     fn open(which: (String, String)) -> (Plan, Vec<Array>) {
         let (config, weights) = which;

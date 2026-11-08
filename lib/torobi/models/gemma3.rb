@@ -115,24 +115,26 @@ module Torobi
       # The language model: token ids in, one score per token of the
       # vocabulary out, at every position. The loss is the recipe's
       # (`Models::Llama#causal_lm` says what that looks like).
-      def causal_lm(config, seq:, rows: nil, adapter: nil, dtype: :f32)
+      def causal_lm(config, seq:, rows: nil, adapter: nil, dtype: :f32, quantization: nil)
         config.check!
         build = Build.new(seq:, rows:, dtype:)
-        Torobi.graph { |g| Describe.new(g, config, build).causal_lm(adapter) }
+        Torobi.graph { |g| Describe.new(g, config, build).causal_lm(adapter, quantization) }
       end
 
       # The description itself: the builder, the config and what it is
       # built for are held once (`Models::Description`), so what a method
       # takes is the value flowing through it.
       class Describe < Description
-        def causal_lm(adapter)
-          hidden = adapting adapter do
-            encoded = scope "model" do
-              encode
+        def causal_lm(adapter, quantization = nil)
+          quantized quantization do
+            hidden = adapting adapter do
+              encoded = scope "model" do
+                encode
+              end
+              encoded.named("hidden")
             end
-            encoded.named("hidden")
+            output :logits, head(hidden)
           end
-          output :logits, head(hidden)
         end
 
         def head(hidden)

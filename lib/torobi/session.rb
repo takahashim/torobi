@@ -119,7 +119,7 @@ module Torobi
     def self.open(config, weights: nil, weights_file: nil, pretrained: nil, fresh: [],
                   optimizer: DEFAULT_OPTIMIZER, seed: DEFAULT_SEED,
                   journal: nil, io: nil, dataset: nil, observer: nil)
-      source = Weights.of(weights:, weights_file:, pretrained:, fresh:)
+      source = Weights.of(weights:, weights_file:, pretrained:, fresh:).check_fresh!(config)
       Preflight.check!
       native = source.open(config, optimizer, seed)
       # Gathered whether or not anything is journalling: a checkpoint

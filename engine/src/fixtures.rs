@@ -266,3 +266,110 @@ pub fn reader_before_producer() -> (String, String) {
     .to_string();
     (config, weights)
 }
+
+/// A linear held quantized (docs/qlora.md), and the file it is read from.
+///
+/// `proj` is three frozen parameters (a packed u32 weight, scales and
+/// biases, 4 bits in groups of 32 over a width of 64) read by one
+/// `quantized_matmul`; `emb` is declared as f32 numbers; `head` is the
+/// one trainable parameter, so a step has something to move and the
+/// base something to be left alone against.
+pub mod quantized {
+    use super::*;
+    use crate::mlxc::quantized::{quantize, Mode, Quantization};
+    use crate::mlxc::Array;
+
+    pub const D_IN: usize = 64;
+    pub const D_OUT: usize = 8;
+    pub const EMB_ROWS: usize = 4;
+    pub const QUANTIZATION: Quantization = Quantization { group_size: 32, bits: 4, mode: Mode::Affine };
+
+    fn typed(id: usize, path: &str, shape: Value, dtype: &str, trainable: bool) -> Value {
+        let mut spec = parameter(id, path, shape, trainable);
+        spec["dtype"] = json!(dtype);
+        spec
+    }
+
+    pub fn config() -> String {
+        let graph = json!({
+            "inputs": [input(0, "x", json!([null, D_IN]), "f32")],
+            "parameters": [
+                typed(0, "proj.weight", json!([D_OUT, D_IN * 4 / 32]), "u32", false),
+                typed(1, "proj.scales", json!([D_OUT, D_IN / 32]), "f32", false),
+                typed(2, "proj.biases", json!([D_OUT, D_IN / 32]), "f32", false),
+                typed(3, "emb.weight", json!([EMB_ROWS, D_IN]), "f32", false),
+                parameter(4, "head.weight", json!([D_OUT]), true),
+            ],
+            "nodes": [
+                node(0, "parameter", json!([]), json!([0])),
+                node(1, "parameter", json!([]), json!([1])),
+                node(2, "parameter", json!([]), json!([2])),
+                node(3, "parameter", json!([]), json!([3])),
+                node(4, "parameter", json!([]), json!([4])),
+                {
+                    "id": 5, "op": "quantized_matmul", "name": "projected",
+                    "inputs": ["input:0", "node:0", "node:1", "node:2"], "parameters": [],
+                    "attributes": {"group_size": 32, "bits": 4, "mode": "affine"},
+                },
+                node(6, "mul", json!(["node:5", "node:4"]), json!([])),
+                node(7, "mean", json!(["node:6"]), json!([])),
+            ],
+            "outputs": {"loss": "node:7"},
+        });
+        super::config(json!({"m": graph}), Value::Null, json!(["m"]))
+    }
+
+    /// The numbers `proj` stands for, before quantization: row r in
+    /// `[-(r + 1) / D_OUT, (r + 1) / D_OUT]`, off the grid.
+    pub fn weight(rows: usize) -> Vec<f32> {
+        (0..rows * D_IN)
+            .map(|i| {
+                let (r, c) = (i / D_IN, i % D_IN);
+                (r + 1) as f32 / rows as f32 * ((c as f32 * 0.37 + r as f32 * 1.3).sin())
+            })
+            .collect()
+    }
+
+    /// Writes the file a published checkpoint of this model would be:
+    /// `proj` quantized, `head` as numbers, and `emb` as numbers or, as
+    /// mlx-lm publishes an embedding, quantized too. Returns the path.
+    pub fn file(dir: &std::path::Path, embedding_packed: bool) -> std::path::PathBuf {
+        let proj = Array::from_slice(&weight(D_OUT), &[D_OUT as i32, D_IN as i32]).unwrap();
+        let proj = quantize(proj, QUANTIZATION).unwrap();
+        let emb = Array::from_slice(&weight(EMB_ROWS), &[EMB_ROWS as i32, D_IN as i32]).unwrap();
+        let mut named = vec![
+            ("proj.weight", proj.weight),
+            ("proj.scales", proj.scales),
+            ("proj.biases", proj.biases.unwrap()),
+            ("head.weight", Array::from_slice(&[1.0f32; D_OUT], &[D_OUT as i32]).unwrap()),
+        ];
+        if embedding_packed {
+            let packed = quantize(emb, QUANTIZATION).unwrap();
+            named.push(("emb.weight", packed.weight));
+            named.push(("emb.scales", packed.scales));
+            named.push(("emb.biases", packed.biases.unwrap()));
+        } else {
+            named.push(("emb.weight", emb));
+        }
+        let path = dir.join("model.safetensors");
+        Array::save_safetensors(named.iter().map(|(n, a)| (*n, a)), None, &path).unwrap();
+        path
+    }
+
+    /// The same file with `emb` replaced: what a file that is wrong in
+    /// one way looks like.
+    pub fn file_with(dir: &std::path::Path, emb: Vec<(&str, Array)>) -> std::path::PathBuf {
+        let proj = Array::from_slice(&weight(D_OUT), &[D_OUT as i32, D_IN as i32]).unwrap();
+        let proj = quantize(proj, QUANTIZATION).unwrap();
+        let mut named = vec![
+            ("proj.weight", proj.weight),
+            ("proj.scales", proj.scales),
+            ("proj.biases", proj.biases.unwrap()),
+            ("head.weight", Array::from_slice(&[1.0f32; D_OUT], &[D_OUT as i32]).unwrap()),
+        ];
+        named.extend(emb);
+        let path = dir.join("model.safetensors");
+        Array::save_safetensors(named.iter().map(|(n, a)| (*n, a)), None, &path).unwrap();
+        path
+    }
+}
