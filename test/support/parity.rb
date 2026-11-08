@@ -202,15 +202,30 @@ module Parity
   # implementation of it (a published 4-bit file against mlx-lm,
   # docs/qlora.md Phase 1).
   #
-  # Measured (2026-11-08, Qwen2.5-0.5B-Instruct-4bit): the hidden states
-  # differ by 3.3e-2 against mlx-lm, and by 4.2e-2 between Torobi reading
-  # the same file packed and reading it as numbers. That second number
-  # is the floor: the two readings differ only by rounding each weight to
-  # bf16 once, and still come apart this far, because Qwen2.5's residual
-  # stream holds values near 200 where a bf16 step is 1.0, and 24 layers
-  # of bf16 adds walk a few steps. Anything wired differently is off by
-  # the scale itself, not by a twentieth of it. The f32 comparison beside
-  # it (`PARITY`) is what holds the wiring; this holds the bf16 path to
-  # being the same model.
+  # Measured (2026-11-08, Qwen2.5-0.5B-Instruct-4bit, MARGIN=1): the
+  # scores at the last position differ from mlx-lm's by 8.2e-3 and the
+  # next token agrees; the hidden states differ by 3.3e-2 and 5.9e-2
+  # against mlx-lm, and by 4.2e-2 between Torobi reading the same file
+  # packed and reading it as numbers. That last number is the floor: the
+  # two readings differ only by rounding each weight to bf16 once, and
+  # still come apart this far, because Qwen2.5's residual stream holds
+  # values near 200 where a bf16 step is 1.0, and 24 layers of bf16 adds
+  # walk a few steps. The scores are a projection of that stream and
+  # average the walk out, which is why they get the tighter of the two.
+  # Anything wired differently is off by the scale itself, not by a tenth
+  # of it; the f32 comparison beside these (`PARITY_PACKED`) is what
+  # holds the wiring, and these hold the bf16 path to being the same
+  # model.
   PARITY_BF16 = 5e-2
+  PARITY_BF16_HIDDEN = 1e-1
+
+  # The packed matmul against the same weights unpacked, both in f32.
+  # The kernel takes `scale · (x · q) + bias · Σx` per group and the
+  # other side forms `scale · q + bias` first, so the two differ in the
+  # association of f32 arithmetic and in nothing else; measured at
+  # 1.5e-4 on the hidden states and 9.3e-5 on the scores (2026-11-08),
+  # which is ten times what two implementations of the bf16 model showed
+  # (`PARITY`) and three orders below a wiring mistake. Wider than
+  # `PARITY` so another machine's kernels have room.
+  PARITY_PACKED = 1e-3
 end

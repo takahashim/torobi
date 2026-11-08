@@ -460,7 +460,7 @@ g64 の CUDA カーネルは `nm` で確認した(§2.3)。**どの行もまだ 
 | --- | --- |
 | 同じ記述、1/2.1 のバイト数 | 公開 config に対して 0.92 GiB → **0.44 GiB**(embedding は bf16。§1.2)。`bf16_test.rb` と同じ数え方 |
 | **量子化された embedding を読んで bf16 の表になる** | (A') の規則。`embed_tokens.weight` が u32 のファイルから、宣言どおり bf16 `[vocab, dim]` が出る。tied なので `lm_head` もこの表で動く(§3.5) |
-| **forward が mlx-lm と一致する** | 同じ 4 bit ファイル、同じ入力で logits を比べる。bf16 で 1e-2。oracle は `tools/` に生成手順を置き、`test/oracle/` に JSON で残す(transformers の forward oracle と同じ形) |
+| **forward が mlx-lm と一致する** | 同じ 4 bit ファイル、同じ入力で logits を比べる。oracle は `tools/qlora_reference.py`、`test/oracle/` に JSON。**実測**: 次のトークン一致、logits 8.2e-3、hidden 3.3e-2 / 5.9e-2(bf16 の揺れ。§9)。配線は f32 の packed 対 数値読みで 1.5e-4 |
 | adapter だけが微分される | 宣言でも、開いた run の `trainable` でも。量子化パラメータは 3 つとも入らない |
 | 学習は adapter を動かし、base は 1 バイトも動かない | `fetch` が返す dequantize 値と scales / biases を step 前後で比べる。packed そのものは checkpoint を書いて safetensors のバイトで比べる |
 | u32 の parameter を trainable にした宣言は構築時に断られる | 手書き IR で。step ではなく `GraphConfig` で |
@@ -609,10 +609,13 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
   (packed と数値読み、bf16)で 4.2e-2(どちらも最大値 207 に対する比)。後者が床で、
   2 つの読み方の違いは重みを bf16 に 1 回丸めるかどうかだけなのにここまで開く。原因は
   Qwen2.5 の残差ストリームに 200 前後の値があり、bf16 の刻みがそこで 1.0 なので、24 層の
-  bf16 加算で数刻み分歩くこと。配線の違いなら差は桁で出る。許容は 1e-2 から
-  `PARITY_BF16 = 5e-2` に直し、配線そのものは **f32 で packed と数値読みを比べるテスト**
-  (`PARITY = 2e-4`。両者の違いは演算順だけ)が持つ。logits は bf16 では次のトークンの
-  一致と id ごとの値で見る(上位 10 の集合は丸めで入れ替わり得る)。
+  bf16 加算で数刻み分歩くこと。配線の違いなら差は桁で出る。
+  **2 回目(MARGIN=1)**: f32 で packed と数値読みを比べると hidden 1.5e-4、logits 9.3e-5
+  (`PARITY_PACKED = 1e-3`。両者の違いは f32 の結合順だけ)。**配線は正しい。** bf16 で
+  mlx-lm とは、次のトークンが一致し、logits の差 8.2e-3(`PARITY_BF16 = 5e-2`)、hidden は
+  3.3e-2 と 5.9e-2(`PARITY_BF16_HIDDEN = 1e-1`。hidden は残差ストリームの外れ値次元の
+  ulp の揺れをそのまま受け、logits はその射影で平均される)。上位 10 の集合は bf16 では
+  要求しない(丸めで入れ替わり得る)。
 - **Linux の `cargo test --no-run`(link)** もこの箱では未確認。CI の ubuntu が見る。
 - **Phase 2 の実測**(7B を RTX 3080 で、32B を Mac 48 GB で開いて `Torobi::Memory` を
   読む)は未着手。§1.2 の表はまだ見込みのまま。Rust の memory テストは小さい行列で
