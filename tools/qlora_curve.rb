@@ -20,6 +20,11 @@
 #                                              [--bits 4] [--group-size 64] [--holdout 8]
 #   ruby tools/qlora_curve.rb <checkpoint-dir> --synthetic
 #
+# `--reference 8` takes the reference run with the base at 8 bits rather
+# than in bf16, for a model whose bf16 run does not fit: on Qwen2.5-0.5B
+# an 8-bit base tracked a bf16 one to 0.08% of held-out loss over 300
+# steps (docs/qlora.md section 9), so it stands in for it.
+#
 # The held-out chunks are evaluated `--batch` at a time, never all at
 # once: one evaluation of 32 chunks held 32 × 128 × 152k scores in f32
 # (2.5 GB) and their intermediates on top, which took down a 16 GB Mac
@@ -43,7 +48,8 @@ require "optparse"
 abort "the engine is not compiled (rake compile)" unless defined?(Torobi::Session)
 
 options = { steps: 300, seq: 128, batch: 4, eval_every: 25, lr: 1e-4, rank: 8,
-            on: %w[q_proj v_proj], bits: 4, group_size: 64, holdout: 8, seed: 42, max_gib: 8.0 }
+            on: %w[q_proj v_proj], bits: 4, group_size: 64, holdout: 8, seed: 42, max_gib: 8.0,
+            reference: "bf16" }
 OptionParser.new do |o|
   o.on("--ids PATH") { |v| options[:ids] = v }
   o.on("--synthetic") { options[:synthetic] = true }
@@ -59,6 +65,7 @@ OptionParser.new do |o|
   o.on("--holdout N", Integer) { |v| options[:holdout] = v }
   o.on("--seed N", Integer) { |v| options[:seed] = v }
   o.on("--max-gib X", Float) { |v| options[:max_gib] = v }
+  o.on("--reference KIND", %w[bf16 8]) { |v| options[:reference] = v }
 end.parse!
 USAGE = "usage: qlora_curve.rb <checkpoint-dir> (--ids ids.json | --synthetic) [options]"
 dir = ARGV.first or abort USAGE
@@ -148,6 +155,10 @@ end
 
 adapter = Torobi::LoRA.new(rank: options[:rank], alpha: options[:rank] * 2, on: options[:on])
 quantization = Torobi::Quantization.new(bits: options[:bits], group_size: options[:group_size])
+reference = (if options[:reference] == "8"
+               Torobi::Quantization.new(bits: 8,
+                                        group_size: options[:group_size])
+             end)
 
 def run_of(config, seq:, adapter:, quantization:)
   graph = Torobi::Models::Llama.causal_lm(config, seq:, dtype: :bf16, quantization:, adapter:)
@@ -164,7 +175,7 @@ end
 
 curves = {}
 %i[bf16 quantized].each do |base|
-  run = run_of(config, seq:, adapter:, quantization: base == :quantized ? quantization : nil)
+  run = run_of(config, seq:, adapter:, quantization: base == :quantized ? quantization : reference)
   losses = []
   evals = {}
   started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -190,7 +201,9 @@ end
 
 # --- side by side ---
 
-puts "  step        bf16        4bit   bf16 held   4bit held"
+first = options[:reference] == "8" ? "8bit" : "bf16"
+second = "#{options[:bits]}bit"
+puts format("%6s  %10s  %10s  %10s  %10s", "step", first, second, "#{first} held", "#{second} held")
 steps = curves[:bf16][:evals].keys
 steps.each do |step|
   loss = ->(base) { step.zero? ? Float::NAN : curves[base][:losses][step - 1] }
@@ -204,6 +217,7 @@ held = ->(base) { curves[base][:evals].values.last }
 summary = {
   steps: options[:steps], seq:, batch: options[:batch], rank: options[:rank], on: options[:on],
   quantization: { bits: options[:bits], group_size: options[:group_size] },
+  reference: options[:reference],
   train_loss_last_steps: { bf16: last.call(:bf16).round(4),
                            quantized: last.call(:quantized).round(4) },
   heldout_loss: { bf16: held.call(:bf16).round(4), quantized: held.call(:quantized).round(4) },

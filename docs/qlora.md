@@ -732,3 +732,14 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
   量子化で失う分より、adapter を広げて得る分の方が大きい。
   選び方: メモリに余裕があれば 8 bit(劣化なし。32B で約 33 GiB)、無ければ 4 bit +
   全 linear の adapter(32B で約 18 GiB)。
+- **1.5B は bf16 の run が 16 GB に載らなかった(同日)。** 全 linear の adapter、seq 128 で、
+  1 step の peak が batch 4 で 12.69 GiB、batch 2 で 10.88 GiB(`--max-gib` で止めた)。
+  1 行あたりの活性は約 0.9 GiB で、batch 0 に外挿すると **約 9 GiB が batch によらず
+  固定でかかっている**。bf16 の重みは 2.9 GiB しかなく、9 GiB は「重み + その f32 の
+  コピー(5.8 GiB)」にほぼ等しい。step の中で全パラメータを f32 にする箇所はコード上
+  見つからなかった(`global_norm` は勾配だけ、`param_norm` は学習中に呼ばれない)ので、
+  原因は未特定。**7B の見込み(開くのに 4.9 GiB、seq 128 の step は 16 GB に収まる)は、
+  この固定分が重みに比例するなら外れる。** 切り分けは `qlora_memory.rb` を 0.5B / 1.5B、
+  bf16 / 4 bit で並べて、`stepped` の peak が重みのどの倍数になるかで見る。
+  比較そのものは、0.5B で 8 bit が bf16 と区別がつかなかったことを根拠に、基準を 8 bit
+  にして進める(`qlora_curve.rb --reference 8`)。
