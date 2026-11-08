@@ -677,3 +677,9 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
   `adapter_config.json` の綴りは PEFT の `LoraConfig` の記憶に基づくので、読めなければ
   `Export.adapter_config` を直す。mlx-lm の adapter 形式(`adapters.safetensors`、
   `adapter_config.json` の `lora_parameters`)は別物で、やっていない。
+- **実テキストの初回で Mac が落ちた(2026-11-08)。** `--holdout 32` にしたところ、
+  `qlora_curve.rb` が held-out の 32 chunk を 1 回の evaluate にまとめていたので、logits
+  だけで 32 × 128 × 152k × f32 = 2.5 GB、中間値を含めると 16 GB の unified memory を超えた
+  と見ている(確認はしていない)。held-out は `--batch` ずつに分けて評価し、chunk 数で
+  重み付けした平均を取るように直した。step の間で peak が `--max-gib`(既定 8)を超えたら
+  止まる。

@@ -20,6 +20,12 @@
 #                                              [--bits 4] [--group-size 64] [--holdout 8]
 #   ruby tools/qlora_curve.rb <checkpoint-dir> --synthetic
 #
+# The held-out chunks are evaluated `--batch` at a time, never all at
+# once: one evaluation of 32 chunks held 32 × 128 × 152k scores in f32
+# (2.5 GB) and their intermediates on top, which took down a 16 GB Mac
+# (2026-11-08). `--max-gib` (default 8) stops the run, between steps,
+# once the device's peak passes it, before the next step can go further.
+#
 # `--ids` is a JSON array of documents, each an array of token ids
 # (`tools/tokenize_ids.py` makes one from text). Torobi never tokenizes.
 # `--synthetic` draws sequences from a fixed second-order Markov chain
@@ -34,7 +40,7 @@ require "optparse"
 abort "the engine is not compiled (rake compile)" unless defined?(Torobi::Session)
 
 options = { steps: 300, seq: 128, batch: 4, eval_every: 25, lr: 1e-4, rank: 8,
-            on: %w[q_proj v_proj], bits: 4, group_size: 64, holdout: 8, seed: 42 }
+            on: %w[q_proj v_proj], bits: 4, group_size: 64, holdout: 8, seed: 42, max_gib: 8.0 }
 OptionParser.new do |o|
   o.on("--ids PATH") { |v| options[:ids] = v }
   o.on("--synthetic") { options[:synthetic] = true }
@@ -49,6 +55,7 @@ OptionParser.new do |o|
   o.on("--group-size N", Integer) { |v| options[:group_size] = v }
   o.on("--holdout N", Integer) { |v| options[:holdout] = v }
   o.on("--seed N", Integer) { |v| options[:seed] = v }
+  o.on("--max-gib X", Float) { |v| options[:max_gib] = v }
 end.parse!
 USAGE = "usage: qlora_curve.rb <checkpoint-dir> (--ids ids.json | --synthetic) [options]"
 dir = ARGV.first or abort USAGE
@@ -101,7 +108,30 @@ order = Random.new(options[:seed])
 batches = Array.new(options[:steps]) do
   batch_of(config, Array.new(options[:batch]) { training[order.rand(training.size)] }, seq:)
 end
-heldout_batch = batch_of(config, heldout, seq:)
+# The held-out chunks in batches no larger than a training step's, so an
+# evaluation never needs more than a step does.
+heldout_batches = heldout.each_slice(options[:batch]).map do |slice|
+  [slice.size, batch_of(config, slice, seq:)]
+end
+
+# The mean loss over every held-out chunk: each batch's mean, weighted by
+# how many chunks it holds (every position of a chunk is kept).
+def heldout_loss(session, batches)
+  total = batches.sum { |rows, _| rows }
+  batches.sum { |rows, batch| session.evaluate(batch) * rows } / total
+end
+
+# Stops the run once the device has held more than `max_gib`: checked
+# between steps, so it cannot stop a step that is already too large, but
+# it stops the next one.
+def guard!(max_gib, where)
+  peak = Torobi::Memory.peak / (1024.0**3)
+  return if peak <= max_gib
+
+  abort format("stopped at %s: the device peaked at %.2f GiB, over --max-gib %.1f. " \
+               "Shorten --seq or --batch, or raise --max-gib if the machine has room.",
+               where, peak, max_gib)
+end
 
 # --- the two runs ---
 
@@ -129,13 +159,14 @@ curves = {}
   started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   Torobi::Session.open(run, pretrained: { m: dir }, fresh: adapter.fresh(run), seed: options[:seed],
                             optimizer: { kind: :adamw, lr: options[:lr] }) do |s|
-    evals[0] = s.evaluate(heldout_batch)
+    evals[0] = heldout_loss(s, heldout_batches)
+    guard!(options[:max_gib], "#{base}, before training")
     batches.each_with_index do |batch, i|
       losses << s.step!(batch)
       step = i + 1
+      guard!(options[:max_gib], "#{base}, step #{step}")
       if (step % options[:eval_every]).zero? || step == batches.size
-        evals[step] =
-          s.evaluate(heldout_batch)
+        evals[step] = heldout_loss(s, heldout_batches)
       end
       warn format("%-9s step %4d  loss %.4f%s", base, step, losses.last,
                   evals[step] ? format("  held-out %.4f", evals[step]) : "")
