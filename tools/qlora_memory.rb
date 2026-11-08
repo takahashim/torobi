@@ -33,7 +33,8 @@ require "optparse"
 
 abort "the engine is not compiled (rake compile)" unless defined?(Torobi::Session)
 
-options = { seq: 512, bits: 4, group_size: 64, rank: 8, on: %w[q_proj v_proj], bf16: false, open_only: false }
+options = { seq: 512, bits: 4, group_size: 64, rank: 8, on: %w[q_proj v_proj], bf16: false,
+            open_only: false }
 OptionParser.new do |o|
   o.on("--seq N", Integer) { |v| options[:seq] = v }
   o.on("--bits N", Integer) { |v| options[:bits] = v }
