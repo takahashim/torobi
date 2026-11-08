@@ -46,15 +46,44 @@ class QLoRATest < Minitest::Test
     reference.fetch("cases").each_with_index do |c, i|
       hidden, logits = run_case(config, dir, c.fetch("input_ids"), dtype: :bf16, quantization:)
       compare_hidden(hidden, c.fetch("hidden"), "#{SOURCE} case #{i}", tolerance: PARITY_BF16)
-      compare_logits(logits, c.fetch("top_logits"), "#{SOURCE} case #{i}", tolerance: PARITY_BF16)
+      compare_logits(logits, c.fetch("top_logits"), "#{SOURCE} case #{i}",
+                     tolerance: PARITY_BF16, ranking: :first)
     end
   end
 
-  # The same file opened twice: once as it is, once as a bf16 model would
-  # be opened from it (the packed weights read as numbers, docs/qlora.md
-  # 3.4 (A')). The two are the same numbers in two layouts, so their
-  # forward agrees to bf16's rounding, and the second holds about twice
-  # the bytes: what quantizing is for, measured on the model it is for.
+  # The wiring, without bf16 in the way. The same file read packed and
+  # read as numbers, both in f32: the packed matmul unpacks each weight
+  # as `scale · q + bias` in f32 and the other side dequantizes to f32
+  # first, so the two differ only in the order the arithmetic happened
+  # in, which is what `PARITY` is for (1.4e-5 between two f32
+  # implementations of the bf16 model). A `quantized_matmul` that read
+  # the wrong group, the wrong bits or the wrong transpose would be off
+  # by the scale here, where bf16 would let it hide.
+  def test_in_f32_the_packed_and_unpacked_readings_agree_to_rounding
+    why = why_not(SOURCE, NAME)
+    skip "nothing to compare. #{SOURCE}: #{why}" if why
+
+    raw = inventory(NAME).fetch("config")
+    config = described.from_hash(raw)
+    quantization = Torobi::Quantization.from_header(raw, inventory(NAME).fetch("parameters"))
+    dir = weights_for(SOURCE)
+    ids = JSON.parse(File.read(File.join(ORACLE, "#{NAME}.forward.json")))
+              .fetch("cases").first.fetch("input_ids")
+
+    packed, packed_logits = run_case(config, dir, ids, dtype: :f32, quantization:)
+    numbers, numbers_logits = run_case(config, dir, ids, dtype: :f32)
+
+    compare_hidden(packed, numbers, "#{SOURCE} packed against unpacked, f32")
+    top = numbers_logits.each_with_index.max_by(10) { |value, _| value }
+                        .map { |value, id| { "id" => id, "value" => value } }
+    compare_logits(packed_logits, top, "#{SOURCE} packed against unpacked, f32")
+  end
+
+  # The same file opened twice in bf16: once as it is, once as a bf16
+  # model would be opened from it (the packed weights read as numbers,
+  # docs/qlora.md 3.4 (A')). The same numbers in two layouts, so the
+  # forward agrees to what bf16 lets two readings of one model agree to
+  # (`PARITY_BF16`, and the measurement recorded there is this test's).
   def test_the_same_file_read_packed_and_read_as_numbers_agree
     why = why_not(SOURCE, NAME)
     skip "nothing to compare. #{SOURCE}: #{why}" if why

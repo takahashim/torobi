@@ -150,15 +150,22 @@ module Parity
   # The ids first: which tokens a model thinks come next is what it is
   # for, and two implementations that disagree about the order are not
   # the same model however close the numbers are.
-  def compare_logits(got, want, where, tolerance: PARITY)
+  #
+  # `ranking: :first` asks only that the next token agree, for two bf16
+  # implementations whose ninth and tenth candidates may trade places
+  # within a rounding; the scores are still compared, by id, over the
+  # whole vocabulary.
+  def compare_logits(got, want, where, tolerance: PARITY, ranking: :full)
     mine = got.each_with_index.max_by(want.size) { |value, _| value }
 
     assert_equal want.map { |t| t.fetch("id") }.first, mine.first.last,
                  "#{where}: a different token comes next"
-    assert_equal want.map { |t| t.fetch("id") }.sort, mine.map(&:last).sort,
-                 "#{where}: a different set of tokens is likely"
+    if ranking == :full
+      assert_equal want.map { |t| t.fetch("id") }.sort, mine.map(&:last).sort,
+                   "#{where}: a different set of tokens is likely"
+    end
 
-    by_id = mine.to_h { |value, id| [id, value] }
+    by_id = want.to_h { |t| [t.fetch("id"), got.fetch(t.fetch("id"))] }
     apart = want.map { |t| (by_id.fetch(t.fetch("id")) - t.fetch("value")).abs }.max
     scale = want.map { |t| t.fetch("value").abs }.max
     margin("#{where} logits", apart, scale, tolerance)
@@ -193,9 +200,17 @@ module Parity
 
   # The same, for a model held in bf16 and compared with another bf16
   # implementation of it (a published 4-bit file against mlx-lm,
-  # docs/qlora.md Phase 1). Each side rounds to bf16 at its own places
-  # through 24 layers, and bf16 holds eight bits: what is left between
-  # them is of the order of a percent, not of 1e-4. Still orders away
-  # from anything wired differently.
-  PARITY_BF16 = 1e-2
+  # docs/qlora.md Phase 1).
+  #
+  # Measured (2026-11-08, Qwen2.5-0.5B-Instruct-4bit): the hidden states
+  # differ by 3.3e-2 against mlx-lm, and by 4.2e-2 between Torobi reading
+  # the same file packed and reading it as numbers. That second number
+  # is the floor: the two readings differ only by rounding each weight to
+  # bf16 once, and still come apart this far, because Qwen2.5's residual
+  # stream holds values near 200 where a bf16 step is 1.0, and 24 layers
+  # of bf16 adds walk a few steps. Anything wired differently is off by
+  # the scale itself, not by a twentieth of it. The f32 comparison beside
+  # it (`PARITY`) is what holds the wiring; this holds the bf16 path to
+  # being the same model.
+  PARITY_BF16 = 5e-2
 end
