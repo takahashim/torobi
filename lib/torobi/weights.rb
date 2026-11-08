@@ -18,6 +18,11 @@ module Torobi
   class Weights
     # Says which way, or refuses. `fresh` names the parameters meant to
     # be in no file, which only a published model can be missing.
+    #
+    # A `pretrained:` path is the model's `model.safetensors`, or the
+    # `model.safetensors.index.json` of one published in shards, or the
+    # directory holding either: a 7B model comes as four files and an
+    # index, and the engine reads them as one.
     def self.of(weights: nil, weights_file: nil, pretrained: nil, fresh: [])
       fresh = Array(fresh).map(&:to_s)
       if !fresh.empty? && pretrained.nil?

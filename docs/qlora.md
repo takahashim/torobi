@@ -619,8 +619,11 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
   「forward が mlx-lm と一致する」はこれで実測で埋まり、残りは下の 2 つだけである。
 - **Linux の `cargo test --no-run`(link)** もこの箱では未確認。CI の ubuntu が見る。
 - **Phase 2 の実測**(7B を RTX 3080 で、32B を Mac 48 GB で開いて `Torobi::Memory` を
-  読む)は未着手。§1.2 の表はまだ見込みのまま。Rust の memory テストは小さい行列で
-  「bf16 全体より小さい」を言うだけで、ピークの形は実物で見る。
+  読む)は、手順はあって数字が無い。`tools/qlora_memory.rb <checkpoint-dir>` が bf16 の
+  checkpoint(分割されていてよい。engine が `model.safetensors.index.json` を読む)を
+  `quantization:` と `adapter:` 付きで開き、batch 1 × 512 token の step を 2 回取って、
+  宣言のバイト数と、開いた直後・step 後の active / peak を JSON で出す。`--bf16` で base を
+  bf16 のまま開いた数字(表の比較対象)も取れる。§1.2 の表はこれが出るまで見込みのまま。
 - **PEFT で adapter を読み戻して logits を比べる**(Phase 3 の出口)は未着手。
   `adapter_config.json` の綴りは PEFT の `LoraConfig` の記憶に基づくので、読めなければ
   `Export.adapter_config` を直す。mlx-lm の adapter 形式(`adapters.safetensors`、

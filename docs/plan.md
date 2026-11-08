@@ -3875,3 +3875,9 @@ CUDA のライブラリが入らず未確認)。Rust のテストは GPU 機で�
 `mlx-community/Qwen2.5-0.5B-Instruct-4bit` の inventory(`rake oracle:qwen2_4bit`)と
 mlx-lm との forward の比較(`rake oracle:qwen2_4bit_forward` → `test/qlora_test.rb`)、
 7B / 32B の実測、PEFT での読み戻し。手順は揃えてあり、数字だけが無い。qlora.md §9。
+
+**分割 checkpoint(同日)。** 7B を開くのに要った。Hub の Qwen2.5-7B は 4 つの safetensors と
+`model.safetensors.index.json` で、engine の `read_safetensors` が index(かそれを持つ
+ディレクトリ)を受けて shard を 1 つの map に合わせる。同じ名前が 2 つの shard にあれば断る。
+`pretrained:` にディレクトリを渡せるようになったのはこの副産物。計測は
+`tools/qlora_memory.rb`。

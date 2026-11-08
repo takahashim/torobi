@@ -684,13 +684,71 @@ fn output_names(models: &[Model]) -> Vec<String> {
         .collect()
 }
 
+/// The arrays of a published model, however it is split up.
+///
+/// One safetensors file, or several: a model past a few billion
+/// parameters is published as `model-00001-of-00004.safetensors` and so
+/// on, with `model.safetensors.index.json` saying which tensor is in
+/// which. The path may be the file, the index, or the directory holding
+/// either; the arrays come back under one map either way, since the
+/// shards are an artifact of the upload and not of the model.
 fn read_safetensors(path: &Path) -> Result<std::collections::HashMap<String, Array>> {
+    let path = if path.is_dir() {
+        let whole = path.join("model.safetensors");
+        let index = path.join("model.safetensors.index.json");
+        if whole.is_file() {
+            whole
+        } else if index.is_file() {
+            index
+        } else {
+            anyhow::bail!(
+                "no parameters in {}: neither model.safetensors nor model.safetensors.index.json",
+                path.display()
+            );
+        }
+    } else {
+        path.to_path_buf()
+    };
     anyhow::ensure!(
         path.is_file(),
         "no parameters at {} (a safetensors file was expected)",
         path.display()
     );
-    Array::load_safetensors(path).with_context(|| format!("reading {}", path.display()))
+    if path.extension().and_then(|e| e.to_str()) == Some("json") {
+        return read_sharded(&path);
+    }
+    Array::load_safetensors(&path).with_context(|| format!("reading {}", path.display()))
+}
+
+/// The shards an index names, as one map. A tensor named in two shards
+/// is refused: the index is what says where each one is, and two
+/// answers is none.
+fn read_sharded(index: &Path) -> Result<std::collections::HashMap<String, Array>> {
+    #[derive(Deserialize)]
+    struct Index {
+        weight_map: BTreeMap<String, String>,
+    }
+    let text = std::fs::read_to_string(index).with_context(|| format!("reading {}", index.display()))?;
+    let parsed: Index = serde_json::from_str(&text).with_context(|| format!("parsing {}", index.display()))?;
+    let dir = index.parent().unwrap_or(Path::new("."));
+    let mut shards: Vec<&String> = parsed.weight_map.values().collect();
+    shards.sort();
+    shards.dedup();
+    let mut arrays = std::collections::HashMap::new();
+    for shard in shards {
+        let file = dir.join(shard);
+        let loaded = Array::load_safetensors(&file).with_context(|| format!("reading shard {}", file.display()))?;
+        for (name, array) in loaded {
+            anyhow::ensure!(
+                !arrays.contains_key(&name),
+                "{name:?} is in more than one shard of {}",
+                index.display()
+            );
+            arrays.insert(name, array);
+        }
+    }
+    anyhow::ensure!(!arrays.is_empty(), "{} names no shards", index.display());
+    Ok(arrays)
 }
 
 /// The array, if its shape is the one the graph declared.
@@ -1316,6 +1374,71 @@ mod tests {
         // The packed shape in a float dtype is not a packed weight.
         let float_words = open(Array::zeros::<f32>(&[8, 8]).unwrap());
         assert!(float_words.contains("Float32 [8, 8]"), "{float_words}");
+    }
+
+    /// A model published in shards (an index and several files) reads as
+    /// one, given the index or the directory holding it. A tensor named
+    /// in two shards is refused.
+    #[test]
+    fn a_sharded_checkpoint_reads_as_one_whether_named_by_its_index_or_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, _) = fixtures::teacher_and_student();
+        let shard = |name: &str, tensors: &[(&str, Array)]| {
+            Array::save_safetensors(tensors.iter().map(|(n, a)| (*n, a)), None, dir.path().join(name)).unwrap();
+        };
+        shard("model-00001-of-00002.safetensors", &[("scale", Array::from_slice(&[3.0f32, 4.0], &[2]).unwrap())]);
+        shard("model-00002-of-00002.safetensors", &[("other", Array::from_slice(&[1.0f32], &[1]).unwrap())]);
+        let index = dir.path().join("model.safetensors.index.json");
+        std::fs::write(
+            &index,
+            json!({"metadata": {}, "weight_map": {
+                "scale": "model-00001-of-00002.safetensors",
+                "other": "model-00002-of-00002.safetensors",
+            }})
+            .to_string(),
+        )
+        .unwrap();
+
+        for given in [index.clone(), dir.path().to_path_buf()] {
+            let files = BTreeMap::from([("teacher".to_string(), given.clone()), ("student".to_string(), given)]);
+            let (plan, params) = Plan::open(&config, Weights::Pretrained { files: &files, fresh: &[] }).unwrap();
+            assert_eq!(f32s(&params[plan.index_of("teacher.scale").unwrap()]), vec![3.0, 4.0]);
+        }
+
+        std::fs::write(
+            &index,
+            json!({"weight_map": {
+                "scale": "model-00001-of-00002.safetensors",
+                "other": "model-00001-of-00002.safetensors",
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        shard("model-00001-of-00002.safetensors", &[("scale", Array::from_slice(&[3.0f32, 4.0], &[2]).unwrap())]);
+        shard("model-00002-of-00002.safetensors", &[("scale", Array::from_slice(&[0.0f32, 0.0], &[2]).unwrap())]);
+        std::fs::write(
+            &index,
+            json!({"weight_map": {
+                "scale": "model-00001-of-00002.safetensors",
+                "other": "model-00002-of-00002.safetensors",
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let files = BTreeMap::from([("teacher".to_string(), index.clone()), ("student".to_string(), index.clone())]);
+        let said = match Plan::open(&config, Weights::Pretrained { files: &files, fresh: &[] }) {
+            Ok(_) => panic!("two shards hold \"scale\""),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(said.contains("more than one shard"), "{said}");
+
+        let empty = tempfile::tempdir().unwrap();
+        let files = BTreeMap::from([("teacher".to_string(), empty.path().to_path_buf()), ("student".to_string(), empty.path().to_path_buf())]);
+        let said = match Plan::open(&config, Weights::Pretrained { files: &files, fresh: &[] }) {
+            Ok(_) => panic!("an empty directory holds nothing"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(said.contains("neither model.safetensors nor"), "{said}");
     }
 
     #[test]
