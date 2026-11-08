@@ -183,14 +183,12 @@ pub fn to_tensor(array: &Array) -> Result<Tensor> {
     // here is f32 numbers: they are the numbers it holds, Ruby has no
     // bf16 to put them in, and a label that disagreed with the bytes
     // would be a trap for whoever unpacked them.
+    // A u32 array is read as f32 too: the RNG key is one, and its two
+    // words fit. A packed quantized weight is also u32, and its words as
+    // f32 are not what anyone wants; `TrainState::fetch` reads those as
+    // the numbers they stand for before they get here.
     let values = match array.dtype() {
         Dtype::Int32 => Values::I32(array.as_slice::<i32>()?.to_vec()),
-        // The words of a packed weight are not numbers anyone wants as
-        // f32; the numbers it stands for are read through `fetch`.
-        Dtype::Uint32 => anyhow::bail!(
-            "a packed quantized weight (u32) does not cross the boundary as it is; \
-             read it as the numbers it stands for"
-        ),
         _ => Values::F32(array.as_dtype(Dtype::Float32)?.as_slice::<f32>()?.to_vec()),
     };
     Ok(Tensor {

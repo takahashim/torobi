@@ -188,7 +188,7 @@ Torobi の `linear` が PyTorch 配置 `[d_out, d_in]` を選んだのと同じ�
 
 勾配について。MLX の `QuantizedMatmul::vjp` は **packed weight については例外を投げる**
 (「no gradient wrt the quantized weights」)。**scales と biases については勾配を返す**
-(2024 年末に入った変更。Phase 0 で実測して確定する)。つまり MLX が断るのは weight だけで、
+(2024 年末に入った変更。Phase 0 のテストが GPU で通り、確定した)。つまり MLX が断るのは weight だけで、
 scales / biases を学習しないのは Torobi の方針である: QLoRA が学習するのは adapter であって
 base の量子化パラメータではなく、それを動かした run は「量子化 base に LoRA を当てた」とは
 言えなくなる。Torobi では 3 つとも `trainable: false` で宣言されるので argnums に入らない。
@@ -585,11 +585,17 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
 
 実装は plan.md §15.76。この節は「何がまだ確かめられていないか」の一覧で、確かめたら消す。
 
-- **Rust のテストを GPU で走らせていない。** 実装した箱は GPU の無い Linux で、NVIDIA の
-  リポジトリにも届かず、`cargo check --tests`(bindgen と型検査)までしか通せなかった。
-  Phase 0 の 6 本、Phase 1 の 8 本(`plan.rs` 3、`state.rs` 3、`export.rs` 1、`op.rs` 2)
-  は `rake rust_test` で Mac か RTX 3080 機で走らせる。特に **scales / biases の勾配を
-  MLX が返す**という行は記憶に基づくので、通らなければ §3.2 とテストを一緒に直す。
+- **Rust のテストの初回(2026-11-08、GPU 機で `rake rust_test`)**: 204 本中 198 本が通り、
+  6 本が落ちた。直したのは (1) `to_tensor` が u32 を断っていたせいで RNG のキー(u32)が
+  読めなくなっていた 3 本(断るのをやめ、packed の読み方は `fetch` だけが知る)、
+  (2) (B) で量子化した scales が宣言 dtype に変換されずに返っていた 1 本、(3) bf16 の
+  `quantized_matmul` の比較基準を bf16 の dequantize → matmul から f32 のそれに変えた
+  1 本(重みごとの bf16 丸めが 128 個積もって 2 % になっていた。kernel は f32 で展開し
+  出力だけ丸める)、(4) メモリの測定を eval 直後の一発読みからポーリングに変えた 1 本
+  (bf16 ぴったり 1 MiB が残って見えた。command buffer の完了ハンドラが入力を離す前に
+  読んでいた可能性。ポーリングしても消えなければ本当に握っていて、そのときは次の
+  調査対象)。**scales / biases の勾配を MLX が返す**行は通った(§3.2 確定)。
+  直した 6 本は再実行待ち。
 - **実物の inventory が無い。** `ruby tools/inventory.rb mlx-community/Qwen2.5-0.5B-Instruct-4bit
   test/oracle/qwen2.5-0.5b-instruct-4bit.json` を Hub に届く機械で一度。それまで
   `test_the_description_declares_what_the_published_4bit_file_holds` は skip する。

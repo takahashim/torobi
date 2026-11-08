@@ -294,7 +294,14 @@ mod tests {
 
     /// The packed matmul and the unpacked one are the same product. In
     /// f32 to the accumulation order; in bf16, the dtype a model is held
-    /// in, to bf16's own precision.
+    /// in, to one rounding of the output.
+    ///
+    /// The reference is taken in f32 either way. The kernel unpacks each
+    /// weight as `scale · q + bias` in f32 and rounds only its result,
+    /// while a bf16 `dequantize` rounds every weight before the product:
+    /// 128 of those roundings summed came to 2 % where one rounding of
+    /// the output is 0.4 %, which is what the first version of this test
+    /// found (2026-11-08).
     #[test]
     fn quantized_matmul_is_the_matmul_of_the_dequantized_weight() {
         for (dtype, tolerance) in [(Dtype::Float32, 1e-4), (Dtype::Bfloat16, 1e-2)] {
@@ -303,8 +310,9 @@ mod tests {
                 let x = Array::from_slice(&weight(3, 128), &[3, 128])?.as_dtype(dtype)?;
                 let q = quantize(&w, FOUR_BIT_G64)?;
                 let packed = quantized_matmul(&x, &q.weight, &q.scales, q.biases.as_ref(), true, FOUR_BIT_G64)?;
-                let unpacked = dequantize(&q.weight, &q.scales, q.biases.as_ref(), FOUR_BIT_G64, None)?;
-                let plain = x.matmul(unpacked.transpose_axes(&[1, 0])?)?;
+                let unpacked =
+                    dequantize(&q.weight, &q.scales, q.biases.as_ref(), FOUR_BIT_G64, Some(Dtype::Float32))?;
+                let plain = x.as_dtype(Dtype::Float32)?.matmul(unpacked.transpose_axes(&[1, 0])?)?;
                 assert_eq!(packed.dtype(), dtype);
                 assert_eq!(packed.shape(), &[3, 8]);
                 Ok((values(&packed), values(&plain)))

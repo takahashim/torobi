@@ -3860,6 +3860,12 @@ adapter)` は `W + scale × B A` を f32 で書いて A / B を落とす。packe
 テストは Rust 3 本(merge の手計算 [6.5, 11]、PEFT の綴り、packed の dequantize)と Ruby
 (engine 無しで config の形、engine ありで読み戻し。後者は未実行)。
 
+**GPU での初回(同日、`rake rust_test`)。** 204 本中 198 本が通った。落ちた 6 本の原因と
+直しは qlora.md §9。設計に関わるのは 1 つだけで、`to_tensor` で u32 を断ったのは
+行き過ぎだった: MLX の RNG キーが u32 で、境界を f32 として渡っている。「packed は
+境界を渡らない」は `fetch` が dequantize することで言えていて、`to_tensor` が言うことでは
+なかった。scales / biases の勾配を MLX が返す、という記憶に基づく行は通った。
+
 **まだ確かめていないこと。** この作業は GPU の無い Linux の箱で行い、Rust は
 `cargo check --tests` まで(CI の ubuntu と同じ「bind まで」、link はこの箱では
 CUDA のライブラリが入らず未確認)。Rust のテストと、`mlx-community/Qwen2.5-0.5B-Instruct-4bit`

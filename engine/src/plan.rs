@@ -572,24 +572,27 @@ impl Source {
                     format!("no file was given for model {model:?}")
                 })?;
                 if let Some(piece) = quantized_on_read(arrays, quantized, plan, index)? {
-                    return Ok(piece);
+                    // Quantized in the file's dtype; the declared one is
+                    // applied below, as to anything read from a file.
+                    piece
+                } else {
+                    // The model's own path, without the name this run gives
+                    // it. Taken out of the map rather than read: from here on
+                    // the parameter is the only thing that holds it.
+                    let array = arrays.remove(&spec.path).with_context(|| {
+                        format!(
+                            "model {model:?}'s file has no parameter {:?}. If it is meant \
+                             to be new, name it: a head put on a published encoder is in \
+                             no checkpoint, and saying so is what tells a typo from a \
+                             fresh parameter.",
+                            spec.path
+                        )
+                    })?;
+                    match dequantized(arrays, path, spec, &array, declared)? {
+                        Some(numbers) => numbers,
+                        None => shaped(&array, path, spec)?,
+                    }
                 }
-                // The model's own path, without the name this run gives it.
-                // Taken out of the map rather than read: from here on the
-                // parameter is the only thing that holds it.
-                let array = arrays.remove(&spec.path).with_context(|| {
-                    format!(
-                        "model {model:?}'s file has no parameter {:?}. If it is meant \
-                         to be new, name it: a head put on a published encoder is in \
-                         no checkpoint, and saying so is what tells a typo from a \
-                         fresh parameter.",
-                        spec.path
-                    )
-                })?;
-                if let Some(numbers) = dequantized(arrays, path, spec, &array, declared)? {
-                    return Ok(numbers);
-                }
-                shaped(&array, path, spec)?
             }
         };
         Ok(if array.dtype() == declared {
@@ -1240,6 +1243,14 @@ mod tests {
     /// the lazy graph that consumed it. Measured as what MLX holds after
     /// opening against what the bf16 numbers alone would take: a weight
     /// of a megabyte, so the allocator's rounding is noise against it.
+    ///
+    /// Not measured at once. The device keeps a kernel's inputs until the
+    /// command buffer that ran it completes, and releases them from a
+    /// completion handler that may run after `eval` has returned; read
+    /// straight after opening, the bf16 input was still counted (one
+    /// megabyte exactly, 2026-11-08). So the number is polled for a
+    /// moment. A copy something still referenced would never go, and the
+    /// assertion would still fail.
     #[test]
     fn opening_a_bf16_file_as_a_quantized_model_does_not_keep_the_numbers() {
         use crate::mlxc::memory;
@@ -1249,17 +1260,36 @@ mod tests {
         drop(written);
         let files = BTreeMap::from([("m".to_string(), file)]);
 
-        let before = memory::active().unwrap();
+        let settled = || {
+            let mut active = memory::active().unwrap();
+            for _ in 0..200 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                let again = memory::active().unwrap();
+                if again == active {
+                    break;
+                }
+                active = again;
+            }
+            active
+        };
+        let before = settled();
         let (plan, params) =
             Plan::open(&fixtures::quantized::config_sized(d_out, d_in), Weights::Pretrained { files: &files, fresh: &[] })
                 .unwrap();
-        let held = memory::active().unwrap().saturating_sub(before);
-
         let numbers = d_out * d_in * 2;
         let packed = d_out * d_in / 2 + 2 * d_out * (d_in / 32) * 4;
+        let mut held = memory::active().unwrap().saturating_sub(before);
+        for _ in 0..200 {
+            if held < numbers {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            held = memory::active().unwrap().saturating_sub(before);
+        }
         assert!(
             held < numbers,
-            "{held} bytes held after opening; the bf16 numbers alone are {numbers}, the packed form {packed}"
+            "{held} bytes held a second after opening; the bf16 numbers alone are {numbers}, the \
+             packed form {packed}"
         );
         assert_eq!(params[plan.index_of("m.proj.weight").unwrap()].dtype(), Dtype::Uint32);
     }
