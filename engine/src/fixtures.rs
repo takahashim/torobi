@@ -421,6 +421,70 @@ pub mod quantized {
         (path, proj)
     }
 
+    /// `n` linears of `[d_out, d_in]`, each held quantized and read by its
+    /// own `quantized_matmul`, summed, and a trainable head: a model with
+    /// enough weights that how a run opens it can be measured. Returns
+    /// the config and a bf16 file of it, quantized as it is read.
+    pub fn stack(dir: &std::path::Path, n: usize, d_out: usize, d_in: usize) -> (String, std::path::PathBuf) {
+        let mut parameters = Vec::new();
+        let mut nodes = Vec::new();
+        let mut sums: Option<usize> = None;
+        for i in 0..n {
+            let at = parameters.len();
+            parameters.push(typed(at, &format!("l{i}.weight"), json!([d_out, d_in * 4 / 32]), "u32", false));
+            parameters.push(typed(at + 1, &format!("l{i}.scales"), json!([d_out, d_in / 32]), "f32", false));
+            parameters.push(typed(at + 2, &format!("l{i}.biases"), json!([d_out, d_in / 32]), "f32", false));
+            for k in 0..3 {
+                nodes.push(node(nodes.len(), "parameter", json!([]), json!([at + k])));
+            }
+            let read = nodes.len() - 3;
+            nodes.push(json!({
+                "id": nodes.len(), "op": "quantized_matmul",
+                "inputs": ["input:0", format!("node:{read}"), format!("node:{}", read + 1), format!("node:{}", read + 2)],
+                "parameters": [], "attributes": {"group_size": 32, "bits": 4, "mode": "affine"},
+            }));
+            let product = nodes.len() - 1;
+            sums = Some(match sums {
+                None => product,
+                Some(so_far) => {
+                    nodes.push(node(nodes.len(), "add", json!([format!("node:{so_far}"), format!("node:{product}")]), json!([])));
+                    nodes.len() - 1
+                }
+            });
+        }
+        let head = parameters.len();
+        parameters.push(parameter(head, "head.weight", json!([d_out]), true));
+        nodes.push(node(nodes.len(), "parameter", json!([]), json!([head])));
+        let read_head = nodes.len() - 1;
+        nodes.push(node(nodes.len(), "mul", json!([format!("node:{}", sums.unwrap()), format!("node:{read_head}")]), json!([])));
+        let scaled = nodes.len() - 1;
+        nodes.push(node(nodes.len(), "mean", json!([format!("node:{scaled}")]), json!([])));
+        let loss = nodes.len() - 1;
+        let graph = json!({
+            "inputs": [input(0, "x", json!([null, d_in]), "f32")],
+            "parameters": parameters,
+            "nodes": nodes,
+            "outputs": {"loss": format!("node:{loss}")},
+        });
+
+        let weights: Vec<(String, Array)> = (0..n)
+            .map(|i| {
+                let w = Array::from_slice(&weight_sized(d_out, d_in), &[d_out as i32, d_in as i32])
+                    .unwrap()
+                    .as_dtype(crate::mlxc::Dtype::Bfloat16)
+                    .unwrap();
+                (format!("l{i}.weight"), w)
+            })
+            .chain(std::iter::once((
+                "head.weight".to_string(),
+                Array::from_slice(&vec![1.0f32; d_out], &[d_out as i32]).unwrap(),
+            )))
+            .collect();
+        let path = dir.join("model.safetensors");
+        Array::save_safetensors(weights.iter().map(|(n, a)| (n.as_str(), a)), None, &path).unwrap();
+        (super::config(json!({"m": graph}), Value::Null, json!(["m"])), path)
+    }
+
     /// The same, with `proj.weight` replaced by `proj`: a file that holds
     /// the weight as numbers of some other shape.
     pub fn file_with_proj(dir: &std::path::Path, proj: Array) -> std::path::PathBuf {

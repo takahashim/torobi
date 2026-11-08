@@ -23,6 +23,22 @@ use crate::graph::{GraphConfig, InputSpec, ParameterSpec, Ref};
 use crate::op::{qualified, Op, Program, OBJECTIVE};
 use crate::tensor::{dtype_named, Tensor};
 
+/// How many bytes of parameters are made between two evaluations when a
+/// run opens.
+///
+/// One evaluation for every parameter at once was what the plan did
+/// first, and it held the whole file at the peak: MLX starts every read
+/// before any quantize that consumes one has run, so opening a bf16
+/// Qwen2.5-0.5B as a 4-bit model peaked at 1.03 GiB for 0.44 GiB of
+/// result (2026-11-08), which on a 7B is 14 GiB for 4.7. Evaluating every
+/// so many bytes lets each batch of reads be consumed and freed before
+/// the next starts, so the peak is what has been made plus about this
+/// much more of what it is made from (3.5 times it, where the bytes made
+/// are packed 4-bit and the bytes read are bf16). Small enough that the
+/// overshoot is noise against a model worth quantizing; large enough
+/// that a 0.5B model is a handful of evaluations, not hundreds.
+pub const EVAL_BUDGET: usize = 64 << 20;
+
 /// Where a run's initial parameters come from.
 ///
 /// Named rather than inferred from a type, because there will be more than
@@ -166,17 +182,29 @@ impl Plan {
         weights: Weights<'_>,
         seed: u64,
     ) -> Result<(Self, Vec<Array>)> {
+        Self::open_budgeted(graph_json, weights, seed, EVAL_BUDGET)
+    }
+
+    /// The same, evaluating every `budget` bytes of parameters rather than
+    /// at [`EVAL_BUDGET`]: what the tests measure the peak with.
+    pub(crate) fn open_budgeted(
+        graph_json: &str,
+        weights: Weights<'_>,
+        seed: u64,
+        budget: usize,
+    ) -> Result<(Self, Vec<Array>)> {
         let plan = Self::resolve(graph_json)?;
         let mut source = Source::read(weights)?;
         source.seed(seed)?;
         // `materialize` consumes the source: a file's arrays are lazy
-        // until asked, and the evaluation below is what reads them. By
-        // then nothing but the parameters themselves may hold them, or a
-        // weight the file holds in one form and the run in another (a
-        // bf16 embedding published quantized, docs/qlora.md 3.4) would be
-        // held twice until the source went.
-        let params = source.materialize(&plan)?;
-        // One evaluation for the lot.
+        // until asked, and evaluating is what reads them. Nothing but the
+        // parameters themselves may hold them by then, or a weight the
+        // file holds in one form and the run in another (a bf16 embedding
+        // published quantized, docs/qlora.md 3.4) would be held twice
+        // until the source went. It evaluates as it goes, every `budget`
+        // bytes, which is what bounds the peak (`EVAL_BUDGET`).
+        let params = source.materialize(&plan, budget)?;
+        // Whatever is left since the last evaluation.
         eval(params.iter())?;
         Ok((plan, params))
     }
@@ -494,11 +522,23 @@ impl Source {
     /// Consumes the source. A file's arrays are handed over to the
     /// parameters as they are matched, and whatever the plan did not ask
     /// for goes with the source, before anything is evaluated.
-    fn materialize(mut self, plan: &Plan) -> Result<Vec<Array>> {
-        let mut params = Vec::with_capacity(plan.paths.len());
+    ///
+    /// Evaluates every `budget` bytes of what it has made, so the reads
+    /// behind them are consumed and freed before the next ones start
+    /// (`EVAL_BUDGET`); what is left over is the caller's to evaluate.
+    fn materialize(mut self, plan: &Plan, budget: usize) -> Result<Vec<Array>> {
+        let mut params: Vec<Array> = Vec::with_capacity(plan.paths.len());
+        let (mut pending, mut since) = (0usize, 0usize);
         for model in &plan.models {
             for i in model.slice.clone() {
-                params.push(self.parameter(&model.name, plan, i)?);
+                let param = self.parameter(&model.name, plan, i)?;
+                pending += param.nbytes();
+                params.push(param);
+                if pending >= budget {
+                    eval(params[since..].iter())?;
+                    since = params.len();
+                    pending = 0;
+                }
             }
         }
         Ok(params)
@@ -1350,6 +1390,44 @@ mod tests {
              packed form {packed}"
         );
         assert_eq!(params[plan.index_of("m.proj.weight").unwrap()].dtype(), Dtype::Uint32);
+    }
+
+    /// The peak while a run opens, which is what decides whether a model
+    /// opens at all. Opening a bf16 file as a quantized model with one
+    /// evaluation for everything held the whole file at the peak
+    /// (measured on Qwen2.5-0.5B: 1.03 GiB for 0.44 GiB of result);
+    /// evaluating as it goes holds what has been made and one batch of
+    /// what it is made from. Eight weights of half a megabyte each in
+    /// bf16, evaluated one at a time: the peak stays below the file.
+    #[test]
+    fn evaluating_as_a_run_opens_keeps_the_peak_below_the_file() {
+        use crate::mlxc::memory;
+        let (n, d_out, d_in) = (8usize, 256usize, 1024usize);
+        let dir = tempfile::tempdir().unwrap();
+        let (config, file) = fixtures::quantized::stack(dir.path(), n, d_out, d_in);
+        let files = BTreeMap::from([("m".to_string(), file)]);
+        let bf16 = n * d_out * d_in * 2;
+        let packed_each = d_out * d_in / 2 + 2 * d_out * (d_in / 32) * 4;
+
+        let peak_of = |budget: usize| {
+            memory::clear_cache().unwrap();
+            let before = memory::active().unwrap();
+            memory::reset_peak().unwrap();
+            let opened = Plan::open_budgeted(&config, Weights::Pretrained { files: &files, fresh: &[] }, 0, budget).unwrap();
+            let peak = memory::peak().unwrap().saturating_sub(before);
+            drop(opened);
+            peak
+        };
+        let bounded = peak_of(packed_each);
+        assert!(
+            bounded < bf16,
+            "opening one weight at a time peaked at {bounded} bytes; the bf16 file is {bf16}, the \
+             packed result {}",
+            n * packed_each
+        );
+        // What it is bounded against, printed rather than asserted: how
+        // MLX schedules one evaluation of everything is MLX's business.
+        eprintln!("peak opening one at a time: {bounded}; all at once: {}", peak_of(usize::MAX));
     }
 
     /// Numbers of a shape the packed declaration does not unpack to are
