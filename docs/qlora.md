@@ -1,7 +1,7 @@
 # Torobi QLoRA 対応 仕様と計画
 
-- Status: **Phase 0 と Phase 1 を実装**(2026-11-08、plan.md §15.76)。Rust のテストと
-  実物の比較は GPU のある機械でまだ走らせていない(§9)。Phase 2 以降は未着手
+- Status: **Phase 0、1、2 を実装**(2026-11-08、plan.md §15.76)。Rust のテストと
+  実物の比較は GPU のある機械でまだ走らせていない(§9)。Phase 3 は未着手
 - Date: 2026-11-08(同日、コードと突き合わせたレビューを反映。§8)
 - 対象: `docs/plan.md` の M6 に「量子化 op」として据え置かれていたもの
 - 前提: Ruby が言語を所有し、Rust は実行だけを所有する(plan.md の原則)
@@ -491,6 +491,15 @@ inventory を生成してから。
 出口: 上の 3 行。ここで 7B 級を RTX 3080 で、32B 級を Mac 48 GB で開いて、§1.2 の
 表の「見込み」を実測に置き換える。
 
+**結果(2026-11-08)**: `plan.rs` の `quantized_on_read`。宣言が `quantized_matmul` の
+3 つ組の 1 つで、ファイルに `{module}.weight` が数値であり `.scales` が無ければ、
+`quantize` を module ごとに 1 回呼んで 3 つの宣言に配る(`Source::Pretrained` の
+`quantized` キャッシュ。source ごと eval の前に捨てる)。目標の量子化は `Plan.packed`
+(その matmul の属性)から取る。テストは「ファイルの bf16 を同じ MLX の `quantize` に
+かけたものと bit 一致」「形が packed でも元の形でもなければ両方を書いて断る」
+「開いた直後の常駐が bf16 全体より小さい」の 3 本(Rust、未実行。§9)。7B / 32B の
+実測はまだ。
+
 ### Phase 3: 出口を作る(fetch / export)
 
 | 追加 | 内容 |
@@ -577,3 +586,6 @@ inventory を生成してから。
 - **forward の mlx-lm との比較**(Phase 1 の表の 3 行目)は未着手。oracle の生成手順を
   `tools/` に置くところから。
 - **Linux の `cargo test --no-run`(link)** もこの箱では未確認。CI の ubuntu が見る。
+- **Phase 2 の実測**(7B を RTX 3080 で、32B を Mac 48 GB で開いて `Torobi::Memory` を
+  読む)は未着手。§1.2 の表はまだ見込みのまま。Rust の memory テストは小さい行列で
+  「bf16 全体より小さい」を言うだけで、ピークの形は実物で見る。

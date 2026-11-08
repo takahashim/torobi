@@ -26,7 +26,9 @@ module Torobi
   # checkpoints name them (`{name}.weight` packed u32, `{name}.scales`,
   # `{name}.biases`), so a published `*-4bit` file imports with no
   # renaming and a checkpoint of a quantized run is an ordinary
-  # checkpoint. Only linears are quantized here. An embedding is a `take`
+  # checkpoint. A bf16 checkpoint opens as the same model: a weight the
+  # file holds as numbers is quantized as it is read, to what the graph
+  # declares. Only linears are quantized here. An embedding is a `take`
   # rather than a matmul, and a quantized one is a different operation;
   # a file that holds one quantized is dequantized when it is read.
   Quantization = Data.define(:bits, :group_size, :mode, :on) do

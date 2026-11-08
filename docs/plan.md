@@ -3843,6 +3843,14 @@ u32 を除く。`thaw` は candidates(宣言 trainable)だけを動かすので�
 bf16 のまま。全部 4.5 bit なら 0.26 GiB だが、embedding は量子化しない)。テストは
 Ruby 15 件(全部 engine 無しで走る)、Rust 14 件。
 
+**Phase 2。** 同じ日に。`quantized_on_read`(`plan.rs`)が (B) の規則で、(A') と鏡像に
+なった: (A') は「宣言が数値、ファイルが packed」で dequantize、(B) は「宣言が packed、
+ファイルが数値」で quantize。どちらを見ているかは `Plan.packed`(`quantized_matmul` の
+入力を parameter node まで辿った表)で判る。module ごとに 1 回量子化して 3 つの宣言に
+配るキャッシュは `Source::Pretrained` に置き、`materialize` が source を消費するので
+eval の前に消える。テストは bit 一致(同じ MLX の `quantize` と)、形の不一致の拒否、
+開いた直後の常駐が bf16 全体より小さいこと、の 3 本。これも未実行(下)。
+
 **まだ確かめていないこと。** この作業は GPU の無い Linux の箱で行い、Rust は
 `cargo check --tests` まで(CI の ubuntu と同じ「bind まで」、link はこの箱では
 CUDA のライブラリが入らず未確認)。Rust のテストと、`mlx-community/Qwen2.5-0.5B-Instruct-4bit`

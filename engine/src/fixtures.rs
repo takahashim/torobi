@@ -291,14 +291,20 @@ pub mod quantized {
     }
 
     pub fn config() -> String {
+        config_sized(D_OUT, D_IN)
+    }
+
+    /// The same model at another width, for a measurement that needs
+    /// more than a kilobyte to be about anything.
+    pub fn config_sized(d_out: usize, d_in: usize) -> String {
         let graph = json!({
-            "inputs": [input(0, "x", json!([null, D_IN]), "f32")],
+            "inputs": [input(0, "x", json!([null, d_in]), "f32")],
             "parameters": [
-                typed(0, "proj.weight", json!([D_OUT, D_IN * 4 / 32]), "u32", false),
-                typed(1, "proj.scales", json!([D_OUT, D_IN / 32]), "f32", false),
-                typed(2, "proj.biases", json!([D_OUT, D_IN / 32]), "f32", false),
-                typed(3, "emb.weight", json!([EMB_ROWS, D_IN]), "f32", false),
-                parameter(4, "head.weight", json!([D_OUT]), true),
+                typed(0, "proj.weight", json!([d_out, d_in * 4 / 32]), "u32", false),
+                typed(1, "proj.scales", json!([d_out, d_in / 32]), "f32", false),
+                typed(2, "proj.biases", json!([d_out, d_in / 32]), "f32", false),
+                typed(3, "emb.weight", json!([EMB_ROWS, d_in]), "f32", false),
+                parameter(4, "head.weight", json!([d_out]), true),
             ],
             "nodes": [
                 node(0, "parameter", json!([]), json!([0])),
@@ -322,9 +328,13 @@ pub mod quantized {
     /// The numbers `proj` stands for, before quantization: row r in
     /// `[-(r + 1) / D_OUT, (r + 1) / D_OUT]`, off the grid.
     pub fn weight(rows: usize) -> Vec<f32> {
-        (0..rows * D_IN)
+        weight_sized(rows, D_IN)
+    }
+
+    pub fn weight_sized(rows: usize, cols: usize) -> Vec<f32> {
+        (0..rows * cols)
             .map(|i| {
-                let (r, c) = (i / D_IN, i % D_IN);
+                let (r, c) = (i / cols, i % cols);
                 (r + 1) as f32 / rows as f32 * ((c as f32 * 0.37 + r as f32 * 1.3).sin())
             })
             .collect()
@@ -351,6 +361,43 @@ pub mod quantized {
         } else {
             named.push(("emb.weight", emb));
         }
+        let path = dir.join("model.safetensors");
+        Array::save_safetensors(named.iter().map(|(n, a)| (*n, a)), None, &path).unwrap();
+        path
+    }
+
+    /// The file a bf16 checkpoint of this model is: `proj.weight` as
+    /// numbers, in bf16, with no scales beside it. Returns the path and
+    /// the array written, for what quantizing it should give.
+    pub fn file_bf16(dir: &std::path::Path) -> (std::path::PathBuf, Array) {
+        file_bf16_sized(dir, D_OUT, D_IN)
+    }
+
+    pub fn file_bf16_sized(dir: &std::path::Path, d_out: usize, d_in: usize) -> (std::path::PathBuf, Array) {
+        let proj = Array::from_slice(&weight_sized(d_out, d_in), &[d_out as i32, d_in as i32])
+            .unwrap()
+            .as_dtype(crate::mlxc::Dtype::Bfloat16)
+            .unwrap();
+        let emb = Array::from_slice(&weight_sized(EMB_ROWS, d_in), &[EMB_ROWS as i32, d_in as i32]).unwrap();
+        let named = [
+            ("proj.weight", proj.clone()),
+            ("head.weight", Array::from_slice(&vec![1.0f32; d_out], &[d_out as i32]).unwrap()),
+            ("emb.weight", emb),
+        ];
+        let path = dir.join("model.safetensors");
+        Array::save_safetensors(named.iter().map(|(n, a)| (*n, a)), None, &path).unwrap();
+        (path, proj)
+    }
+
+    /// The same, with `proj.weight` replaced by `proj`: a file that holds
+    /// the weight as numbers of some other shape.
+    pub fn file_with_proj(dir: &std::path::Path, proj: Array) -> std::path::PathBuf {
+        let emb = Array::from_slice(&weight(EMB_ROWS), &[EMB_ROWS as i32, D_IN as i32]).unwrap();
+        let named = [
+            ("proj.weight", proj),
+            ("head.weight", Array::from_slice(&[1.0f32; D_OUT], &[D_OUT as i32]).unwrap()),
+            ("emb.weight", emb),
+        ];
         let path = dir.join("model.safetensors");
         Array::save_safetensors(named.iter().map(|(n, a)| (*n, a)), None, &path).unwrap();
         path

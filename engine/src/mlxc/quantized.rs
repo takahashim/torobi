@@ -82,9 +82,6 @@ impl Quantization {
 /// `[d_out, d_in × bits / 32]`, and a scale and bias per group of shape
 /// `[d_out, d_in / group_size]` in the matrix's own dtype. The biases are
 /// what the affine mode has and the block floating-point modes do not.
-// Read by the tests until a bf16 file is quantized as it is read
-// (docs/qlora.md, Phase 2), which is where the engine calls this.
-#[allow(dead_code)]
 pub struct Quantized {
     pub weight: Array,
     pub scales: Array,
@@ -106,7 +103,6 @@ fn dtype_or_default(dtype: Option<Dtype>) -> sys::mlx_optional_dtype {
 /// must be a multiple of the group size, and MLX says so when it is not.
 ///
 /// `global_scale` is passed empty: it belongs to `nvfp4` alone.
-#[allow(dead_code)]
 pub fn quantize(w: impl AsRef<Array>, quantization: Quantization) -> Result<Quantized> {
     let stream = Stream::current()?;
     let none = NoArray::new();

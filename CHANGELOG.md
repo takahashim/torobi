@@ -58,9 +58,11 @@ between two versions people have.
   included) is dequantized as it is read. `fetch` returns the numbers a
   packed weight stands for; `put` and `export_model!` refuse it. On
   Qwen2.5-0.5B at 4 bits in groups of 64 that is 0.92 GiB to 0.44 GiB,
-  the embedding still in bf16. Reading a bf16 checkpoint into a
-  quantized model (quantizing as it is read) and exporting an adapter
-  are not in yet.
+  the embedding still in bf16. A bf16 checkpoint opens as a quantized
+  model too: a weight the graph holds packed and the file holds as
+  numbers is quantized as it is read, once, with MLX's own `quantize`,
+  and the file's copy is let go before anything is evaluated. Exporting
+  an adapter or a merged model is not in yet.
 - **`Torobi::Models::Gemma3`**, which is deliberately not one of the
   above: four norms a layer rather than two, q and k normalized per
   head, norms that scale by `1 + w`, the tanh approximation of GELU, and
