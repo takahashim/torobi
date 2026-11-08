@@ -31,7 +31,10 @@
 # `--synthetic` draws sequences from a fixed second-order Markov chain
 # over a few hundred ids instead: not language, but learnable, and the
 # same for both runs, which is what a comparison needs when no text is
-# at hand. The last `--holdout` chunks are never trained on.
+# at hand. `--holdout` documents, spread evenly over the corpus, are
+# held out whole: the first chunk of each is what the held-out loss is
+# over, and none of their text is trained on. (Taking the last chunks
+# instead put the whole held-out set in the last article or two.)
 $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
 require "torobi"
 require "json"
@@ -89,11 +92,20 @@ documents =
   else
     JSON.parse(File.read(options[:ids]))
   end
-chunks = documents.flat_map { |doc| doc.each_slice(seq + 1).select { |c| c.size == seq + 1 } }
-abort "no chunk of #{seq + 1} tokens in the data; shorten --seq" if chunks.size <= options[:holdout]
-heldout = chunks.last(options[:holdout])
-training = chunks[0...-options[:holdout]]
-warn "#{training.size} training chunks, #{heldout.size} held out, #{seq} tokens each"
+chunks_of = ->(doc) { doc.each_slice(seq + 1).select { |c| c.size == seq + 1 } }
+long_enough = documents.select { |doc| doc.size >= seq + 1 }
+if long_enough.size <= options[:holdout]
+  abort "#{long_enough.size} documents have #{seq + 1} tokens, and #{options[:holdout]} are held " \
+        "out; shorten --seq, lower --holdout or give more text"
+end
+stride = long_enough.size / options[:holdout]
+held = (0...options[:holdout]).map { |i| i * stride }
+heldout = held.map { |d| chunks_of.call(long_enough[d]).first }
+training = long_enough.each_index.reject do |d|
+  held.include?(d)
+end.flat_map { |d| chunks_of.call(long_enough[d]) }
+warn "#{training.size} training chunks, #{heldout.size} held out from as many documents, " \
+     "#{seq} tokens each"
 
 def batch_of(config, chunks, seq:)
   rows = chunks.map { |c| c[0...seq] }
