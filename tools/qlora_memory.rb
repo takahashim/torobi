@@ -6,6 +6,7 @@
 #
 #   ruby tools/qlora_memory.rb <checkpoint-dir> [--seq 512] [--bits 4] [--group-size 64]
 #                                               [--rank 8] [--on q_proj,v_proj] [--bf16]
+#                                               [--open-only]
 #
 # The directory is a published checkpoint as the Hub caches it: its
 # config.json, and model.safetensors or the shards with their index.
@@ -19,7 +20,9 @@
 #   stepped    active and peak after one step: the activations on top
 #
 # `--bf16` leaves the base in bf16, for the number the table compares
-# against; it needs the memory a bf16 model needs.
+# against; it needs the memory a bf16 model needs. `--open-only` stops
+# after `opened`, for a machine where the step might not fit: the peak at
+# open is the question Phase 2 asks, and it is answered before any step.
 #
 # What it prints is a line of JSON per point, so numbers from two
 # machines can be put side by side.
@@ -30,7 +33,7 @@ require "optparse"
 
 abort "the engine is not compiled (rake compile)" unless defined?(Torobi::Session)
 
-options = { seq: 512, bits: 4, group_size: 64, rank: 8, on: %w[q_proj v_proj], bf16: false }
+options = { seq: 512, bits: 4, group_size: 64, rank: 8, on: %w[q_proj v_proj], bf16: false, open_only: false }
 OptionParser.new do |o|
   o.on("--seq N", Integer) { |v| options[:seq] = v }
   o.on("--bits N", Integer) { |v| options[:bits] = v }
@@ -38,6 +41,7 @@ OptionParser.new do |o|
   o.on("--rank N", Integer) { |v| options[:rank] = v }
   o.on("--on A,B", Array) { |v| options[:on] = v }
   o.on("--bf16") { options[:bf16] = true }
+  o.on("--open-only") { options[:open_only] = true }
 end.parse!
 dir = ARGV.first or abort "usage: qlora_memory.rb <checkpoint-dir> [options]"
 abort "#{dir} is not a directory" unless File.directory?(dir)
@@ -86,6 +90,7 @@ started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 Torobi::Session.open(run, pretrained: { m: dir }, fresh: adapter.fresh(run),
                           optimizer: { kind: :adamw, lr: 1e-4 }) do |s|
   say.call("opened", seconds: (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round(1))
+  next if options[:open_only]
 
   rng = Random.new(1)
   ids = Array.new(seq) { rng.rand(1000...(config.vocab_size - 1000)) }

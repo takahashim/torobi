@@ -623,7 +623,12 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
   checkpoint(分割されていてよい。engine が `model.safetensors.index.json` を読む)を
   `quantization:` と `adapter:` 付きで開き、batch 1 × 512 token の step を 2 回取って、
   宣言のバイト数と、開いた直後・step 後の active / peak を JSON で出す。`--bf16` で base を
-  bf16 のまま開いた数字(表の比較対象)も取れる。§1.2 の表はこれが出るまで見込みのまま。
+  bf16 のまま開いた数字(表の比較対象)も取れる。`--open-only` は開くだけで止まる。
+  §1.2 の表はこれが出るまで見込みのまま。手元の機材は **16 GB の Mac**(表に書いた 48 GB
+  ではない)と、今は使えない RTX 3080 なので、順番は Qwen2.5-3B(bf16 5.8 GiB、量子化後
+  1.9 GiB 見込み。ピークが抑えられていれば 2.5 GiB 前後、bf16 全体が残れば 6 GiB 前後で、
+  どちらでも 16 GB に収まり安全に判別できる)→ 7B(量子化後 4.7 GiB)。32B は 16 GB には
+  載らないので、表の 32B の行は機材が揃うまで見込みのまま。
 - **PEFT で adapter を読み戻して logits を比べる**(Phase 3 の出口)は未着手。
   `adapter_config.json` の綴りは PEFT の `LoraConfig` の記憶に基づくので、読めなければ
   `Export.adapter_config` を直す。mlx-lm の adapter 形式(`adapters.safetensors`、
