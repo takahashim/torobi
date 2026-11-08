@@ -47,6 +47,7 @@ pub mod memory;
 pub mod metal;
 pub mod nn;
 pub mod ops;
+pub mod quantized;
 pub mod random;
 pub mod transforms;
 

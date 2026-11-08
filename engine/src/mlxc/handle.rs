@@ -126,3 +126,30 @@ impl Drop for Vector {
     }
 }
 
+/// mlx-c's "no array", for an optional argument: an empty handle. Its own
+/// type because an [`Array`] always holds one, and owned so it is freed;
+/// mlx-rs made these and let them go.
+pub(crate) struct NoArray(sys::mlx_array);
+
+impl NoArray {
+    pub(crate) fn new() -> Self {
+        NoArray(unsafe { sys::mlx_array_new() })
+    }
+
+    pub(crate) fn as_raw(&self) -> sys::mlx_array {
+        self.0
+    }
+
+    /// `array` when there is one, and the empty handle when there is not:
+    /// how every `/* may be null */` argument is passed.
+    pub(crate) fn or<'a>(&'a self, array: Option<&'a Array>) -> sys::mlx_array {
+        array.map_or(self.0, Array::as_raw)
+    }
+}
+
+impl Drop for NoArray {
+    fn drop(&mut self) {
+        unsafe { sys::mlx_array_free(self.0) };
+    }
+}
+

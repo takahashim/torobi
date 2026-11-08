@@ -1,6 +1,7 @@
 //! MLX's fused kernels.
 
 use super::error::Result;
+use super::handle::NoArray;
 use super::{sys, Array};
 
 /// What masks the scores before the softmax: an additive array, or the
@@ -42,25 +43,4 @@ pub fn scaled_dot_product_attention<'a>(
     Array::on_stream("mlx_fast_scaled_dot_product_attention", |res, s| unsafe {
         sys::mlx_fast_scaled_dot_product_attention(res, q, k, v, scale, mode.as_ptr(), mask, sinks, false, s)
     })
-}
-
-/// mlx-c's "no array", for an optional argument: an empty handle. Its own
-/// type because an [`Array`] always holds one, and owned so it is freed;
-/// mlx-rs made these and let them go.
-struct NoArray(sys::mlx_array);
-
-impl NoArray {
-    fn new() -> Self {
-        NoArray(unsafe { sys::mlx_array_new() })
-    }
-
-    fn as_raw(&self) -> sys::mlx_array {
-        self.0
-    }
-}
-
-impl Drop for NoArray {
-    fn drop(&mut self) {
-        unsafe { sys::mlx_array_free(self.0) };
-    }
 }
