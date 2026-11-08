@@ -218,13 +218,14 @@ summary = {
   steps: options[:steps], seq:, batch: options[:batch], rank: options[:rank], on: options[:on],
   quantization: { bits: options[:bits], group_size: options[:group_size] },
   reference: options[:reference],
-  train_loss_last_steps: { bf16: last.call(:bf16).round(4),
-                           quantized: last.call(:quantized).round(4) },
-  heldout_loss: { bf16: held.call(:bf16).round(4), quantized: held.call(:quantized).round(4) },
+  # Keyed by what each run was, so an 8-bit reference does not read as bf16.
+  train_loss_last_steps: { first => last.call(:bf16).round(4),
+                           second => last.call(:quantized).round(4) },
+  heldout_loss: { first => held.call(:bf16).round(4), second => held.call(:quantized).round(4) },
   heldout_gap: ((held.call(:quantized) - held.call(:bf16)) / held.call(:bf16)).round(4),
-  seconds_per_step: { bf16: (curves[:bf16][:seconds] / options[:steps]).round(3),
-                      quantized: (curves[:quantized][:seconds] / options[:steps]).round(3) },
-  peak_gib: { bf16: curves[:bf16][:peak_gib].round(3),
-              quantized: curves[:quantized][:peak_gib].round(3) }
+  seconds_per_step: { first => (curves[:bf16][:seconds] / options[:steps]).round(3),
+                      second => (curves[:quantized][:seconds] / options[:steps]).round(3) },
+  peak_gib: { first => curves[:bf16][:peak_gib].round(3),
+              second => curves[:quantized][:peak_gib].round(3) }
 }
 puts JSON.pretty_generate(summary)
