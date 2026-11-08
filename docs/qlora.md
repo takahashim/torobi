@@ -533,7 +533,7 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
 | CUDA の `affine_quantize` に g64 が無い | §2.3 のシンボル一覧に 32 と 128 しか見えない | Phase 0 の Linux の行で g64 を名指しで確かめる。無ければ (B) は CUDA で g32 / g128 に限る(読む方 (A) / (A') は `dequantize` と `quantized_matmul` のカーネル次第) |
 | 配布物との量子化の bit 一致 | mlx-community のファイルは古い MLX で量子化されている | 比較対象を手元の同じ版の MLX にする(Phase 2) |
 | `d_in` が `group_size` で割り切れないモデル | Gemma3 の head_dim 256 系は大丈夫。小さいモデルの一部 | `shape.rb` で宣言時に断る。`group_size: 32` に落とす選択肢を示す |
-| QLoRA の品質(4 bit base での学習が bf16 LoRA に劣るか) | 原論文は NF4 + double quant。MLX の affine 4 bit は別物 | Torobi の範囲外。llm-bench 側で bf16 LoRA と比較する(Phase 1 の 0.5B で loss 曲線を並べるのは安い) |
+| QLoRA の品質(4 bit base での学習が bf16 LoRA に劣るか) | 原論文は NF4 + double quant。MLX の affine 4 bit は別物 | `tools/qlora_curve.rb` が同じ checkpoint・同じ batch・同じ seed で bf16 base と 4 bit base の LoRA を並べ、loss 曲線と held-out loss を出す(0.5B なら数分)。差が数 % 以内なら成立、大きければ `--bits 8` / `--group-size 32` を試す。データは `tools/tokenize_ids.py` の ids か `--synthetic` |
 | `quantized_matmul` の VJP が weight について無いこと | scales / biases は MLX が微分できる(見込み)。将来 MLX が w の勾配を足しても、量子化重みを学習する動機は無い | `GraphConfig` で断る側に倒す。scales / biases を断るのは Torobi の方針(§3.2) |
 
 ## 7. やらないこと
@@ -628,7 +628,12 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
   ではない)と、今は使えない RTX 3080 なので、順番は Qwen2.5-3B(bf16 5.8 GiB、量子化後
   1.9 GiB 見込み。ピークが抑えられていれば 2.5 GiB 前後、bf16 全体が残れば 6 GiB 前後で、
   どちらでも 16 GB に収まり安全に判別できる)→ 7B(量子化後 4.7 GiB)。32B は 16 GB には
-  載らないので、表の 32B の行は機材が揃うまで見込みのまま。
+  載らないので、表の 32B の行は機材が揃うまで見込みのまま。7B も手元では動かさない
+  判断にしたので、同じく見込みのまま。
+- **「うまくできそうか」の判断**は、載るか(上の計測)・学習が進むか・速いか、の 3 つに
+  分けた。学習が進むかは `tools/qlora_curve.rb`(§6 の品質の行)で 0.5B の bf16 LoRA と
+  4 bit LoRA を同条件で並べる。速さは同じスクリプトの `seconds_per_step` の比。数字は
+  まだ無い。
 - **PEFT で adapter を読み戻して logits を比べる**(Phase 3 の出口)は未着手。
   `adapter_config.json` の綴りは PEFT の `LoraConfig` の記憶に基づくので、読めなければ
   `Export.adapter_config` を直す。mlx-lm の adapter 形式(`adapters.safetensors`、
