@@ -3866,9 +3866,12 @@ adapter)` は `W + scale × B A` を f32 で書いて A / B を落とす。packe
 境界を渡らない」は `fetch` が dequantize することで言えていて、`to_tensor` が言うことでは
 なかった。scales / biases の勾配を MLX が返す、という記憶に基づく行は通った。
 
+2 回目の `rake rust_test` で 204 本全部が通った。メモリのテストはポーリングで収まった
+ので、ファイルの配列を握っているものは無い。
+
 **まだ確かめていないこと。** この作業は GPU の無い Linux の箱で行い、Rust は
 `cargo check --tests` まで(CI の ubuntu と同じ「bind まで」、link はこの箱では
-CUDA のライブラリが入らず未確認)。Rust のテストと、`mlx-community/Qwen2.5-0.5B-Instruct-4bit`
-の inventory(`tools/inventory.rb`、Hub に届く機械が要る)と forward の比較は、
-Mac か RTX 3080 機で走らせて初めて言える。qlora.md Phase 1 の表の「Linux で同じスイート」
-はまだ空欄である。
+CUDA のライブラリが入らず未確認)。Rust のテストは GPU 機で通った(上)。残るのは
+`mlx-community/Qwen2.5-0.5B-Instruct-4bit` の inventory(`rake oracle:qwen2_4bit`)と
+mlx-lm との forward の比較(`rake oracle:qwen2_4bit_forward` → `test/qlora_test.rb`)、
+7B / 32B の実測、PEFT での読み戻し。手順は揃えてあり、数字だけが無い。qlora.md §9。

@@ -119,8 +119,12 @@ module Parity
   # One case through Torobi: the hidden state at every position, and the
   # scores at the last one, which is the position a decoder is asked
   # about.
-  def run_case(config, dir, ids)
-    graph = described.causal_lm(config, seq: ids.size)
+  #
+  # `dtype:` and `quantization:` are how the graph is built when the
+  # weights are a published 4-bit file (docs/qlora.md): bf16, with the
+  # linears the file holds packed read as they are.
+  def run_case(config, dir, ids, dtype: :f32, quantization: nil)
+    graph = described.causal_lm(config, seq: ids.size, dtype:, quantization:)
     run = Torobi::GraphConfig.new(models: { m: graph }, train: [])
     Torobi::Session.open(run, pretrained: { m: File.join(dir, "model.safetensors") }) do |s|
       s.tap("m.hidden", stat: :full)
@@ -133,20 +137,20 @@ module Parity
   # Relative to the size of what is being compared: a hidden state deep
   # in a decoder is tens, and an absolute tolerance would be saying
   # something about this model rather than about the arithmetic.
-  def compare_hidden(got, want, where)
+  def compare_hidden(got, want, where, tolerance: PARITY)
     assert_equal want.size, got.size, "#{where}: positions"
     apart = got.flatten.zip(want.flatten).map { |a, b| (a - b).abs }.max
     scale = want.flatten.map(&:abs).max
-    margin("#{where} hidden", apart, scale)
+    margin("#{where} hidden", apart, scale, tolerance)
 
-    assert_operator apart / scale, :<, PARITY,
+    assert_operator apart / scale, :<, tolerance,
                     "#{where}: hidden states differ by #{apart} against #{scale}"
   end
 
   # The ids first: which tokens a model thinks come next is what it is
   # for, and two implementations that disagree about the order are not
   # the same model however close the numbers are.
-  def compare_logits(got, want, where)
+  def compare_logits(got, want, where, tolerance: PARITY)
     mine = got.each_with_index.max_by(want.size) { |value, _| value }
 
     assert_equal want.map { |t| t.fetch("id") }.first, mine.first.last,
@@ -157,19 +161,19 @@ module Parity
     by_id = mine.to_h { |value, id| [id, value] }
     apart = want.map { |t| (by_id.fetch(t.fetch("id")) - t.fetch("value")).abs }.max
     scale = want.map { |t| t.fetch("value").abs }.max
-    margin("#{where} logits", apart, scale)
+    margin("#{where} logits", apart, scale, tolerance)
 
-    assert_operator apart / scale, :<, PARITY, "#{where}: scores differ by #{apart}"
+    assert_operator apart / scale, :<, tolerance, "#{where}: scores differ by #{apart}"
   end
 
   # How much of the tolerance was actually used. A number somebody chose
   # is worth being able to look at: run with MARGIN=1 to see what it is
   # holding, and put what it says next to TOLERANCE.
-  def margin(what, apart, scale)
+  def margin(what, apart, scale, tolerance = PARITY)
     return unless ENV["MARGIN"]
 
     warn format("%-16s max|d| %.4g of %.4g, relative %.2e (tolerance %.0e)",
-                what, apart, scale, apart / scale, PARITY)
+                what, apart, scale, apart / scale, tolerance)
   end
 
   # How far two implementations of the same arithmetic may be, in a
@@ -186,4 +190,12 @@ module Parity
   # refusing anything that is wired differently, which is off by orders
   # rather than by rounding.
   PARITY = 2e-4
+
+  # The same, for a model held in bf16 and compared with another bf16
+  # implementation of it (a published 4-bit file against mlx-lm,
+  # docs/qlora.md Phase 1). Each side rounds to bf16 at its own places
+  # through 24 layers, and bf16 holds eight bits: what is left between
+  # them is of the order of a percent, not of 1e-4. Still orders away
+  # from anything wired differently.
+  PARITY_BF16 = 1e-2
 end

@@ -1,7 +1,8 @@
 # Torobi QLoRA 対応 仕様と計画
 
-- Status: **Phase 0〜3 を実装**(2026-11-08、plan.md §15.76)。Rust のテストと
-  実物の比較、PEFT での読み戻しは GPU のある機械でまだ走らせていない(§9)
+- Status: **Phase 0〜3 を実装、Rust のテストは GPU で全部通過**(2026-11-08、plan.md
+  §15.76)。実物の比較(inventory、mlx-lm との forward、7B / 32B の実測)と PEFT での
+  読み戻しが残る(§9)
 - Date: 2026-11-08(同日、コードと突き合わせたレビューを反映。§8)
 - 対象: `docs/plan.md` の M6 に「量子化 op」として据え置かれていたもの
 - 前提: Ruby が言語を所有し、Rust は実行だけを所有する(plan.md の原則)
@@ -593,14 +594,17 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
   1 本(重みごとの bf16 丸めが 128 個積もって 2 % になっていた。kernel は f32 で展開し
   出力だけ丸める)、(4) メモリの測定を eval 直後の一発読みからポーリングに変えた 1 本
   (bf16 ぴったり 1 MiB が残って見えた。command buffer の完了ハンドラが入力を離す前に
-  読んでいた可能性。ポーリングしても消えなければ本当に握っていて、そのときは次の
-  調査対象)。**scales / biases の勾配を MLX が返す**行は通った(§3.2 確定)。
-  直した 6 本は再実行待ち。
-- **実物の inventory が無い。** `ruby tools/inventory.rb mlx-community/Qwen2.5-0.5B-Instruct-4bit
-  test/oracle/qwen2.5-0.5b-instruct-4bit.json` を Hub に届く機械で一度。それまで
-  `test_the_description_declares_what_the_published_4bit_file_holds` は skip する。
-- **forward の mlx-lm との比較**(Phase 1 の表の 3 行目)は未着手。oracle の生成手順を
-  `tools/` に置くところから。
+  読んでいた)。**scales / biases の勾配を MLX が返す**行は通った(§3.2 確定)。
+  **直した 6 本を含め、2 回目で 204 本全部が通った。** メモリの件はポーリングで消えた
+  ので、握っているものは無い。
+- **実物の inventory が無い。** `rake oracle:qwen2_4bit` を Hub に届く機械で一度。
+  それまで `test_the_description_declares_what_the_published_4bit_file_holds` は skip する。
+- **forward の mlx-lm との比較**(Phase 1 の表の 3 行目)は、手順はあって数字が無い。
+  `tools/qlora_reference.py`(`rake oracle:qwen2_4bit_forward`、mlx-lm が要るので Mac か
+  CUDA 機)が `test/oracle/qwen2.5-0.5b-instruct-4bit.forward.json` を書き、`test/qlora_test.rb`
+  が weights と oracle の揃った機械で bf16 の許容(`Parity::PARITY_BF16 = 1e-2`)で比べる。
+  同じテストが、同じファイルを packed のまま読んだ場合と (A') で数値に戻して読んだ場合の
+  forward が一致することも見る。oracle が無いうちは skip する。
 - **Linux の `cargo test --no-run`(link)** もこの箱では未確認。CI の ubuntu が見る。
 - **Phase 2 の実測**(7B を RTX 3080 で、32B を Mac 48 GB で開いて `Torobi::Memory` を
   読む)は未着手。§1.2 の表はまだ見込みのまま。Rust の memory テストは小さい行列で
