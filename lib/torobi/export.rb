@@ -117,11 +117,11 @@ module Torobi
     # next to it, so an adapted run holds the base weights it started
     # with and never moved. Exporting writes every parameter, which would
     # be those weights plus `lora_A` and `lora_B` tensors nothing else
-    # knows: **a directory that looks trained and is not.** Merging them
-    # (W + scale * BA, and the adapter dropped) is what makes one, and it
-    # is not built yet. Until it is, this refuses rather than writes
-    # something misleading; the checkpoint holds both halves, so nothing
-    # is lost by waiting.
+    # knows: **a directory that looks trained and is not.** What makes one
+    # is merging (`export_model!(dir, merge: adapter)`, which folds
+    # `scale * BA` into each weight and drops the matrices) or writing the
+    # adapter by itself (`export_adapter!`). Asked for neither, this
+    # refuses rather than writes something misleading.
     #
     # Before the weights are written, so a refusal leaves the directory
     # as it was.
@@ -135,8 +135,68 @@ module Torobi
             "#{model.inspect} was trained through an adapter (#{adapted.size} " \
             "parameters like #{adapted.first.inspect}), and its base weights have " \
             "not moved. Writing them would be a model that looks trained and is " \
-            "not. Merging the adapter into the weights is not implemented; the " \
-            "checkpoint holds both halves."
+            "not. Say merge: with the adapter to fold it into the weights, or " \
+            "write the adapter alone with export_adapter!."
+    end
+
+    # What an adapter is multiplied by before it is added: a `LoRA`'s own
+    # scale, or a number for whoever has only that.
+    def self.scale_of(merge)
+      return merge.scale if merge.respond_to?(:scale)
+      return Float(merge) if merge.is_a?(Numeric)
+
+      raise ArgumentError,
+            "merge: is the adapter (a Torobi::LoRA) or its scale, got #{merge.inspect}"
+    end
+
+    # The `adapter_config.json` PEFT reads beside `adapter_model.safetensors`
+    # (docs/qlora.md section 3.6): a `LoraConfig`, as PEFT writes one, with
+    # what the graph said. `r` and `lora_alpha` are the adapter's; the
+    # `target_modules` are the last segments it was built `on:`, which is
+    # how PEFT names them too. `base:` is the published model the adapter
+    # was trained on (`base_model_name_or_path`), and `task_type:` is
+    # PEFT's word for what the model does ("CAUSAL_LM" for a decoder).
+    # Both may be left out; PEFT then has to be told at load time.
+    #
+    # What is not here is as deliberate: no dropout (`LoRA` has none), no
+    # bias (the adapter trains none), plain initialization, and the
+    # matrices' own dtype left to the file.
+    def self.adapter_config(adapter, base: nil, task_type: nil)
+      unless adapter.is_a?(LoRA)
+        raise ArgumentError, "adapter: is a Torobi::LoRA, got #{adapter.inspect}"
+      end
+
+      {
+        "peft_type" => "LORA",
+        "task_type" => task_type&.to_s,
+        "base_model_name_or_path" => base&.to_s,
+        "r" => adapter.rank,
+        "lora_alpha" => adapter.alpha,
+        "lora_dropout" => 0.0,
+        "target_modules" => adapter.on.to_a,
+        "bias" => "none",
+        "fan_in_fan_out" => false,
+        "init_lora_weights" => true,
+        "inference_mode" => true,
+        "use_rslora" => false,
+        "use_dora" => false,
+        "rank_pattern" => {},
+        "alpha_pattern" => {},
+        "modules_to_save" => nil,
+        "layers_to_transform" => nil,
+        "layers_pattern" => nil,
+        "revision" => nil
+      }
+    end
+
+    # Writes that config into `dir`, beside what the engine wrote, and
+    # returns its path.
+    def self.write_adapter_config(dir, adapter, base: nil, task_type: nil)
+      config = adapter_config(adapter, base:, task_type:)
+      FileUtils.mkdir_p(dir)
+      path = File.join(dir, "adapter_config.json")
+      File.write(path, "#{JSON.pretty_generate(config)}\n")
+      path
     end
 
     def initialize(dir, from: nil, pooling: nil, pooling_dim: nil)

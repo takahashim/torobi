@@ -1,7 +1,7 @@
 # Torobi QLoRA 対応 仕様と計画
 
-- Status: **Phase 0、1、2 を実装**(2026-11-08、plan.md §15.76)。Rust のテストと
-  実物の比較は GPU のある機械でまだ走らせていない(§9)。Phase 3 は未着手
+- Status: **Phase 0〜3 を実装**(2026-11-08、plan.md §15.76)。Rust のテストと
+  実物の比較、PEFT での読み戻しは GPU のある機械でまだ走らせていない(§9)
 - Date: 2026-11-08(同日、コードと突き合わせたレビューを反映。§8)
 - 対象: `docs/plan.md` の M6 に「量子化 op」として据え置かれていたもの
 - 前提: Ruby が言語を所有し、Rust は実行だけを所有する(plan.md の原則)
@@ -339,7 +339,7 @@ tied embedding(Qwen2.5-0.5B がそう)では `lm_head` は `linear` ではなく
 | `param_norm` | `self.params` 全体のノルム(§2.1)に packed u32 が混ざる。**u32 を除く**(ノルムは「重みの大きさ」で、packed はそれではない) |
 | checkpoint 保存 | 全パラメータを書くので u32 の packed もそのまま書かれる。manifest の dtype に `"u32"` が増える。再開は形と dtype の一致で通る |
 | checkpoint 容量 | base 4.5 bit + adapter。32B で 17 GiB。「adapter だけを書く」は QLoRA 固有ではなく LoRA 全体の話なので、ここでは扱わない(§7) |
-| `export_model!` | Phase 1: **u32 を含むモデルは断る**。`export.rs` は全パラメータを f32 にして書くので(§2.1)、adapter 無しで開いた量子化モデルは今のままだと packed が f32 の数として書かれる。`refuse_adapted!` は残る。Phase 3 で 2 つ足す: (1) **adapter だけを PEFT 形式**(`adapter_model.safetensors` + `adapter_config.json`)で書く。QLoRA の成果物として実際に使うのはこれである。(2) merge: `dequantize(W) + scale × BA` を bf16 で書く。「量子化された base を書く」は mlx-lm 形式になり、別の話 |
+| `export_model!` | packed の重みは **dequantize した数を f32 で**書き、scales / biases は書かない(Phase 3 で。Phase 1 の間は u32 を含む export を断っていた)。`refuse_adapted!` は `merge:` 無しのとき残る。Phase 3 で 2 つ足した: (1) **adapter だけを PEFT 形式**(`adapter_model.safetensors` + `adapter_config.json`)で書く。QLoRA の成果物として実際に使うのはこれである。(2) merge: `dequantize(W) + scale × BA` を bf16 で書く。「量子化された base を書く」は mlx-lm 形式になり、別の話 |
 
 ### 3.7 プラットフォーム
 
@@ -509,6 +509,16 @@ inventory を生成してから。
 
 出口: PEFT で adapter を読み込んで、Torobi と同じ logits が出ること。
 
+**結果(2026-11-08)**: `export.rs` に `write_adapter`(`adapter_model.safetensors`、
+`base_model.model.{path}` の綴り、f32)と、`write` の merge(`merge: Option<f32>` が
+adapter の scale。`W + scale × B A` を f32 で計算し、A / B と packed の scales / biases は
+書かない)。packed の重みは adapter の有無に関わらず dequantize して書く(Phase 1 の
+「u32 を含む export は断る」はこれで解けた)。Ruby は `export_model!(dir, merge: adapter)` と
+`export_adapter!(dir, adapter:, base:, task_type:)`。`adapter_config.json` は `Export.adapter_config`
+が PEFT の `LoraConfig` の形で書く(`r`, `lora_alpha`, `target_modules`, `peft_type: "LORA"`)。
+merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6 の「bf16 で書く」から
+変えた。bf16 で欲しければ読む側で落とせる)。**PEFT で実際に読み戻す確認は未**(§9)。
+
 ### Phase 4(据え置き): §7 に挙げたもの
 
 ## 6. リスク
@@ -589,3 +599,7 @@ inventory を生成してから。
 - **Phase 2 の実測**(7B を RTX 3080 で、32B を Mac 48 GB で開いて `Torobi::Memory` を
   読む)は未着手。§1.2 の表はまだ見込みのまま。Rust の memory テストは小さい行列で
   「bf16 全体より小さい」を言うだけで、ピークの形は実物で見る。
+- **PEFT で adapter を読み戻して logits を比べる**(Phase 3 の出口)は未着手。
+  `adapter_config.json` の綴りは PEFT の `LoraConfig` の記憶に基づくので、読めなければ
+  `Export.adapter_config` を直す。mlx-lm の adapter 形式(`adapters.safetensors`、
+  `adapter_config.json` の `lora_parameters`)は別物で、やっていない。

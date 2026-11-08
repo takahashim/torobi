@@ -61,8 +61,15 @@ between two versions people have.
   the embedding still in bf16. A bf16 checkpoint opens as a quantized
   model too: a weight the graph holds packed and the file holds as
   numbers is quantized as it is read, once, with MLX's own `quantize`,
-  and the file's copy is let go before anything is evaluated. Exporting
-  an adapter or a merged model is not in yet.
+  and the file's copy is let go before anything is evaluated.
+- **An adapted run has two ways out.** `export_adapter!` writes the
+  adapter alone as PEFT saves one (`adapter_model.safetensors` under
+  `base_model.model.`, with an `adapter_config.json` that says `r`,
+  `lora_alpha` and `target_modules`). `export_model!(merge: adapter)`
+  folds it into the weights, `W + scale · B A`, and drops the matrices;
+  without `merge:` an adapted run is still refused, since its base
+  never moved. A quantized base is exported as the numbers it stands
+  for either way, scales and biases left behind.
 - **`Torobi::Models::Gemma3`**, which is deliberately not one of the
   above: four norms a layer rather than two, q and k normalized per
   head, norms that scale by `1 + w`, the tanh approximation of GELU, and

@@ -3851,6 +3851,15 @@ Ruby 15 件(全部 engine 無しで走る)、Rust 14 件。
 eval の前に消える。テストは bit 一致(同じ MLX の `quantize` と)、形の不一致の拒否、
 開いた直後の常駐が bf16 全体より小さいこと、の 3 本。これも未実行(下)。
 
+**Phase 3。** export の出口を 2 つ。`export_adapter!` は adapter だけを PEFT の綴り
+(`base_model.model.{path}.lora_A.weight`)で `adapter_model.safetensors` に書き、Ruby が
+`adapter_config.json` を添える(`r` / `lora_alpha` / `target_modules`)。`export_model!(merge:
+adapter)` は `W + scale × B A` を f32 で書いて A / B を落とす。packed の重みはどちらの
+経路でも dequantize した数になり、scales / biases は書かない。§15.68 以来の
+`refuse_adapted!` は `merge:` 無しのときだけ残り、メッセージが 2 つの出口を名指す。
+テストは Rust 3 本(merge の手計算 [6.5, 11]、PEFT の綴り、packed の dequantize)と Ruby
+(engine 無しで config の形、engine ありで読み戻し。後者は未実行)。
+
 **まだ確かめていないこと。** この作業は GPU の無い Linux の箱で行い、Rust は
 `cargo check --tests` まで(CI の ubuntu と同じ「bind まで」、link はこの箱では
 CUDA のライブラリが入らず未確認)。Rust のテストと、`mlx-community/Qwen2.5-0.5B-Instruct-4bit`

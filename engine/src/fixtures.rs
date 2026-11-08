@@ -267,6 +267,38 @@ pub fn reader_before_producer() -> (String, String) {
     (config, weights)
 }
 
+/// A linear with an adapter beside it (`Torobi::LoRA`): `l.weight` is
+/// frozen, `l.lora_A.weight` ([rank 1, d_in 2]) and `l.lora_B.weight`
+/// ([d_out 1, rank 1]) train. Small enough that a merge is arithmetic:
+/// W = [0.5, -1], A = [1, 2], B = [3].
+pub fn adapted() -> (String, String) {
+    let graph = json!({
+        "inputs": [input(0, "x", json!([null, 2]), "f32")],
+        "parameters": [
+            parameter(0, "l.weight", json!([1, 2]), false),
+            parameter(1, "l.lora_A.weight", json!([1, 2]), true),
+            parameter(2, "l.lora_B.weight", json!([1, 1]), true),
+        ],
+        "nodes": [
+            node(0, "parameter", json!([]), json!([0])),
+            node(1, "parameter", json!([]), json!([1])),
+            node(2, "parameter", json!([]), json!([2])),
+            node(3, "mul", json!(["input:0", "node:1"]), json!([])),
+            node(4, "mul", json!(["node:3", "node:2"]), json!([])),
+            node(5, "mean", json!(["node:4"]), json!([])),
+        ],
+        "outputs": {"loss": "node:5"},
+    });
+    let config = config(json!({"m": graph}), Value::Null, json!(["m"]));
+    let weights = json!({"params": {
+        "m.l.weight": {"shape": [1, 2], "data": [0.5, -1.0]},
+        "m.l.lora_A.weight": {"shape": [1, 2], "data": [1.0, 2.0]},
+        "m.l.lora_B.weight": {"shape": [1, 1], "data": [3.0]},
+    }})
+    .to_string();
+    (config, weights)
+}
+
 /// A linear held quantized (docs/qlora.md), and the file it is read from.
 ///
 /// `proj` is three frozen parameters (a packed u32 weight, scales and
