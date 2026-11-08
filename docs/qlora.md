@@ -56,7 +56,7 @@ embedding は bf16」である。小さいモデルほど embedding の比率が
 
 | モデル | パラメータ | bf16 | 全部 4.5 bit | **linear 4.5 bit + embedding bf16** | 備考 |
 | --- | ---: | ---: | ---: | ---: | --- |
-| Qwen2.5-0.5B | 0.49 B | 0.92 GiB | 0.26 GiB | **0.44 GiB**(1/2.1) | テスト用。既存の LoRA テストと同じ実物。embedding 136 M が 272 MB、linear 358 M が 201 MB |
+| Qwen2.5-0.5B | 0.49 B | 0.92 GiB | 0.26 GiB | **0.44 GiB**(1/2.1) | **実測**(16 GB の Mac): 開いた後 0.446 GiB、開く途中の peak 0.649 GiB、step(batch 1 × seq 512)の peak 3.3〜3.7 GiB。embedding 136 M が 272 MB、linear 358 M が 201 MB |
 | Qwen2.5-7B / Llama-3.1-8B | 7.6 / 8.0 B | 14.2 / 15.0 GiB | 4.0 / 4.2 GiB | 4.7 / 4.9 GiB | RTX 3080 16 GB で活性と adapter を含めて載る見込み |
 | Qwen2.5-32B | 32.8 B | 61 GiB | 17.2 GiB | **18.2 GiB** | Mac 48 GB で載る。16 GB NVIDIA には載らない |
 | llm-jp-4.1-33b | 33 B | 61 GiB | 17.3 GiB | 17.3 GiB + embedding(vocab 次第で 1 GiB 前後) | 同上 |
@@ -639,7 +639,14 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
   直し: `Source::materialize` が作ったパラメータを `EVAL_BUDGET`(64 MiB)ごとに評価する。
   ピークは「作ったもの + 1 回分の読み込み(packed なら 3.5 倍)」になる見込み。
   Rust のテスト(8 本の重みを 1 本ずつ評価してピークがファイルより小さい)を足した。
-  再計測待ち。
+- **直した後の 0.5B(同日)**: `rake rust_test` は全部通過。開いている最中の peak は
+  **1.031 → 0.649 GiB**、開いた後の active は 0.446 GiB のまま。peak と active の差
+  0.203 GiB は、予想した「1 区切り分の bf16 読み込み」(64 MiB × 3.5 ≒ 0.22 GiB)と合う。
+  この上乗せは区切りの大きさで決まりモデルの大きさには依らないので、**7B を開く peak は
+  4.7 + 0.2 ≒ 4.9 GiB の見込み**(実測ではない)。
+  step(batch 1 × seq 512)の peak は 3.27 GiB(2 回目までで 3.70 GiB)、step 後の active は
+  0.451 GiB(adapter と optimizer state は 5 MB)。step の peak の大半は活性で、Torobi には
+  gradient checkpointing が無いので系列長と層の幅にそのまま比例する。
 - **「うまくできそうか」の判断**は、載るか(上の計測)・学習が進むか・速いか、の 3 つに
   分けた。学習が進むかは `tools/qlora_curve.rb`(§6 の品質の行)で 0.5B の bf16 LoRA と
   4 bit LoRA を同条件で並べる。速さは同じスクリプトの `seconds_per_step` の比。
