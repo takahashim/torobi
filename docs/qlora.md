@@ -761,3 +761,23 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
   1.5B でも成り立つ。「大きいほど差が縮む」は、この 2 点では見えない。rank 8 が大きな行列に
   対して足りない可能性があり、`--rank 32` と `--group-size 32` を 1.5B で試すのが次。
   seed 1 つ、held-out 32 記事なので、ばらつきの幅は測っていない。
+- **bf16 のモデルは、実は f32 で計算していた(2026-11-09)。** `qlora_memory.rb` を
+  0.5B / 1.5B、bf16 / 4 bit で並べると(batch 1、seq 128)、step の peak から重みを引いた
+  余分は、bf16 の run が 4 bit の run より 0.5B で 1.28 GiB、1.5B で 4.69 GiB 多かった。
+  これは bf16 で持った linear の重みのバイト数(0.67 と 2.44 GiB)の **どちらも 1.9 倍**、
+  つまり **全 linear の重みの f32 コピー**に当たる。原因は engine が数値の定数を f32 の
+  配列で作っていたこと: MLX の配列は型が強く、bf16 × f32 は f32 になる。`rms_norm` の
+  eps、スカラー演算(LoRA の scale、Gemma の `1 + w` と埋め込みの scale)、relu、gelu、
+  dropout、rope の cos / sin、sdpa の加算 mask がどれも bf16 を f32 に格上げしていて、
+  最初の norm から先は活性がすべて f32 になり、f32 の活性と bf16 の重みの matmul ごとに
+  MLX が重みを f32 に揃えていた。IR は bf16 と宣言したままだった。
+  直し: 定数は入力と同じ dtype で作る。norm と rope は f32 で計算して入力の dtype に
+  戻す(MLX の fused な norm / rope と同じ)。sdpa の mask は scores の dtype に揃える
+  (mlx-lm と同じ)。そして **engine は各ノードの出力 dtype を IR の宣言と照らし、違えば
+  そのノードを名指しして断る**。同じ種類の取りこぼしは、以後黙っては通らない。
+  **これまでの bf16 の数字への影響**: (1) bf16 の LoRA のメモリは本来より大きく出ていた。
+  (2) mlx-lm との forward の差(hidden 3〜6 %)を「bf16 の丸めの積もり」と説明したのは、
+  Torobi が f32、mlx-lm が bf16 で計算していたことの方が大きかった可能性がある。直した後に
+  `test/qlora_test.rb` を `MARGIN=1` で再実行すれば、差が縮むかで分かる。(3) 学習の比較は
+  bf16 の run も 4 bit の run も活性が f32 だったので、両者の差の比較としては公平だが、
+  数字そのものは bf16 で計算し直すと動く。0.5B の全 linear の run をやり直して確かめる。

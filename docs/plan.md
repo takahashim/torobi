@@ -3881,3 +3881,18 @@ mlx-lm との forward の比較(`rake oracle:qwen2_4bit_forward` → `test/qlora
 ディレクトリ)を受けて shard を 1 つの map に合わせる。同じ名前が 2 つの shard にあれば断る。
 `pretrained:` にディレクトリを渡せるようになったのはこの副産物。計測は
 `tools/qlora_memory.rb`。
+
+
+### 15.77 bf16 と宣言したモデルが f32 で計算していた(2026-11-09)
+
+§15.51 で bf16 を足したとき、確かめたのはパラメータが bf16 で持たれ、メモリが半分に
+なることだった。活性の dtype は確かめていなかった。QLoRA の計測(qlora.md §9)で、bf16
+の run の step の peak に全 linear の重みの f32 コピーが乗っていることが分かり、辿ると
+engine が数値の定数を f32 の配列で作っていた。MLX の配列は型が強いので bf16 × f32 は f32
+で、`rms_norm` の eps から先は活性がすべて f32 になっていた。IR は bf16 と言い続けていた。
+
+直したのは 3 つ。定数は入力の dtype で作る。norm と rope は f32 で計算して入力の dtype に
+戻す。sdpa の mask は scores の dtype に揃える。そして、これが本題だが、**engine が各ノードの
+出力 dtype を IR の宣言と照らして、違えば断る**。§15.51 のテストが通ったのは、確かめて
+いないものが壊れていたからで、「IR が言う dtype と engine が計算する dtype は同じ」という
+契約は、言葉ではなく検査で持つ。

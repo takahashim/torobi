@@ -275,6 +275,9 @@ pub struct Node {
     pub inputs: Vec<Ref>,
     /// A stable name a tap can ask for, or none.
     pub name: Option<String>,
+    /// The dtype the graph declares this node produces, which the
+    /// interpreter holds what it computed to (`interp::evaluate_tapped`).
+    pub dtype: Option<Dtype>,
 }
 
 /// A graph in the form the interpreter runs.
@@ -321,10 +324,16 @@ impl Program {
                 }
             );
 
+            let dtype = spec
+                .dtype
+                .as_deref()
+                .map(|name| dtype_named(name).with_context(|| format!("{where_}: unknown dtype {name:?}")))
+                .transpose()?;
             nodes.push(Node {
                 op,
                 inputs,
                 name: spec.name.clone(),
+                dtype,
             });
         }
 

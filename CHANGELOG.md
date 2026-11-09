@@ -10,6 +10,17 @@ between two versions people have.
 
 ## Unreleased
 
+### Fixed
+
+- **A model held in bf16 computed in f32.** Constants the engine made
+  for itself (a norm's epsilon, a scalar op's number, a rotary
+  embedding's angles, an attention mask) were f32 arrays, and MLX
+  promotes bf16 combined with f32 to f32, so everything after the first
+  norm ran in f32 and every matmul made an f32 copy of its weight. The
+  constants now take their input's dtype, the norms and the rotation
+  are computed in f32 and returned in their input's, and the engine
+  refuses a node whose result is not the dtype the graph declares.
+
 ### Added
 
 - **A Graph DSL and an immutable `GraphConfig`.** Models and objectives

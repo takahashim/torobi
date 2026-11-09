@@ -79,6 +79,11 @@ pub struct NodeSpec {
     pub inputs: Vec<String>,
     pub parameters: Vec<usize>,
     pub attributes: serde_json::Map<String, serde_json::Value>,
+    /// What the graph says this node produces. The Ruby side always
+    /// writes it; a hand-written graph may leave it out, and then nothing
+    /// is checked.
+    #[serde(default)]
+    pub dtype: Option<String>,
 }
 
 /// "input:3" -> (Input, 3); "node:7" -> (Node, 7).
