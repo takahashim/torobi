@@ -834,3 +834,13 @@ QLoRA に限らず、bf16 で Torobi を使うすべての run に効く。
 まだ言えないこと: 7B / 32B での実測(機材とディスク)、大きいモデルで差が縮むか(0.5B →
 1.5B では縮まなかった。seed 1 つ、held-out 32 記事)、PEFT で書き出した adapter を読めるか、
 CUDA(RTX 3080)で動くか。
+- **PEFT の形式をソースで確かめた(2026-11-09、peft 0.21.2)。** 鍵は保存時
+  `base_model.model.<module path>.lora_A.weight` で、読み込み時に adapter 名が差し込まれる
+  (`utils/save_and_load.py` `_insert_adapter_name_into_state_dict`)。Torobi は
+  `base_model.model.` + checkpoint と同じ module path を書くので一致する。A, B の形は
+  `nn.Linear(in, r)` / `nn.Linear(r, out)` の重みで `[r, in]` / `[out, r]`、Torobi の
+  `[rank, d_in]` / `[d_out, rank]` と一致。scale は `use_rslora: false` で `lora_alpha / r`、
+  Torobi の `alpha / rank` と一致。`Export.adapter_config` が書く 21 項目は、どれも
+  `LoraConfig` / `PeftConfig` が宣言している。**読んで確かめたもので、走らせてはいない。**
+  クラウド環境では torch(CUDA 13 の依存込みで数 GB)を絞られた帯域で落とすことになり、
+  入らなかった。走らせる確認は `tools/peft_check.py`(layout と numbers)で Mac から。
