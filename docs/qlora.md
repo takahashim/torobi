@@ -1,8 +1,8 @@
 # Torobi QLoRA 対応 仕様と計画
 
 - Status: **Phase 0〜3 を実装し、16 GB の Mac で 0.5B / 1.5B の QLoRA が成立することを
-  確かめた**(2026-11-09、plan.md §15.76〜77、§10 に結論)。残るのは 7B / 32B の実測、PEFT での
-  読み戻し、CUDA での動作確認
+  確かめた。Torobi が書き出した adapter を PEFT で読み、同じ logits が出ることも確かめた**
+  (2026-11-09、plan.md §15.76〜77、§10 に結論)。残るのは 7B / 32B の実測と CUDA での動作確認
 - Date: 2026-11-08(同日、コードと突き合わせたレビューを反映。§8)
 - 対象: `docs/plan.md` の M6 に「量子化 op」として据え置かれていたもの
 - 前提: Ruby が言語を所有し、Rust は実行だけを所有する(plan.md の原則)
@@ -515,7 +515,7 @@ inventory を生成してから。
 | `export_adapter!`(PEFT 形式) | `adapter_model.safetensors`(`base_model.model.{path}.lora_A.weight` の綴り)と `adapter_config.json`(`r`, `lora_alpha`, `target_modules`)。PEFT / mlx-lm で読めることをテスト |
 | merge | `dequantize(W) + (alpha / rank) × BA` を bf16 で書く。`refuse_adapted!` と Phase 1 の u32 拒否は、これが通る経路を得る。量子化 base のまま書くのは mlx-lm 形式であり、ここではやらない |
 
-出口: PEFT で adapter を読み込んで、Torobi と同じ logits が出ること。
+出口: PEFT で adapter を読み込んで、Torobi と同じ logits が出ること。**通った**(下と §9)。
 
 **結果(2026-11-08)**: `export.rs` に `write_adapter`(`adapter_model.safetensors`、
 `base_model.model.{path}` の綴り、f32)と、`write` の merge(`merge: Option<f32>` が
@@ -839,9 +839,10 @@ adapter。adapter の rank を上げるより group を細かくする方が効�
 LoRA の行列を bf16 で持つと更新が丸めで消えること(mlx-lm と同じく f32 で持つ)。最後の 2 つは
 QLoRA に限らず、bf16 で Torobi を使うすべての run に効く。
 
+書き出した adapter は PEFT(0.21.2)がそのまま読み、Torobi と同じ logits を出す(相対 1.4e-5)。
+
 まだ言えないこと: 7B / 32B での実測(機材とディスク)、大きいモデルで差が縮むか(0.5B →
-1.5B では縮まなかった。seed 1 つ、held-out 32 記事)、PEFT で書き出した adapter を読めるか、
-CUDA(RTX 3080)で動くか。
+1.5B では縮まなかった。seed 1 つ、held-out 32 記事)、CUDA(RTX 3080)で動くか。
 - **PEFT の形式をソースで確かめた(2026-11-09、peft 0.21.2)。** 鍵は保存時
   `base_model.model.<module path>.lora_A.weight` で、読み込み時に adapter 名が差し込まれる
   (`utils/save_and_load.py` `_insert_adapter_name_into_state_dict`)。Torobi は
@@ -858,3 +859,11 @@ CUDA(RTX 3080)で動くか。
   group size でも割り切れる。バイト数は bf16 0.499 GiB → 0.365 GiB(0.73 倍)にしか減らない:
   語彙 262k の embedding がパラメータの 63 % を占め、量子化しないから。小さい Gemma で
   QLoRA を使う意味は薄い。engine での forward と step はまだ試していない。
+- **PEFT で読み戻した(2026-11-09、16 GB の Mac、peft 0.21.2、transformers と torch は uv で)**:
+  `tools/peft_export.rb` が Qwen2.5-0.5B を f32 で開き、rank 8 の adapter(q_proj / v_proj)を
+  20 step 学習して(loss 5.70 → 0.0028。B が 0 から十分離れる)書き出した。
+  `peft_check.py layout`: LoRA のモジュール 48 個、テンソル 96 個が過不足なく一致、
+  `adapter_config.json` は警告なく読まれ、各モジュールが `W x + (alpha / r) B A x` を計算する。
+  `peft_check.py numbers`: 2 case とも次のトークンが一致、logits の差は相対 1.4e-5(許容 2e-4)。
+  adapter 無しの Torobi 対 transformers の差(hidden で 1.4e-5)と同じ大きさで、adapter を
+  通しても誤差は増えていない。**Phase 3 の出口を満たした。**
