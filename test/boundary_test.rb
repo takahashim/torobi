@@ -100,13 +100,20 @@ class BoundaryTest < Minitest::Test
   # file is normally fetched rather than refused. What must still hold is
   # the failure when it cannot be fetched: an exception before MLX is
   # touched, not the abort a missing metallib would cause at the device.
-  # The fetch is stubbed to fail so the test reaches no network.
+  # The fetch is stubbed to fail so the test reaches no network, and the
+  # cache is pointed somewhere empty: a machine that has fetched the
+  # kernels before holds a copy there (`Metallib.resolved` looks beside
+  # the bundle, then in the cache, then fetches), and finding it is not
+  # the case under test.
   def test_a_metallib_that_cannot_be_fetched_is_refused_before_mlx_is_touched
     skip "the metallib is Apple's artifact" unless MlxPrebuilt.metal?
 
     body = <<~RUBY
       module MlxPrebuilt
         def self.fetch_metallib(**) = raise Refused, "no network (test)"
+      end
+      module Torobi::Metallib
+        def self.cached_path = #{File.join(Dir.tmpdir, "torobi-no-metallib-cache", "mlx.metallib").inspect}
       end
       config, weights, batch = build
       begin
