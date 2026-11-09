@@ -181,7 +181,7 @@ impl std::fmt::Debug for Optimizer {
 
 /// Zeros shaped like each differentiated parameter: a moment's start.
 fn zeros_for(params: &[Array], argnums: &[i32]) -> Result<Vec<Array>> {
-    argnums.iter().map(|&i| Ok(zeros_like(&params[i as usize])?)).collect()
+    argnums.iter().map(|&i| slot_for(&params[i as usize])).collect()
 }
 
 impl Optimizer {
@@ -246,8 +246,8 @@ impl Optimizer {
                     next_v.push(v[slot].clone());
                 }
                 None => {
-                    next_m.push(zeros_like(&params[i as usize])?);
-                    next_v.push(zeros_like(&params[i as usize])?);
+                    next_m.push(slot_for(&params[i as usize])?);
+                    next_v.push(slot_for(&params[i as usize])?);
                 }
             }
         }
@@ -299,7 +299,8 @@ impl Optimizer {
                 let lr = Array::from_f32(lr)?;
                 for (&i, grad) in argnums.iter().zip(grads) {
                     let i = i as usize;
-                    params[i] = params[i].subtract(grad.multiply(&lr)?)?;
+                    let next = params[i].subtract(grad.multiply(&lr)?)?;
+                    params[i] = held_as(next, &params[i])?;
                 }
             }
             (
@@ -347,7 +348,7 @@ impl Optimizer {
                         let decay = Array::from_f32(lr * weight_decay)?;
                         next = next.subtract(params[i].multiply(&decay)?)?;
                     }
-                    params[i] = next;
+                    params[i] = held_as(next, &params[i])?;
                 }
             }
             (Config::AdamW { .. }, Moments::None) => {
@@ -358,10 +359,55 @@ impl Optimizer {
     }
 }
 
+/// An optimizer slot for `param`: zeros of its shape, in f32 whatever
+/// the parameter is held in. The moments are running averages of
+/// gradients and their squares, and bf16's eight bits are too few to
+/// average in; f32 is what they would have become after the first step
+/// anyway, since the update's constants are f32.
+fn slot_for(param: &Array) -> Result<Array> {
+    let zeros = zeros_like(param)?;
+    Ok(if zeros.dtype() == Dtype::Float32 { zeros } else { zeros.as_dtype(Dtype::Float32)? })
+}
+
+/// The updated parameter, held as the parameter was.
+///
+/// The step is computed in f32 (its learning rate, its moments), and MLX
+/// promotes a bf16 parameter combined with them to f32. Left that way, a
+/// bf16 model's trained parameters became f32 after its first step and
+/// stayed so, against what the graph declares (docs/plan.md 15.77); the
+/// engine's dtype check is what found it.
+fn held_as(next: Array, param: &Array) -> Result<Array> {
+    Ok(if next.dtype() == param.dtype() { next } else { next.as_dtype(param.dtype())? })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mlxc::transforms::eval;
+
+    /// A bf16 parameter is still bf16 after a step, by either rule, and
+    /// its moments are f32 from the start.
+    #[test]
+    fn a_step_keeps_a_parameter_in_the_dtype_it_is_held_in() {
+        crate::runtime::runtime()
+            .execute(|| {
+                for config in [
+                    Config::Sgd { lr: 0.1, clip: None },
+                    Config::AdamW { lr: 0.1, beta1: 0.9, beta2: 0.999, eps: 1e-8, weight_decay: 0.01, clip: None },
+                ] {
+                    let mut params = vec![array(&[1.0, 2.0]).as_dtype(Dtype::Bfloat16)?];
+                    let grads = vec![array(&[0.5, -0.5]).as_dtype(Dtype::Bfloat16)?];
+                    let optimizer = Optimizer::new(config.clone(), &params, &[0])?;
+                    let next = optimizer.next(&mut params, &[0], &grads)?;
+                    assert_eq!(params[0].dtype(), Dtype::Bfloat16, "{config:?}");
+                    for slot in next.arrays() {
+                        assert_eq!(slot.dtype(), Dtype::Float32, "{config:?}");
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
 
     fn array(values: &[f32]) -> Array {
         Array::from_slice(values, &[values.len() as i32]).unwrap()

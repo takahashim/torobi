@@ -313,7 +313,9 @@ class ExportTest < Minitest::Test
     adapter, config, params = adapted
     out = File.join(@dir, "merged")
     Torobi::Session.open(config, weights: { params: }) do |s|
-      written = s.export_model!(out, merge: adapter)
+      # No source to carry from, so the pooling width is said, as any
+      # export without `from:` says it.
+      written = s.export_model!(out, merge: adapter, pooling: :mean, pooling_dim: 2)
 
       assert_equal({ "m.head.weight" => "head.weight" }, written)
     end
