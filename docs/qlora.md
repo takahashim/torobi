@@ -30,6 +30,12 @@ Phase 1 は「engine の読み込み経路に変更は要らない」では済�
 **dequantize する規則**が 1 つ要る(§3.4 (A'))。dequantize の束縛は Phase 0 で作るので
 足す量は小さい。
 
+**結果(2026-11-09)。** Phase 0〜3 を実装し、16 GB の Mac で 0.5B / 1.5B の QLoRA が成立する
+ことを確かめた: 載る、学習が進む(全 linear の adapter で bf16 LoRA との held-out の差は 0.5B で
+2.9 %、1.5B で 4.4 %、g32 なら 3.2 %、8 bit なら 0.1 % 未満)、速度は bf16 の 1.15 倍の時間。
+途中で、bf16 と宣言したモデルが f32 で計算していた不具合(plan.md §15.77)を見つけて直した。
+結論は §10、経過は §9。
+
 ## 1. 目的
 
 ### 1.1 何を可能にするか
@@ -56,9 +62,10 @@ embedding は bf16」である。小さいモデルほど embedding の比率が
 
 | モデル | パラメータ | bf16 | 全部 4.5 bit | **linear 4.5 bit + embedding bf16** | 備考 |
 | --- | ---: | ---: | ---: | ---: | --- |
-| Qwen2.5-0.5B | 0.49 B | 0.92 GiB | 0.26 GiB | **0.44 GiB**(1/2.1) | **実測**(16 GB の Mac): 開いた後 0.446 GiB、開く途中の peak 0.649 GiB、step(batch 1 × seq 512)の peak 3.3〜3.7 GiB。embedding 136 M が 272 MB、linear 358 M が 201 MB |
-| Qwen2.5-7B / Llama-3.1-8B | 7.6 / 8.0 B | 14.2 / 15.0 GiB | 4.0 / 4.2 GiB | 4.7 / 4.9 GiB | RTX 3080 16 GB で活性と adapter を含めて載る見込み |
-| Qwen2.5-32B | 32.8 B | 61 GiB | 17.2 GiB | **18.2 GiB** | Mac 48 GB で載る。16 GB NVIDIA には載らない |
+| Qwen2.5-0.5B | 0.49 B | 0.92 GiB | 0.26 GiB | **0.44 GiB**(1/2.1) | **実測**(16 GB の Mac): 開いた後 0.446 GiB、開く途中の peak 0.649 GiB。全 linear の adapter、batch 4 × seq 128 の学習で peak 2.87 GiB(bf16 base なら 3.32)。embedding 136 M が 272 MB、linear 358 M が 201 MB |
+| Qwen2.5-1.5B | 1.54 B | 2.88 GiB | — | 1.12 GiB | **実測**: 開いた後 1.13 GiB。bf16 base で batch 1 × seq 128 の step の peak 3.59 GiB(§15.77 の直しの後) |
+| Qwen2.5-7B / Llama-3.1-8B | 7.6 / 8.0 B | 14.2 / 15.0 GiB | 4.0 / 4.2 GiB | 4.7 / 4.9 GiB | **推定**: 開く peak 約 4.9 GiB、batch 1 × seq 128 の step で 7 GiB 前後。16 GB の Mac でも配布の `*-4bit`(約 4.3 GB)から開ける見込み。未実測 |
+| Qwen2.5-32B | 32.8 B | 61 GiB | 17.2 GiB | **18.2 GiB** | 24 GB 以上の機材が要る。手元の 16 GB には載らない(計画時に想定した 48 GB の Mac は無い) |
 | llm-jp-4.1-33b | 33 B | 61 GiB | 17.3 GiB | 17.3 GiB + embedding(vocab 次第で 1 GiB 前後) | 同上 |
 | llm-jp-4.1-32b-a3b(MoE) | 32 B | 60 GiB | 17 GiB | — | **対象外**。expert の `gather_qmm` と MoE の記述が別に要る(§7) |
 
@@ -582,9 +589,10 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
 - `cast` の検査は `IR::Dtype.check!` が `ALL` を見るので、u32 の明示の除外が要ること。
 - `GraphConfig` の検査は「u32 が trainable」の dtype 検査に絞った。DSL では起こり得ない。
 
-## 9. 実装の記録と、まだ言えないこと
+## 9. 実装と計測の記録(時系列)
 
-実装は plan.md §15.76。この節は「何がまだ確かめられていないか」の一覧で、確かめたら消す。
+実装は plan.md §15.76〜77。この節は起きた順の記録で、途中の推測や、後で覆った説明も
+そのまま残している(覆ったものは後の項に書いてある)。結論だけなら §10。
 
 - **Rust のテストの初回(2026-11-08、GPU 機で `rake rust_test`)**: 204 本中 198 本が通り、
   6 本が落ちた。直したのは (1) `to_tensor` が u32 を断っていたせいで RNG のキー(u32)が
