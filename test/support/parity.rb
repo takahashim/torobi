@@ -202,16 +202,20 @@ module Parity
   # implementation of it (a published 4-bit file against mlx-lm,
   # docs/qlora.md Phase 1).
   #
-  # Measured (2026-11-08, Qwen2.5-0.5B-Instruct-4bit, MARGIN=1): the
-  # scores at the last position differ from mlx-lm's by 8.2e-3 and the
-  # next token agrees; the hidden states differ by 3.3e-2 and 5.9e-2
-  # against mlx-lm, and by 4.2e-2 between Torobi reading the same file
+  # Measured (2026-11-09, Qwen2.5-0.5B-Instruct-4bit, MARGIN=1, with the
+  # model computing in bf16 throughout, docs/plan.md 15.77): the scores
+  # at the last position differ from mlx-lm's by 1.6e-2 and 1.4e-2 and
+  # the next token agrees; the hidden states differ by 4.8e-2 and 6.5e-2
+  # against mlx-lm, and by 5.1e-2 between Torobi reading the same file
   # packed and reading it as numbers. That last number is the floor: the
   # two readings differ only by rounding each weight to bf16 once, and
   # still come apart this far, because Qwen2.5's residual stream holds
   # values near 200 where a bf16 step is 1.0, and 24 layers of bf16 adds
-  # walk a few steps. The scores are a projection of that stream and
-  # average the walk out, which is why they get the tighter of the two.
+  # walk a few steps. Before 15.77 Torobi computed in f32 and these were
+  # smaller (3.3e-2 and 5.9e-2): the difference was then mostly mlx-lm's
+  # own bf16 error, and now it is two independent ones. The scores are a
+  # projection of that stream and average the walk out, which is why
+  # they get the tighter of the two.
   # Anything wired differently is off by the scale itself, not by a tenth
   # of it; the f32 comparison beside these (`PARITY_PACKED`) is what
   # holds the wiring, and these hold the bf16 path to being the same
