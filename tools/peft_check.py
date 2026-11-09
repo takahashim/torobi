@@ -38,6 +38,24 @@ def lora_modules(model):
     return {name: module for name, module in model.named_modules() if isinstance(module, LoraLayer)}
 
 
+def require_adapter(adapter_dir):
+    """Refuses a directory that holds no adapter, before PEFT is asked.
+
+    PEFT reads a path it cannot find as the name of a repository on the
+    Hub and asks huggingface.co for it, which is a 404 about a repository
+    nobody meant rather than a missing directory.
+    """
+    from pathlib import Path
+
+    wanted = [Path(adapter_dir) / name for name in ("adapter_config.json", "adapter_model.safetensors")]
+    missing = [str(path) for path in wanted if not path.is_file()]
+    if missing:
+        sys.exit(
+            f"no adapter at {adapter_dir}: {', '.join(missing)} not found. "
+            "Write one first: ruby tools/peft_export.rb <checkpoint-dir> <out-dir>"
+        )
+
+
 def load(base, adapter_dir):
     """The base with the adapter in it, and what loading left unmatched."""
     from peft import LoraConfig, PeftModel
@@ -65,7 +83,7 @@ def layout(args) -> int:
     torch.manual_seed(0)
     with open(args.config) as f:
         raw = json.load(f)
-    base = AutoModelForCausalLM.from_config(AutoConfig.for_model(**raw), torch_dtype=torch.float32)
+    base = AutoModelForCausalLM.from_config(AutoConfig.for_model(**raw), dtype=torch.float32)
     base.eval()
     model, config, expected, missing, unexpected = load(base, args.adapter)
 
@@ -119,7 +137,7 @@ def numbers(args) -> int:
 
     with open(args.reference) as f:
         reference = json.load(f)
-    base = AutoModelForCausalLM.from_pretrained(args.base, torch_dtype=torch.float32)
+    base = AutoModelForCausalLM.from_pretrained(args.base, dtype=torch.float32)
     base.eval()
     model, _, _, missing, unexpected = load(base, args.adapter)
     failures = []
@@ -164,6 +182,7 @@ def main() -> int:
     # as `Parity::PARITY` holds the bf16-free comparison.
     two.add_argument("--tolerance", type=float, default=2e-4)
     args = parser.parse_args()
+    require_adapter(args.adapter)
     return layout(args) if args.check == "layout" else numbers(args)
 
 
