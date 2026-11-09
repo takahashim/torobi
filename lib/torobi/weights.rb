@@ -18,6 +18,11 @@ module Torobi
   class Weights
     # Says which way, or refuses. `fresh` names the parameters meant to
     # be in no file, which only a published model can be missing.
+    #
+    # A `pretrained:` path is the model's `model.safetensors`, or the
+    # `model.safetensors.index.json` of one published in shards, or the
+    # directory holding either: a 7B model comes as four files and an
+    # index, and the engine reads them as one.
     def self.of(weights: nil, weights_file: nil, pretrained: nil, fresh: [])
       fresh = Array(fresh).map(&:to_s)
       if !fresh.empty? && pretrained.nil?
@@ -47,6 +52,30 @@ module Torobi
 
     # Which of the three this is: :weights, :weights_file or :pretrained.
     attr_reader :kind
+
+    # A packed quantized weight (u32) comes from a file and from nowhere
+    # else: there is no initializer that draws a 4-bit integer and the
+    # scale that reads it. `fresh:` naming one is refused here, where it
+    # is said, rather than as zeros that quietly stand for a model.
+    def check_fresh!(config)
+      packed = config.parameters.select do |parameter|
+        parameter.spec.dtype == :u32 && @fresh.any? do |pattern|
+          Weights.matches?(pattern, parameter.qualified_path)
+        end
+      end
+      return self if packed.empty?
+
+      raise ConfigError,
+            "fresh: names #{packed.first.qualified_path.inspect}, which is a packed quantized " \
+            "weight (u32) and cannot be initialized. Give a quantized file, or declare the " \
+            "model in bf16 and let it be quantized when it is read."
+    end
+
+    # The engine's pattern language (`plan.rs` `Pattern`): a path, or a
+    # prefix ending in `*`.
+    def self.matches?(pattern, path)
+      pattern.end_with?("*") ? path.start_with?(pattern.delete_suffix("*")) : path == pattern
+    end
 
     # Opens the engine the way this source is read.
     def open(config, optimizer, seed)

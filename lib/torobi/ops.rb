@@ -13,6 +13,7 @@ module Torobi
       "number" => ->(v) { v.is_a?(Numeric) },
       "number_or_null" => ->(v) { v.nil? || v.is_a?(Numeric) },
       "bool" => ->(v) { [true, false].include?(v) },
+      "string" => ->(v) { v.is_a?(String) },
       # A dtype by name, from the IR's own small vocabulary.
       "dtype" => ->(v) { IR::Dtype::ALL.include?(v.to_s.to_sym) },
       "int_list" => ->(v) { v.is_a?(Array) && v.all?(Integer) },

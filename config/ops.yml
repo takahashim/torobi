@@ -188,6 +188,16 @@
 - name: matmul
   inputs: 2
   shape_rule: matmul
+# The matmul of a weight held quantized: x @ dequantize(weight)ᵀ, read
+# packed (docs/qlora.md). Inputs are x, the packed u32 weight, the scales
+# and, for the affine mode, the biases. The attributes say how the weight
+# was quantized, since the arrays themselves do not; the weight is always
+# [d_out, d_in] as a linear holds it, so the transpose is not an option.
+- name: quantized_matmul
+  inputs: [3, 4]
+  attributes: { group_size: int, bits: int, mode: string }
+  shape_rule: quantized_matmul
+
 - name: take
   inputs: 2
   shape_rule: take

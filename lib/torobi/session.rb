@@ -119,7 +119,7 @@ module Torobi
     def self.open(config, weights: nil, weights_file: nil, pretrained: nil, fresh: [],
                   optimizer: DEFAULT_OPTIMIZER, seed: DEFAULT_SEED,
                   journal: nil, io: nil, dataset: nil, observer: nil)
-      source = Weights.of(weights:, weights_file:, pretrained:, fresh:)
+      source = Weights.of(weights:, weights_file:, pretrained:, fresh:).check_fresh!(config)
       Preflight.check!
       native = source.open(config, optimizer, seed)
       # Gathered whether or not anything is journalling: a checkpoint
@@ -435,20 +435,53 @@ module Torobi
     #   s.export_model!("out/ruri-ft", from: "ruri-v3-130m")
     #   s.export_model!("out/mean", from: "ruri-v3-130m", pooling: :mean)
     #
+    # `merge:` is the adapter (`Torobi::LoRA`) an adapted run was trained
+    # through, and folds it into the weights it adapted: `W + scale * BA`,
+    # the matrices themselves dropped. Without it an adapted run is
+    # refused, since its base never moved (`Export.refuse_adapted!`). A
+    # quantized base is written as the numbers it stands for either way,
+    # scales and biases left behind (docs/qlora.md section 3.6).
+    #
     # This is not a checkpoint: no optimizer state, no RNG, no counters.
     # It is the shape a run produces for serving, and `checkpoint!` is the
     # shape it produces for itself.
-    def export_model!(dir, from: nil, model: nil, pooling: nil, pooling_dim: nil)
+    def export_model!(dir, from: nil, model: nil, pooling: nil, pooling_dim: nil, merge: nil)
       paths = @native.parameter_paths
       model = (model || Export.sole_model(paths)).to_s
-      Export.refuse_adapted!(model, paths)
+      scale = merge && Export.scale_of(merge)
+      Export.refuse_adapted!(model, paths) unless scale
       atomically do
-        written = @native.export_model(model, dir.to_s)
+        written = @native.export_model(model, dir.to_s, scale)
         carried = Export.new(dir, from:, pooling:, pooling_dim:).publish
         # Last, so that a record of an export is a record of one that is
         # on disk whole.
         @journal&.note(step: @native.step, event: "exported", model:,
                        paths: written.map(&:last), carried:)
+        written.to_h
+      end
+    end
+
+    # Writes the adapter alone, as PEFT saves one (docs/qlora.md section
+    # 3.6): `adapter_model.safetensors` holding every `lora_A` and `lora_B`
+    # under `base_model.model.`, and `adapter_config.json` saying what
+    # they are (`Export.adapter_config`). What a fine-tune through an
+    # adapter actually produces, and the one thing of it worth passing on
+    # when the base is a published model everyone already has.
+    #
+    #   s.export_adapter!("out/adapter", adapter:, base: "Qwen/Qwen2.5-0.5B",
+    #                     task_type: "CAUSAL_LM")
+    #
+    # `adapter:` is the `Torobi::LoRA` the graph was built with; the engine
+    # knows the matrices, and this knows what they were declared to be.
+    def export_adapter!(dir, adapter:, model: nil, base: nil, task_type: nil)
+      paths = @native.parameter_paths
+      model = (model || Export.sole_model(paths)).to_s
+      config = Export.adapter_config(adapter, base:, task_type:)
+      atomically do
+        written = @native.export_adapter(model, dir.to_s)
+        Export.write_adapter_config(dir, adapter, base:, task_type:)
+        @journal&.note(step: @native.step, event: "exported_adapter", model:,
+                       paths: written.map(&:last), config:)
         written.to_h
       end
     end

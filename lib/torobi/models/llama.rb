@@ -217,27 +217,32 @@ module Torobi
       # what a published checkpoint is stored in anyway; the loss is read
       # as f32, so an objective over a bf16 model says where it comes
       # back (`g.cast(logits, :f32)`).
-      def causal_lm(config, seq:, rows: nil, adapter: nil, dtype: :f32)
+      # `quantization:` is a `Torobi::Quantization`, and holds the linears
+      # it names packed at a few bits a weight (docs/qlora.md). The
+      # embedding stays in `dtype:`, tied head included.
+      def causal_lm(config, seq:, rows: nil, adapter: nil, dtype: :f32, quantization: nil)
         config.check!
         build = Build.new(seq:, rows:, dtype:)
-        Torobi.graph { |g| Describe.new(g, config, build).causal_lm(adapter) }
+        Torobi.graph { |g| Describe.new(g, config, build).causal_lm(adapter, quantization) }
       end
 
       # The description itself: the builder, the config and what it is
       # built for are held once (`Models::Description`), so what a method
       # takes is the value flowing through it.
       class Describe < Description
-        def causal_lm(adapter)
-          hidden = adapting adapter do
-            encoded = scope "model" do
-              encode
+        def causal_lm(adapter, quantization = nil)
+          quantized quantization do
+            hidden = adapting adapter do
+              encoded = scope "model" do
+                encode
+              end
+              encoded.named("hidden")
             end
-            encoded.named("hidden")
+            # Not named: an untied head is a `linear`, which names its own
+            # node after its parameters, and `forward` reaches an output by
+            # the name the output has.
+            output :logits, head(hidden)
           end
-          # Not named: an untied head is a `linear`, which names its own
-          # node after its parameters, and `forward` reaches an output by
-          # the name the output has.
-          output :logits, head(hidden)
         end
 
         # The output projection, which is usually not a parameter of its

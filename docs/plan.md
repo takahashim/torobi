@@ -3808,3 +3808,97 @@ safetensors + 1_Pooling)は無変換で載る」を満たす出口を `Session#e
   で読むと `__metadata__` が `null` で入る (mlx-rs の仕様) ことに注意。
 
 この時点で Ruby 231 件 / Rust 121 件 (lib、`--test-threads=1`)。
+
+### 15.76 QLoRA、Phase 0 と Phase 1(2026-11-08)
+
+計画と仕様は docs/qlora.md。ここには段取りの結果だけ書く。
+
+**Phase 0。** `engine/src/mlxc/quantized.rs` に `quantize` / `dequantize` /
+`quantized_matmul` の 3 束縛。`mlx_optional_int` は struct の値渡しで、bindgen が
+そのまま出した型に `{ value, has_value: true }` を詰めるだけだった(§6 の懸念は杞憂)。
+`libmlx.a` の CUDA カーネルは `affine_quantize<bf16|half, 32|64|128, 2..8>` が全部
+実体化されていて、qlora.md §2.3 で「見えない」と書いた g64 もあった。テストは
+往復誤差、packed と dequantize → matmul の一致、x の勾配、**weight の勾配は MLX が断る**、
+**scales / biases の勾配は MLX が返す**(方針として Torobi が断る)、の 6 つ。
+
+**Phase 1。** 足したのは op 1 つ(`quantized_matmul`)、dtype 1 つ(`u32`)、読み込みの
+規則 1 つ(qlora.md §3.4 (A'))。設計で 2 つ変えた。
+
+- (A') の `group_size` / `bits` は graph から渡さず、**ファイルの形から逆算する**。
+  packed `[d_out, d_in × bits / 32]` と宣言 `[d_out, d_in]` で bits が、scales の
+  `[d_out, d_in / group_size]` で group_size が決まる。ファイルがどう量子化されたかを
+  知っているのはファイルだけで、graph に書かせると 2 つの真実ができる。
+- `Source::materialize` は `self` を消費する。ファイルの配列ハンドルは map から
+  `remove` して parameter に渡し、eval の前に source ごと手放す。dequantize した
+  embedding の元の packed が、eval が終わっても map に残る形を塞いだ。
+
+`fetch` は packed を dequantize した f32 を返す(Phase 3 から前倒し)。そのために
+`Plan` が `quantized_matmul` の入力を parameter node まで辿って、packed → (scales,
+biases, quantization) の表を持つ。`put` と `export` は u32 を断り、`param_norm` は
+u32 を除く。`thaw` は candidates(宣言 trainable)だけを動かすので、u32 には元から
+届かない。`GraphConfig` は「u32 が trainable」を、`Weights#check_fresh!` は
+「fresh: が u32 を名指す」を断る。
+
+数字: Qwen2.5-0.5B の宣言は bf16 0.92 GiB → 4 bit g64 で **0.44 GiB**(embedding は
+bf16 のまま。全部 4.5 bit なら 0.26 GiB だが、embedding は量子化しない)。テストは
+Ruby 15 件(全部 engine 無しで走る)、Rust 14 件。
+
+**Phase 2。** 同じ日に。`quantized_on_read`(`plan.rs`)が (B) の規則で、(A') と鏡像に
+なった: (A') は「宣言が数値、ファイルが packed」で dequantize、(B) は「宣言が packed、
+ファイルが数値」で quantize。どちらを見ているかは `Plan.packed`(`quantized_matmul` の
+入力を parameter node まで辿った表)で判る。module ごとに 1 回量子化して 3 つの宣言に
+配るキャッシュは `Source::Pretrained` に置き、`materialize` が source を消費するので
+eval の前に消える。テストは bit 一致(同じ MLX の `quantize` と)、形の不一致の拒否、
+開いた直後の常駐が bf16 全体より小さいこと、の 3 本。これも未実行(下)。
+
+**Phase 3。** export の出口を 2 つ。`export_adapter!` は adapter だけを PEFT の綴り
+(`base_model.model.{path}.lora_A.weight`)で `adapter_model.safetensors` に書き、Ruby が
+`adapter_config.json` を添える(`r` / `lora_alpha` / `target_modules`)。`export_model!(merge:
+adapter)` は `W + scale × B A` を f32 で書いて A / B を落とす。packed の重みはどちらの
+経路でも dequantize した数になり、scales / biases は書かない。§15.68 以来の
+`refuse_adapted!` は `merge:` 無しのときだけ残り、メッセージが 2 つの出口を名指す。
+テストは Rust 3 本(merge の手計算 [6.5, 11]、PEFT の綴り、packed の dequantize)と Ruby
+(engine 無しで config の形、engine ありで読み戻し。後者は未実行)。
+
+**GPU での初回(同日、`rake rust_test`)。** 204 本中 198 本が通った。落ちた 6 本の原因と
+直しは qlora.md §9。設計に関わるのは 1 つだけで、`to_tensor` で u32 を断ったのは
+行き過ぎだった: MLX の RNG キーが u32 で、境界を f32 として渡っている。「packed は
+境界を渡らない」は `fetch` が dequantize することで言えていて、`to_tensor` が言うことでは
+なかった。scales / biases の勾配を MLX が返す、という記憶に基づく行は通った。
+
+2 回目の `rake rust_test` で 204 本全部が通った。メモリのテストはポーリングで収まった
+ので、ファイルの配列を握っているものは無い。
+
+**まだ確かめていないこと。** この作業は GPU の無い Linux の箱で行い、Rust は
+`cargo check --tests` まで(CI の ubuntu と同じ「bind まで」、link はこの箱では
+CUDA のライブラリが入らず未確認)。Rust のテストは GPU 機で通った(上)。残るのは
+`mlx-community/Qwen2.5-0.5B-Instruct-4bit` の inventory(`rake oracle:qwen2_4bit`)と
+mlx-lm との forward の比較(`rake oracle:qwen2_4bit_forward` → `test/qlora_test.rb`)、
+7B / 32B の実測、PEFT での読み戻し。手順は揃えてあり、数字だけが無い。qlora.md §9。
+
+**分割 checkpoint(同日)。** 7B を開くのに要った。Hub の Qwen2.5-7B は 4 つの safetensors と
+`model.safetensors.index.json` で、engine の `read_safetensors` が index(かそれを持つ
+ディレクトリ)を受けて shard を 1 つの map に合わせる。同じ名前が 2 つの shard にあれば断る。
+`pretrained:` にディレクトリを渡せるようになったのはこの副産物。計測は
+`tools/qlora_memory.rb`。
+
+
+### 15.77 bf16 と宣言したモデルが f32 で計算していた(2026-11-09)
+
+§15.51 で bf16 を足したとき、確かめたのはパラメータが bf16 で持たれ、メモリが半分に
+なることだった。活性の dtype は確かめていなかった。QLoRA の計測(qlora.md §9)で、bf16
+の run の step の peak に全 linear の重みの f32 コピーが乗っていることが分かり、辿ると
+engine が数値の定数を f32 の配列で作っていた。MLX の配列は型が強いので bf16 × f32 は f32
+で、`rms_norm` の eps から先は活性がすべて f32 になっていた。IR は bf16 と言い続けていた。
+
+直したのは 3 つ。定数は入力の dtype で作る。norm と rope は f32 で計算して入力の dtype に
+戻す。sdpa の mask は scores の dtype に揃える。そして、これが本題だが、**engine が各ノードの
+出力 dtype を IR の宣言と照らして、違えば断る**。§15.51 のテストが通ったのは、確かめて
+いないものが壊れていたからで、「IR が言う dtype と engine が計算する dtype は同じ」という
+契約は、言葉ではなく検査で持つ。
+
+検査を入れた最初の `rake test` で、同じ種類がもう 1 つ見つかった。optimizer の更新は学習率と
+moment が f32 なので、bf16 のパラメータは 1 回目の step で f32 になり、以後そのままだった。
+更新は f32 で計算してパラメータの dtype に戻し、moment は最初から f32 で持つ(bf16 の 8 bit
+では平均を取れない。どのみち 1 step 目で f32 になっていた)。QLoRA の比較の run では、bf16 の
+adapter が 1 step 目から f32 で学習していたことになる。

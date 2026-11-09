@@ -56,7 +56,10 @@ module Torobi
         raise ConfigError, "objective is a #{objective.class}, expected Torobi::IR::Graph"
       end
 
-      models.each { |name, graph| check_reads_batch(name, graph) }
+      models.each do |name, graph|
+        check_reads_batch(name, graph)
+        check_packed_are_frozen(name, graph)
+      end
       train = check_train(train, models)
       if objective
         check_objective(objective)
@@ -229,6 +232,23 @@ module Torobi
             "#{names.first.inspect} is the loss, so it must be an f32 scalar, " \
             "and it is #{dtype}#{shape.inspect}. A config that trains nothing " \
             "(train: []) needs no loss, and can be asked what it produces."
+    end
+
+    # A packed weight (u32, `Torobi::Quantization`) has no gradient: MLX
+    # refuses to differentiate `quantized_matmul` by it, and it would come
+    # out of the first step as MLX's exception. The DSL cannot declare one
+    # trainable (`Quantization#apply` says `trainable: false`, and an
+    # adapter only ever lowers that), so this catches a graph written by
+    # hand, where it is written rather than where it runs.
+    def check_packed_are_frozen(name, graph)
+      packed = graph.parameters.select { |spec| spec.dtype == :u32 && spec.trainable }
+      return if packed.empty?
+
+      raise ConfigError,
+            "model #{name.inspect} declares #{packed.first.path.inspect} trainable, and it is " \
+            "u32: a packed quantized weight, which has no gradient. Declare it " \
+            "trainable: false (g.quantized does), and train an adapter (Torobi::LoRA) " \
+            "beside it instead."
     end
 
     # A model graph reads only from the batch. Reading another model's

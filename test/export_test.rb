@@ -1,6 +1,9 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
+# The pure-Ruby half of exporting loads without the engine; the session
+# half (`Torobi::Session`) does not, and the tests that need it skip.
+require "torobi/export"
 require "json"
 
 # Exporting a trained model as one somebody else can load.
@@ -277,28 +280,71 @@ class ExportTest < Minitest::Test
 
   # LoRA leaves the weight alone, so an adapted run holds base weights
   # that never moved. Exporting them beside the adapter's matrices would
-  # be a directory that looks trained and is not, and merging is not
-  # built yet (docs/plan.md 15.68).
-  def test_an_adapted_run_refuses_to_export
-    adapter = Torobi::LoRA.new(rank: 2, on: %w[head])
+  # be a directory that looks trained and is not (docs/plan.md 15.68);
+  # what is asked for instead is the merge, or the adapter alone.
+  def adapted
+    adapter = Torobi::LoRA.new(rank: 2, alpha: 4, on: %w[head])
     graph = Torobi.graph do |g|
       x = g.input :x, [nil, 2]
-      g.adapting(adapter) { g.output :loss, g.mean(g.linear(x, 1, name: "head")) }
+      g.adapting(adapter) { g.output :loss, g.mean(g.linear(x, 1, name: "head", bias: false)) }
     end
     config = Torobi::GraphConfig.new(models: { m: graph })
-    rng = Random.new(3)
-    params = config.parameters.to_h do |p|
-      [p.qualified_path,
-       { shape: p.spec.shape, data: Array.new(p.spec.shape.reduce(1, :*)) { rng.rand } }]
-    end
+    params = { "m.head.weight" => { shape: [1, 2], data: [0.5, -1.0] },
+               "m.head.lora_A.weight" => { shape: [2, 2], data: [1.0, 2.0, 0.0, 1.0] },
+               "m.head.lora_B.weight" => { shape: [1, 2], data: [3.0, 1.0] } }
+    [adapter, config, params]
+  end
 
+  def test_an_adapted_run_refuses_to_export_unless_told_how
+    _, config, params = adapted
     e = Torobi::Session.open(config, weights: { params: }) do |s|
       assert_raises(Torobi::ConfigError) { s.export_model!(File.join(Dir.mktmpdir, "out")) }
     end
 
     assert_match(/trained through an adapter/, e.message)
     assert_match(/looks trained and is not/, e.message)
-    assert_match(/not implemented/, e.message)
+    assert_match(/merge:/, e.message)
+    assert_match(/export_adapter!/, e.message)
+  end
+
+  # W + (alpha / rank) · B A, by hand: B A = [3, 1] · [[1, 2], [0, 1]] = [3, 7],
+  # scale 2, so [0.5 + 6, -1 + 14].
+  def test_merging_folds_the_adapter_into_the_weight_it_adapted
+    adapter, config, params = adapted
+    out = File.join(@dir, "merged")
+    Torobi::Session.open(config, weights: { params: }) do |s|
+      # No source to carry from, so the pooling width is said, as any
+      # export without `from:` says it.
+      written = s.export_model!(out, merge: adapter, pooling: :mean, pooling_dim: 2)
+
+      assert_equal({ "m.head.weight" => "head.weight" }, written)
+    end
+    tensors = read_safetensors(File.join(out, "model.safetensors"))
+
+    assert_equal ["head.weight"], tensors.keys
+    assert_equal [6.5, 13.0], tensors["head.weight"][:data]
+  end
+
+  def test_the_adapter_alone_is_written_as_peft_reads_it
+    adapter, config, params = adapted
+    out = File.join(@dir, "adapter")
+    Torobi::Session.open(config, weights: { params: }) do |s|
+      written = s.export_adapter!(out, adapter:, base: "Qwen/Qwen2.5-0.5B", task_type: "CAUSAL_LM")
+
+      assert_equal({ "m.head.lora_A.weight" => "base_model.model.head.lora_A.weight",
+                     "m.head.lora_B.weight" => "base_model.model.head.lora_B.weight" }, written)
+    end
+    tensors = read_safetensors(File.join(out, "adapter_model.safetensors"))
+
+    assert_equal [1.0, 2.0, 0.0, 1.0], tensors["base_model.model.head.lora_A.weight"][:data]
+    assert_equal "pt", read_metadata(File.join(out, "adapter_model.safetensors"))["format"]
+    config_json = JSON.parse(File.read(File.join(out, "adapter_config.json")))
+
+    assert_equal "LORA", config_json["peft_type"]
+    assert_equal 2, config_json["r"]
+    assert_in_delta(4.0, config_json["lora_alpha"])
+    assert_equal ["head"], config_json["target_modules"]
+    assert_equal "Qwen/Qwen2.5-0.5B", config_json["base_model_name_or_path"]
   end
 
   private
@@ -320,5 +366,40 @@ class ExportTest < Minitest::Test
   def read_metadata(path)
     bytes = File.binread(path, 65_536)
     JSON.parse(bytes[8, bytes[0, 8].unpack1("Q<")])["__metadata__"]
+  end
+end
+
+# The adapter's description as PEFT reads it, which needs no engine.
+class AdapterConfigTest < Minitest::Test
+  def adapter = Torobi::LoRA.new(rank: 8, alpha: 16, on: %w[q_proj v_proj])
+
+  def test_the_config_says_what_the_graph_said
+    config = Torobi::Export.adapter_config(adapter, base: "Qwen/Qwen2.5-0.5B",
+task_type: :CAUSAL_LM)
+
+    assert_equal "LORA", config["peft_type"]
+    assert_equal 8, config["r"]
+    assert_in_delta(16.0, config["lora_alpha"])
+    assert_equal %w[q_proj v_proj], config["target_modules"]
+    assert_equal "CAUSAL_LM", config["task_type"]
+    assert_in_delta(0.0, config["lora_dropout"], 0.001, "a Torobi::LoRA has no dropout")
+    assert_equal "none", config["bias"]
+    assert_nil Torobi::Export.adapter_config(adapter)["base_model_name_or_path"]
+  end
+
+  def test_the_scale_merged_in_is_the_adapters_own
+    assert_in_delta 2.0, Torobi::Export.scale_of(adapter)
+    assert_in_delta 0.5, Torobi::Export.scale_of(0.5)
+    assert_raises(ArgumentError) { Torobi::Export.scale_of("two") }
+    assert_raises(ArgumentError) { Torobi::Export.adapter_config("not an adapter") }
+  end
+
+  def test_the_config_is_written_beside_the_weights
+    Dir.mktmpdir do |dir|
+      path = Torobi::Export.write_adapter_config(File.join(dir, "adapter"), adapter)
+
+      assert_equal File.join(dir, "adapter", "adapter_config.json"), path
+      assert_equal 8, JSON.parse(File.read(path))["r"]
+    end
   end
 end

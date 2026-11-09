@@ -10,6 +10,28 @@ between two versions people have.
 
 ## Unreleased
 
+### Fixed
+
+- **A model held in bf16 computed in f32.** Constants the engine made
+  for itself (a norm's epsilon, a scalar op's number, a rotary
+  embedding's angles, an attention mask) were f32 arrays, and MLX
+  promotes bf16 combined with f32 to f32, so everything after the first
+  norm ran in f32 and every matmul made an f32 copy of its weight. The
+  constants now take their input's dtype, the norms and the rotation
+  are computed in f32 and returned in their input's, and the engine
+  refuses a node whose result is not the dtype the graph declares.
+  The same check found two more: an optimizer step left a bf16
+  parameter in f32, and a parameter drawn fresh (a LoRA's matrices)
+  was never converted to its declared dtype. Both are held to it now.
+
+### Changed
+
+- **A LoRA's matrices are f32 on a bf16 model.** They are the only
+  parameters that train, and bf16 rounds away an Adam step on most of
+  their entries. The adapter's arithmetic is done in f32 and its result
+  cast back to the linear's dtype, as mlx-lm does; on an f32 model
+  nothing changes.
+
 ### Added
 
 - **A Graph DSL and an immutable `GraphConfig`.** Models and objectives
@@ -48,6 +70,28 @@ between two versions people have.
   exactly the model it adapts, and training leaves the base bytes alone.
   On Qwen2.5-0.5B with rank 8 over q_proj and v_proj that is 0.109% of
   the parameters.
+- **`Torobi::Quantization`**, a base held at a few bits a weight
+  (QLoRA, docs/qlora.md): `g.quantized(quant) { ... }` in the model
+  description and `causal_lm(quantization:)` for whoever is doing the
+  fine-tune. A quantized linear is three frozen parameters named as
+  mlx-lm's `*-4bit` checkpoints name them and one `quantized_matmul`,
+  so a published 4-bit file imports with no renaming; a weight the file
+  holds packed and the graph holds as numbers (the embedding, tied head
+  included) is dequantized as it is read. `fetch` returns the numbers a
+  packed weight stands for; `put` and `export_model!` refuse it. On
+  Qwen2.5-0.5B at 4 bits in groups of 64 that is 0.92 GiB to 0.44 GiB,
+  the embedding still in bf16. A bf16 checkpoint opens as a quantized
+  model too: a weight the graph holds packed and the file holds as
+  numbers is quantized as it is read, once, with MLX's own `quantize`,
+  and the file's copy is let go before anything is evaluated.
+- **An adapted run has two ways out.** `export_adapter!` writes the
+  adapter alone as PEFT saves one (`adapter_model.safetensors` under
+  `base_model.model.`, with an `adapter_config.json` that says `r`,
+  `lora_alpha` and `target_modules`). `export_model!(merge: adapter)`
+  folds it into the weights, `W + scale · B A`, and drops the matrices;
+  without `merge:` an adapted run is still refused, since its base
+  never moved. A quantized base is exported as the numbers it stands
+  for either way, scales and biases left behind.
 - **`Torobi::Models::Gemma3`**, which is deliberately not one of the
   above: four norms a layer rather than two, q and k normalized per
   head, norms that scale by `1 + w`, the tanh approximation of GELU, and

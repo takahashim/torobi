@@ -14,13 +14,30 @@ use std::ops::Range;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use crate::mlxc::quantized::{dequantize, quantize, Mode, Quantization, Quantized};
 use crate::mlxc::transforms::eval;
-use crate::mlxc::Array;
+use crate::mlxc::{Array, Dtype};
 use serde::Deserialize;
 
-use crate::graph::{GraphConfig, InputSpec, ParameterSpec};
-use crate::op::{qualified, Program, OBJECTIVE};
+use crate::graph::{GraphConfig, InputSpec, ParameterSpec, Ref};
+use crate::op::{qualified, Op, Program, OBJECTIVE};
 use crate::tensor::{dtype_named, Tensor};
+
+/// How many bytes of parameters are made between two evaluations when a
+/// run opens.
+///
+/// One evaluation for every parameter at once was what the plan did
+/// first, and it held the whole file at the peak: MLX starts every read
+/// before any quantize that consumes one has run, so opening a bf16
+/// Qwen2.5-0.5B as a 4-bit model peaked at 1.03 GiB for 0.44 GiB of
+/// result (2026-11-08), which on a 7B is 14 GiB for 4.7. Evaluating every
+/// so many bytes lets each batch of reads be consumed and freed before
+/// the next starts, so the peak is what has been made plus about this
+/// much more of what it is made from (3.5 times it, where the bytes made
+/// are packed 4-bit and the bytes read are bf16). Small enough that the
+/// overshoot is noise against a model worth quantizing; large enough
+/// that a 0.5B model is a handful of evaluations, not hundreds.
+pub const EVAL_BUDGET: usize = 64 << 20;
 
 /// Where a run's initial parameters come from.
 ///
@@ -55,10 +72,33 @@ pub enum Weights<'a> {
     /// ("student.head.*"), and everything they do not name must be in its
     /// file. Saying which are new is the caller's intent; a name missing
     /// because it was mistyped should still be an error, and it is.
+    ///
+    /// A weight the file holds quantized (a packed u32 `.weight` with a
+    /// `.scales` beside it, as mlx-lm publishes them) and the graph
+    /// declares as numbers is read as the numbers it stands for
+    /// (docs/qlora.md section 3.4 (A')). A published 4-bit checkpoint
+    /// quantizes its embedding too, and Torobi holds embeddings in bf16.
+    ///
+    /// The other way round as well: a weight the graph declares packed
+    /// (three parameters read by one `quantized_matmul`) and the file
+    /// holds as numbers is quantized as it is read, once per weight,
+    /// to what the matmul says (section 3.4 (B)). That is how a bf16
+    /// checkpoint opens as a quantized model.
     Pretrained {
         files: &'a BTreeMap<String, std::path::PathBuf>,
         fresh: &'a [String],
     },
+}
+
+/// How a packed u32 parameter is read back as the numbers it stands for:
+/// the quantization the `quantized_matmul` that consumes it names, and
+/// where that matmul's scales and biases sit in the parameter vector.
+/// The three arrays themselves say none of this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Packed {
+    pub quantization: Quantization,
+    pub scales: usize,
+    pub biases: Option<usize>,
 }
 
 /// One model as the plan holds it: its program, and where its parameters
@@ -116,6 +156,9 @@ pub struct Plan {
     /// What each parameter is declared as, parallel to `paths`: what the
     /// parameters are made from when the plan is materialized.
     specs: Vec<ParameterSpec>,
+    /// The packed quantized weights, by position, with what reads each
+    /// one back as numbers (`TrainState::fetch`).
+    pub packed: BTreeMap<usize, Packed>,
 }
 
 impl Plan {
@@ -139,11 +182,29 @@ impl Plan {
         weights: Weights<'_>,
         seed: u64,
     ) -> Result<(Self, Vec<Array>)> {
+        Self::open_budgeted(graph_json, weights, seed, EVAL_BUDGET)
+    }
+
+    /// The same, evaluating every `budget` bytes of parameters rather than
+    /// at [`EVAL_BUDGET`]: what the tests measure the peak with.
+    pub(crate) fn open_budgeted(
+        graph_json: &str,
+        weights: Weights<'_>,
+        seed: u64,
+        budget: usize,
+    ) -> Result<(Self, Vec<Array>)> {
         let plan = Self::resolve(graph_json)?;
         let mut source = Source::read(weights)?;
         source.seed(seed)?;
-        let params = source.materialize(&plan)?;
-        // One evaluation for the lot: a file's arrays are lazy until asked.
+        // `materialize` consumes the source: a file's arrays are lazy
+        // until asked, and evaluating is what reads them. Nothing but the
+        // parameters themselves may hold them by then, or a weight the
+        // file holds in one form and the run in another (a bf16 embedding
+        // published quantized, docs/qlora.md 3.4) would be held twice
+        // until the source went. It evaluates as it goes, every `budget`
+        // bytes, which is what bounds the peak (`EVAL_BUDGET`).
+        let params = source.materialize(&plan, budget)?;
+        // Whatever is left since the last evaluation.
         eval(params.iter())?;
         Ok((plan, params))
     }
@@ -161,6 +222,7 @@ impl Plan {
         let mut paths = Vec::new();
         let mut specs = Vec::new();
         let mut candidates = Vec::new();
+        let mut packed = BTreeMap::new();
         for (name, mut graph) in config.models {
             let trained = config.train.contains(&name);
             let start = paths.len();
@@ -173,6 +235,7 @@ impl Plan {
             }
             let slice = start..paths.len();
             let program = Program::resolve(graph, slice.len(), &name)?;
+            packed.extend(packed_weights(&program, start));
             models.push(Model {
                 name,
                 program,
@@ -206,6 +269,7 @@ impl Plan {
             graph_json: graph_json.to_string(),
             semantics_version: config.semantics_version,
             specs,
+            packed,
         })
     }
 
@@ -375,7 +439,54 @@ enum Source {
         /// Split per parameter as they are built, so what one draws does
         /// not depend on how many came before it.
         key: Option<Array>,
+        /// Weights the file held as numbers and the graph holds packed,
+        /// quantized once each and handed out to the three parameters
+        /// that share them, by qualified module path ("m.layers.0.q_proj").
+        /// Goes with the source, before anything is evaluated.
+        quantized: std::collections::HashMap<String, Quantized>,
     },
+}
+
+/// Which of a packed weight's three parameters a declaration is.
+#[derive(Clone, Copy)]
+enum Piece {
+    Weight,
+    Scales,
+    Biases,
+}
+
+impl Piece {
+    /// The piece the parameter at `index` is, with where its packed
+    /// weight sits, when it is one of a `quantized_matmul`'s three.
+    fn of(plan: &Plan, index: usize) -> Option<(usize, Piece)> {
+        if plan.packed.contains_key(&index) {
+            return Some((index, Piece::Weight));
+        }
+        let path = &plan.paths[index];
+        let (module, piece) = path
+            .strip_suffix(".scales")
+            .map(|module| (module, Piece::Scales))
+            .or_else(|| path.strip_suffix(".biases").map(|module| (module, Piece::Biases)))?;
+        let weight = plan.index_of(&format!("{module}.weight"))?;
+        let packed = plan.packed.get(&weight)?;
+        let mine = match piece {
+            Piece::Scales => packed.scales == index,
+            Piece::Biases => packed.biases == Some(index),
+            Piece::Weight => unreachable!(),
+        };
+        mine.then_some((weight, piece))
+    }
+
+    fn take(self, quantized: &Quantized, path: &str) -> Result<Array> {
+        Ok(match self {
+            Piece::Weight => quantized.weight.clone(),
+            Piece::Scales => quantized.scales.clone(),
+            Piece::Biases => quantized
+                .biases
+                .clone()
+                .with_context(|| format!("parameter {path:?}: this quantization has no biases"))?,
+        })
+    }
 }
 
 impl Source {
@@ -400,18 +511,37 @@ impl Source {
                     .collect::<Result<_>>()?,
                 fresh: fresh.iter().map(|p| Pattern::parse(p)).collect::<Result<_>>()?,
                 key: None,
+                quantized: std::collections::HashMap::new(),
             },
         })
     }
 
     /// Every parameter the plan declares, from this source, in the order
     /// the plan names them.
-    fn materialize(&self, plan: &Plan) -> Result<Vec<Array>> {
-        plan.models
-            .iter()
-            .flat_map(|model| model.slice.clone().map(move |i| (model, i)))
-            .map(|(model, i)| self.parameter(&model.name, &plan.paths[i], &plan.specs[i]))
-            .collect()
+    ///
+    /// Consumes the source. A file's arrays are handed over to the
+    /// parameters as they are matched, and whatever the plan did not ask
+    /// for goes with the source, before anything is evaluated.
+    ///
+    /// Evaluates every `budget` bytes of what it has made, so the reads
+    /// behind them are consumed and freed before the next ones start
+    /// (`EVAL_BUDGET`); what is left over is the caller's to evaluate.
+    fn materialize(mut self, plan: &Plan, budget: usize) -> Result<Vec<Array>> {
+        let mut params: Vec<Array> = Vec::with_capacity(plan.paths.len());
+        let (mut pending, mut since) = (0usize, 0usize);
+        for model in &plan.models {
+            for i in model.slice.clone() {
+                let param = self.parameter(&model.name, plan, i)?;
+                pending += param.nbytes();
+                params.push(param);
+                if pending >= budget {
+                    eval(params[since..].iter())?;
+                    since = params.len();
+                    pending = 0;
+                }
+            }
+        }
+        Ok(params)
     }
 
     /// Where the fresh parameters are drawn from.
@@ -432,7 +562,8 @@ impl Source {
     /// good place to start an f32 run, and refusing it would be refusing
     /// the point of the exercise. `TrainState::restore` is the other case
     /// and refuses, because a resumed run has to be the same run.
-    fn parameter(&self, model: &str, path: &str, spec: &ParameterSpec) -> Result<Array> {
+    fn parameter(&mut self, model: &str, plan: &Plan, index: usize) -> Result<Array> {
+        let (path, spec) = (plan.paths[index].as_str(), &plan.specs[index]);
         let declared = dtype_named(&spec.dtype)
             .with_context(|| format!("parameter {path:?}: unknown dtype {:?}", spec.dtype))?;
         let array = match self {
@@ -466,7 +597,7 @@ impl Source {
                 })?;
                 shaped(array, path, spec)?
             }
-            Source::Pretrained { files, fresh, key } => {
+            Source::Pretrained { files, fresh, key, quantized } => {
                 if let Some(pattern) = fresh.iter().find(|p| p.matches(path)) {
                     let key = key.as_ref().with_context(|| {
                         format!("parameter {path:?} matches {pattern:?} but no seed was set")
@@ -475,22 +606,38 @@ impl Source {
                     // parameter draws the same numbers wherever it sits in
                     // the declaration order.
                     let (_, mine) = crate::mlxc::random::split(key, 2)?;
-                    return crate::init::build(spec, &mine);
+                    // Drawn in f32, as every initializer draws, and held in
+                    // the declared dtype like anything read from a file.
+                    // Returned as drawn, a bf16 adapter's matrices started
+                    // f32 (2026-11-09).
+                    let drawn = crate::init::build(spec, &mine)?;
+                    return Ok(if drawn.dtype() == declared { drawn } else { drawn.as_dtype(declared)? });
                 }
-                let arrays = files.get(model).with_context(|| {
+                let arrays = files.get_mut(model).with_context(|| {
                     format!("no file was given for model {model:?}")
                 })?;
-                // The model's own path, without the name this run gives it.
-                let array = arrays.get(&spec.path).with_context(|| {
-                    format!(
-                        "model {model:?}'s file has no parameter {:?}. If it is meant \
-                         to be new, name it: a head put on a published encoder is in \
-                         no checkpoint, and saying so is what tells a typo from a \
-                         fresh parameter.",
-                        spec.path
-                    )
-                })?;
-                shaped(array, path, spec)?
+                if let Some(piece) = quantized_on_read(arrays, quantized, plan, index)? {
+                    // Quantized in the file's dtype; the declared one is
+                    // applied below, as to anything read from a file.
+                    piece
+                } else {
+                    // The model's own path, without the name this run gives
+                    // it. Taken out of the map rather than read: from here on
+                    // the parameter is the only thing that holds it.
+                    let array = arrays.remove(&spec.path).with_context(|| {
+                        format!(
+                            "model {model:?}'s file has no parameter {:?}. If it is meant \
+                             to be new, name it: a head put on a published encoder is in \
+                             no checkpoint, and saying so is what tells a typo from a \
+                             fresh parameter.",
+                            spec.path
+                        )
+                    })?;
+                    match dequantized(arrays, path, spec, &array, declared)? {
+                        Some(numbers) => numbers,
+                        None => shaped(&array, path, spec)?,
+                    }
+                }
             }
         };
         Ok(if array.dtype() == declared {
@@ -499,6 +646,33 @@ impl Source {
             array.as_dtype(declared)?
         })
     }
+}
+
+/// The packed weights a program reads, by their position in the parameter
+/// vector (`start` is where the model's parameters begin), each with the
+/// `quantized_matmul` that reads it. A weight read by two matmuls is read
+/// the same way by both, since one set of scales fits one quantization.
+fn packed_weights(program: &Program, start: usize) -> BTreeMap<usize, Packed> {
+    let parameter_at = |reference: &Ref| match reference {
+        Ref::Node(id) => match program.nodes[*id].op {
+            Op::Parameter(index) => Some(start + index),
+            _ => None,
+        },
+        Ref::Input(_) => None,
+    };
+    program
+        .nodes
+        .iter()
+        .filter_map(|node| match node.op {
+            Op::QuantizedMatmul(quantization) => {
+                let weight = parameter_at(&node.inputs[1])?;
+                let scales = parameter_at(&node.inputs[2])?;
+                let biases = node.inputs.get(3).and_then(parameter_at);
+                Some((weight, Packed { quantization, scales, biases }))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Every batch field the run reads, once each and in order.
@@ -555,16 +729,204 @@ fn output_names(models: &[Model]) -> Vec<String> {
         .collect()
 }
 
+/// The arrays of a published model, however it is split up.
+///
+/// One safetensors file, or several: a model past a few billion
+/// parameters is published as `model-00001-of-00004.safetensors` and so
+/// on, with `model.safetensors.index.json` saying which tensor is in
+/// which. The path may be the file, the index, or the directory holding
+/// either; the arrays come back under one map either way, since the
+/// shards are an artifact of the upload and not of the model.
 fn read_safetensors(path: &Path) -> Result<std::collections::HashMap<String, Array>> {
+    let path = if path.is_dir() {
+        let whole = path.join("model.safetensors");
+        let index = path.join("model.safetensors.index.json");
+        if whole.is_file() {
+            whole
+        } else if index.is_file() {
+            index
+        } else {
+            anyhow::bail!(
+                "no parameters in {}: neither model.safetensors nor model.safetensors.index.json",
+                path.display()
+            );
+        }
+    } else {
+        path.to_path_buf()
+    };
     anyhow::ensure!(
         path.is_file(),
         "no parameters at {} (a safetensors file was expected)",
         path.display()
     );
-    Array::load_safetensors(path).with_context(|| format!("reading {}", path.display()))
+    if path.extension().and_then(|e| e.to_str()) == Some("json") {
+        return read_sharded(&path);
+    }
+    Array::load_safetensors(&path).with_context(|| format!("reading {}", path.display()))
+}
+
+/// The shards an index names, as one map. A tensor named in two shards
+/// is refused: the index is what says where each one is, and two
+/// answers is none.
+fn read_sharded(index: &Path) -> Result<std::collections::HashMap<String, Array>> {
+    #[derive(Deserialize)]
+    struct Index {
+        weight_map: BTreeMap<String, String>,
+    }
+    let text = std::fs::read_to_string(index).with_context(|| format!("reading {}", index.display()))?;
+    let parsed: Index = serde_json::from_str(&text).with_context(|| format!("parsing {}", index.display()))?;
+    let dir = index.parent().unwrap_or(Path::new("."));
+    let mut shards: Vec<&String> = parsed.weight_map.values().collect();
+    shards.sort();
+    shards.dedup();
+    let mut arrays = std::collections::HashMap::new();
+    for shard in shards {
+        let file = dir.join(shard);
+        let loaded = Array::load_safetensors(&file).with_context(|| format!("reading shard {}", file.display()))?;
+        for (name, array) in loaded {
+            anyhow::ensure!(
+                !arrays.contains_key(&name),
+                "{name:?} is in more than one shard of {}",
+                index.display()
+            );
+            arrays.insert(name, array);
+        }
+    }
+    anyhow::ensure!(!arrays.is_empty(), "{} names no shards", index.display());
+    Ok(arrays)
 }
 
 /// The array, if its shape is the one the graph declared.
+/// A weight the graph holds packed and the file holds as numbers,
+/// quantized as it is read (docs/qlora.md section 3.4 (B)): how a bf16
+/// checkpoint opens as a quantized model.
+///
+/// The parameter at `index` is one of a `quantized_matmul`'s three
+/// (`Piece::of`), the file has the module's `.weight` and no `.scales`,
+/// so what it holds is numbers. They are quantized once, to what the
+/// matmul says, and the three declarations are handed their pieces from
+/// the one result. The file's array goes out of its map on the way, and
+/// the result goes with the source, so after evaluation the packed form
+/// is the only one in memory.
+///
+/// `None` when this is not such a parameter, or the file holds the
+/// weight packed already ((A) applies: the shapes have to match as
+/// declared). An error when the numbers are not the shape the packed
+/// declaration unpacks to, saying both.
+fn quantized_on_read(
+    arrays: &mut std::collections::HashMap<String, Array>,
+    quantized: &mut std::collections::HashMap<String, Quantized>,
+    plan: &Plan,
+    index: usize,
+) -> Result<Option<Array>> {
+    let Some((weight, piece)) = Piece::of(plan, index) else {
+        return Ok(None);
+    };
+    let path = &plan.paths[index];
+    let module = plan.paths[weight].strip_suffix(".weight").unwrap_or(&plan.paths[weight]);
+    if let Some(done) = quantized.get(module) {
+        return piece.take(done, path).map(Some);
+    }
+    let own = plan.specs[weight].path.strip_suffix(".weight").unwrap_or(&plan.specs[weight].path);
+    let packed = plan.packed[&weight];
+    let numbers = match arrays.get(&format!("{own}.weight")) {
+        Some(array) if array.dtype() != Dtype::Uint32 && !arrays.contains_key(&format!("{own}.scales")) => {
+            arrays.remove(&format!("{own}.weight")).expect("just seen")
+        }
+        _ => return Ok(None),
+    };
+    let declared = &plan.specs[weight].shape;
+    let unpacked = match declared.as_slice() {
+        [d_out, cols] => vec![*d_out, cols * 32 / packed.quantization.bits],
+        _ => declared.clone(),
+    };
+    anyhow::ensure!(
+        numbers.shape() == unpacked.as_slice(),
+        "parameter {:?}: the file holds {own}.weight as {:?} {:?}, which is neither the packed \
+         {declared:?} u32 the graph declares nor the {unpacked:?} it would be quantized from \
+         ({} bits in groups of {})",
+        plan.paths[weight],
+        numbers.dtype(),
+        numbers.shape(),
+        packed.quantization.bits,
+        packed.quantization.group_size
+    );
+    let done = quantize(&numbers, packed.quantization)
+        .with_context(|| format!("parameter {:?}: quantizing what the file holds", plan.paths[weight]))?;
+    let mine = piece.take(&done, path)?;
+    quantized.insert(module.to_string(), done);
+    Ok(Some(mine))
+}
+
+/// A weight the file holds quantized and the graph declares as numbers,
+/// read as the numbers it stands for (docs/qlora.md section 3.4 (A')).
+///
+/// The file says how it was quantized by its shapes alone: a packed
+/// `[d_out, d_in × bits / 32]` against the declared `[d_out, d_in]` gives
+/// the bits, and `[d_out, d_in / group_size]` scales give the group. The
+/// mode is affine, which is the one mlx-lm publishes and the one that
+/// carries biases. `None` when the file holds the weight as numbers, so
+/// the usual shape check applies; an error when it is packed in a way
+/// the shapes cannot account for.
+///
+/// The scales and biases are taken out of the file's map as the weight
+/// was: once the numbers are built, nothing else should hold them.
+fn dequantized(
+    arrays: &mut std::collections::HashMap<String, Array>,
+    path: &str,
+    spec: &ParameterSpec,
+    weight: &Array,
+    declared: Dtype,
+) -> Result<Option<Array>> {
+    if weight.dtype() != Dtype::Uint32 || declared == Dtype::Uint32 {
+        return Ok(None);
+    }
+    let Some(module) = spec.path.strip_suffix(".weight") else {
+        return Ok(None);
+    };
+    let scales = arrays.remove(&format!("{module}.scales")).with_context(|| {
+        format!(
+            "parameter {path:?}: the file holds a packed u32 weight {:?} and no {module}.scales \
+             to read it with; the graph declares {:?} {}",
+            weight.shape(),
+            spec.shape,
+            spec.dtype
+        )
+    })?;
+    let biases = arrays.remove(&format!("{module}.biases"));
+    let said = || {
+        format!(
+            "parameter {path:?}: the file holds a packed u32 weight {:?} with scales {:?}, which \
+             is not {:?} {} quantized at any group size and bits this engine reads (groups of 32, \
+             64 or 128 at 2 to 8 bits)",
+            weight.shape(),
+            scales.shape(),
+            spec.shape,
+            spec.dtype
+        )
+    };
+    let (&[d_out, d_in], &[packed_rows, packed], &[scale_rows, groups]) =
+        (spec.shape.as_slice(), weight.shape(), scales.shape())
+    else {
+        anyhow::bail!(said());
+    };
+    anyhow::ensure!(
+        packed_rows == d_out && scale_rows == d_out && packed > 0 && groups > 0,
+        said()
+    );
+    anyhow::ensure!((packed * 32) % d_in == 0 && d_in % groups == 0, said());
+    let bits = packed * 32 / d_in;
+    let group_size = d_in / groups;
+    anyhow::ensure!(
+        [2, 3, 4, 5, 6, 8].contains(&bits) && [32, 64, 128].contains(&group_size),
+        said()
+    );
+    let quantization = Quantization { group_size, bits, mode: Mode::Affine };
+    let numbers = dequantize(weight, &scales, biases.as_ref(), quantization, Some(declared))
+        .with_context(|| format!("parameter {path:?}: dequantizing what the file holds"))?;
+    Ok(Some(numbers))
+}
+
 fn shaped(array: &Array, path: &str, spec: &ParameterSpec) -> Result<Array> {
     anyhow::ensure!(
         array.shape() == spec.shape,
@@ -855,6 +1217,329 @@ mod tests {
         let (plan, params) = Plan::open(&config, Weights::File(&file)).unwrap();
         assert_eq!(plan.paths, vec!["m.w"]);
         assert_eq!(crate::tensor::to_tensor(&params[0]).unwrap().shape, vec![2]);
+    }
+
+    fn pretrained(dir: &std::path::Path, embedding_packed: bool) -> Result<(Plan, Vec<Array>)> {
+        let files = BTreeMap::from([("m".to_string(), fixtures::quantized::file(dir, embedding_packed))]);
+        Plan::open(&fixtures::quantized::config(), Weights::Pretrained { files: &files, fresh: &[] })
+    }
+
+    fn f32s(array: &Array) -> Vec<f32> {
+        array.contiguous().unwrap().as_slice::<f32>().unwrap().to_vec()
+    }
+
+    /// A published 4-bit file holds its embedding packed, and the graph
+    /// holds its embedding in numbers (docs/qlora.md 3.4 (A')): the file's
+    /// three arrays become the one the graph declared, in its dtype and
+    /// shape, within a step of the grid of what they were made from. The
+    /// linear the graph does hold packed is read as the file has it.
+    #[test]
+    fn a_weight_the_file_holds_quantized_is_read_as_the_numbers_it_stands_for() {
+        use fixtures::quantized::{weight, D_IN, D_OUT, EMB_ROWS};
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, params) = pretrained(dir.path(), true).unwrap();
+
+        let emb = plan.index_of("m.emb.weight").unwrap();
+        assert_eq!(params[emb].dtype(), Dtype::Float32);
+        assert_eq!(params[emb].shape(), &[EMB_ROWS as i32, D_IN as i32]);
+        let (got, want) = (f32s(&params[emb]), weight(EMB_ROWS));
+        let mut moved = false;
+        for (g, w) in got.iter().zip(&want) {
+            assert!((g - w).abs() <= 2.0 / 15.0, "{g} came back for {w}");
+            moved |= (g - w).abs() > 1e-6;
+        }
+        assert!(moved, "the numbers went through 4 bits");
+
+        let w = plan.index_of("m.proj.weight").unwrap();
+        assert_eq!(params[w].dtype(), Dtype::Uint32);
+        assert_eq!(params[w].shape(), &[D_OUT as i32, (D_IN * 4 / 32) as i32]);
+        assert_eq!(
+            plan.packed.get(&w),
+            Some(&Packed {
+                quantization: fixtures::quantized::QUANTIZATION,
+                scales: plan.index_of("m.proj.scales").unwrap(),
+                biases: Some(plan.index_of("m.proj.biases").unwrap()),
+            })
+        );
+        assert_eq!(plan.packed.len(), 1, "the embedding is numbers now, not a packed weight");
+    }
+
+    /// The same model from a file that holds the embedding as numbers
+    /// reads the same way: (A') applies only where the file is packed.
+    #[test]
+    fn a_weight_the_file_holds_as_numbers_is_read_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, params) = pretrained(dir.path(), false).unwrap();
+        let emb = plan.index_of("m.emb.weight").unwrap();
+        assert_eq!(f32s(&params[emb]), fixtures::quantized::weight(fixtures::quantized::EMB_ROWS));
+    }
+
+    /// Packed with nothing to read it by, or packed in a way the declared
+    /// shape cannot account for: refused with both shapes, before anything
+    /// is dequantized.
+    #[test]
+    fn a_packed_weight_the_shapes_cannot_account_for_is_refused() {
+        use fixtures::quantized::{file_with, D_IN, EMB_ROWS};
+        let packed = |cols: i32| Array::zeros::<u32>(&[EMB_ROWS as i32, cols]).unwrap();
+        let scales = |groups: i32| Array::zeros::<f32>(&[EMB_ROWS as i32, groups]).unwrap();
+        let open = |emb: Vec<(&str, Array)>| {
+            let dir = tempfile::tempdir().unwrap();
+            let files = BTreeMap::from([("m".to_string(), file_with(dir.path(), emb))]);
+            match Plan::open(&fixtures::quantized::config(), Weights::Pretrained { files: &files, fresh: &[] }) {
+                Ok(_) => panic!("this file should not have opened"),
+                Err(e) => format!("{e:#}"),
+            }
+        };
+
+        let no_scales = open(vec![("emb.weight", packed((D_IN * 4 / 32) as i32))]);
+        assert!(no_scales.contains("no emb.scales"), "{no_scales}");
+        assert!(no_scales.contains("[4, 64] f32"), "{no_scales}");
+
+        let odd_width = open(vec![("emb.weight", packed(5)), ("emb.scales", scales(2))]);
+        assert!(odd_width.contains("is not [4, 64] f32 quantized"), "{odd_width}");
+        assert!(odd_width.contains("[4, 5]"), "{odd_width}");
+
+        let odd_groups = open(vec![("emb.weight", packed(8)), ("emb.scales", scales(3))]);
+        assert!(odd_groups.contains("is not [4, 64] f32 quantized"), "{odd_groups}");
+    }
+
+    /// A bf16 checkpoint opens as a quantized model: the weight the graph
+    /// holds packed is quantized as it is read, and what comes out is bit
+    /// for bit what MLX's `quantize` gives on the same array, since it is
+    /// the same call (docs/qlora.md 3.4 (B)). The three parameters that
+    /// share it are handed the pieces of one quantization.
+    #[test]
+    fn a_weight_the_file_holds_as_numbers_is_quantized_as_it_is_read() {
+        use crate::mlxc::quantized::quantize;
+        use fixtures::quantized::{D_IN, D_OUT, QUANTIZATION};
+        let dir = tempfile::tempdir().unwrap();
+        let (file, written) = fixtures::quantized::file_bf16(dir.path());
+        let files = BTreeMap::from([("m".to_string(), file)]);
+        let (plan, params) =
+            Plan::open(&fixtures::quantized::config(), Weights::Pretrained { files: &files, fresh: &[] }).unwrap();
+
+        let want = quantize(&written, QUANTIZATION).unwrap();
+        let at = |path: &str| &params[plan.index_of(path).unwrap()];
+        let weight = at("m.proj.weight");
+        assert_eq!(weight.dtype(), Dtype::Uint32);
+        assert_eq!(weight.shape(), &[D_OUT as i32, (D_IN * 4 / 32) as i32]);
+        assert_eq!(
+            weight.contiguous().unwrap().as_slice::<u32>().unwrap(),
+            want.weight.contiguous().unwrap().as_slice::<u32>().unwrap(),
+            "the packed words are MLX's own"
+        );
+        for (path, wanted) in [("m.proj.scales", &want.scales), ("m.proj.biases", want.biases.as_ref().unwrap())] {
+            let got = at(path);
+            // Declared f32 here, so the bf16 scales the file's dtype gave
+            // are widened; the numbers are the same.
+            assert_eq!(got.dtype(), Dtype::Float32, "{path}");
+            assert_eq!(f32s(got), f32s(&wanted.as_dtype(Dtype::Float32).unwrap()), "{path}");
+        }
+        // `head` and `emb` are read as before.
+        assert_eq!(f32s(at("m.head.weight")), vec![1.0; D_OUT]);
+    }
+
+    /// What quantizing on read is for: once a bf16 file is open as a
+    /// quantized model, what is held is the packed form, not the numbers
+    /// it came from. The file's array leaves its map as it is read and
+    /// the source goes before evaluation, so the bf16 copy is freed with
+    /// the lazy graph that consumed it. Measured as what MLX holds after
+    /// opening against what the bf16 numbers alone would take: a weight
+    /// of a megabyte, so the allocator's rounding is noise against it.
+    ///
+    /// Not measured at once. The device keeps a kernel's inputs until the
+    /// command buffer that ran it completes, and releases them from a
+    /// completion handler that may run after `eval` has returned; read
+    /// straight after opening, the bf16 input was still counted (one
+    /// megabyte exactly, 2026-11-08). So the number is polled for a
+    /// moment. A copy something still referenced would never go, and the
+    /// assertion would still fail.
+    #[test]
+    fn opening_a_bf16_file_as_a_quantized_model_does_not_keep_the_numbers() {
+        use crate::mlxc::memory;
+        let (d_out, d_in) = (512usize, 1024usize);
+        let dir = tempfile::tempdir().unwrap();
+        let (file, written) = fixtures::quantized::file_bf16_sized(dir.path(), d_out, d_in);
+        drop(written);
+        let files = BTreeMap::from([("m".to_string(), file)]);
+
+        let settled = || {
+            let mut active = memory::active().unwrap();
+            for _ in 0..200 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                let again = memory::active().unwrap();
+                if again == active {
+                    break;
+                }
+                active = again;
+            }
+            active
+        };
+        let before = settled();
+        let (plan, params) =
+            Plan::open(&fixtures::quantized::config_sized(d_out, d_in), Weights::Pretrained { files: &files, fresh: &[] })
+                .unwrap();
+        let numbers = d_out * d_in * 2;
+        let packed = d_out * d_in / 2 + 2 * d_out * (d_in / 32) * 4;
+        let mut held = memory::active().unwrap().saturating_sub(before);
+        for _ in 0..200 {
+            if held < numbers {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            held = memory::active().unwrap().saturating_sub(before);
+        }
+        assert!(
+            held < numbers,
+            "{held} bytes held a second after opening; the bf16 numbers alone are {numbers}, the \
+             packed form {packed}"
+        );
+        assert_eq!(params[plan.index_of("m.proj.weight").unwrap()].dtype(), Dtype::Uint32);
+    }
+
+    /// The peak while a run opens, which is what decides whether a model
+    /// opens at all. Opening a bf16 file as a quantized model with one
+    /// evaluation for everything held the whole file at the peak
+    /// (measured on Qwen2.5-0.5B: 1.03 GiB for 0.44 GiB of result);
+    /// evaluating as it goes holds what has been made and one batch of
+    /// what it is made from. Eight weights of half a megabyte each in
+    /// bf16, evaluated one at a time: the peak stays below the file.
+    #[test]
+    fn evaluating_as_a_run_opens_keeps_the_peak_below_the_file() {
+        use crate::mlxc::memory;
+        let (n, d_out, d_in) = (8usize, 256usize, 1024usize);
+        let dir = tempfile::tempdir().unwrap();
+        let (config, file) = fixtures::quantized::stack(dir.path(), n, d_out, d_in);
+        let files = BTreeMap::from([("m".to_string(), file)]);
+        let bf16 = n * d_out * d_in * 2;
+        let packed_each = d_out * d_in / 2 + 2 * d_out * (d_in / 32) * 4;
+
+        let peak_of = |budget: usize| {
+            memory::clear_cache().unwrap();
+            let before = memory::active().unwrap();
+            memory::reset_peak().unwrap();
+            let opened = Plan::open_budgeted(&config, Weights::Pretrained { files: &files, fresh: &[] }, 0, budget).unwrap();
+            let peak = memory::peak().unwrap().saturating_sub(before);
+            drop(opened);
+            peak
+        };
+        let bounded = peak_of(packed_each);
+        assert!(
+            bounded < bf16,
+            "opening one weight at a time peaked at {bounded} bytes; the bf16 file is {bf16}, the \
+             packed result {}",
+            n * packed_each
+        );
+        // What it is bounded against, printed rather than asserted: how
+        // MLX schedules one evaluation of everything is MLX's business.
+        eprintln!("peak opening one at a time: {bounded}; all at once: {}", peak_of(usize::MAX));
+    }
+
+    /// Numbers of a shape the packed declaration does not unpack to are
+    /// a weight quantized some other way, or another weight: refused,
+    /// with the declared shape, the shape it would be quantized from,
+    /// and what the file holds.
+    #[test]
+    fn numbers_that_do_not_unpack_to_the_declared_shape_are_refused() {
+        let open = |proj: Array| {
+            let dir = tempfile::tempdir().unwrap();
+            let files = BTreeMap::from([("m".to_string(), fixtures::quantized::file_with_proj(dir.path(), proj))]);
+            match Plan::open(&fixtures::quantized::config(), Weights::Pretrained { files: &files, fresh: &[] }) {
+                Ok(_) => panic!("this file should not have opened"),
+                Err(e) => format!("{e:#}"),
+            }
+        };
+        let narrow = open(Array::zeros::<f32>(&[8, 60]).unwrap());
+        assert!(narrow.contains("neither the packed [8, 8] u32"), "{narrow}");
+        assert!(narrow.contains("nor the [8, 64] it would be quantized from"), "{narrow}");
+        assert!(narrow.contains("Float32 [8, 60]"), "{narrow}");
+
+        // The packed shape in a float dtype is not a packed weight.
+        let float_words = open(Array::zeros::<f32>(&[8, 8]).unwrap());
+        assert!(float_words.contains("Float32 [8, 8]"), "{float_words}");
+    }
+
+    /// A model published in shards (an index and several files) reads as
+    /// one, given the index or the directory holding it. A tensor named
+    /// in two shards is refused.
+    #[test]
+    fn a_sharded_checkpoint_reads_as_one_whether_named_by_its_index_or_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, _) = fixtures::teacher_and_student();
+        let shard = |name: &str, tensors: &[(&str, Array)]| {
+            Array::save_safetensors(tensors.iter().map(|(n, a)| (*n, a)), None, dir.path().join(name)).unwrap();
+        };
+        shard("model-00001-of-00002.safetensors", &[("scale", Array::from_slice(&[3.0f32, 4.0], &[2]).unwrap())]);
+        shard("model-00002-of-00002.safetensors", &[("other", Array::from_slice(&[1.0f32], &[1]).unwrap())]);
+        let index = dir.path().join("model.safetensors.index.json");
+        std::fs::write(
+            &index,
+            json!({"metadata": {}, "weight_map": {
+                "scale": "model-00001-of-00002.safetensors",
+                "other": "model-00002-of-00002.safetensors",
+            }})
+            .to_string(),
+        )
+        .unwrap();
+
+        for given in [index.clone(), dir.path().to_path_buf()] {
+            let files = BTreeMap::from([("teacher".to_string(), given.clone()), ("student".to_string(), given)]);
+            let (plan, params) = Plan::open(&config, Weights::Pretrained { files: &files, fresh: &[] }).unwrap();
+            assert_eq!(f32s(&params[plan.index_of("teacher.scale").unwrap()]), vec![3.0, 4.0]);
+        }
+
+        std::fs::write(
+            &index,
+            json!({"weight_map": {
+                "scale": "model-00001-of-00002.safetensors",
+                "other": "model-00001-of-00002.safetensors",
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        shard("model-00001-of-00002.safetensors", &[("scale", Array::from_slice(&[3.0f32, 4.0], &[2]).unwrap())]);
+        shard("model-00002-of-00002.safetensors", &[("scale", Array::from_slice(&[0.0f32, 0.0], &[2]).unwrap())]);
+        std::fs::write(
+            &index,
+            json!({"weight_map": {
+                "scale": "model-00001-of-00002.safetensors",
+                "other": "model-00002-of-00002.safetensors",
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let files = BTreeMap::from([("teacher".to_string(), index.clone()), ("student".to_string(), index.clone())]);
+        let said = match Plan::open(&config, Weights::Pretrained { files: &files, fresh: &[] }) {
+            Ok(_) => panic!("two shards hold \"scale\""),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(said.contains("more than one shard"), "{said}");
+
+        let empty = tempfile::tempdir().unwrap();
+        let files = BTreeMap::from([("teacher".to_string(), empty.path().to_path_buf()), ("student".to_string(), empty.path().to_path_buf())]);
+        let said = match Plan::open(&config, Weights::Pretrained { files: &files, fresh: &[] }) {
+            Ok(_) => panic!("an empty directory holds nothing"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(said.contains("neither model.safetensors nor"), "{said}");
+    }
+
+    /// A parameter drawn from its initializer (`fresh:`) is held in the
+    /// dtype it is declared in, as one read from a file is: a bf16 LoRA's
+    /// matrices are bf16, not the f32 the draw is made in.
+    #[test]
+    fn a_fresh_parameter_is_held_in_its_declared_dtype() {
+        let (config, _) = fixtures::scaled_mean();
+        let mut graph: serde_json::Value = serde_json::from_str(&config).unwrap();
+        graph["models"]["m"]["parameters"][0]["dtype"] = json!("bf16");
+        graph["models"]["m"]["parameters"][0]["initializer"] = json!({"type": "normal", "std": 0.02});
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_parameters(dir.path(), &[("unrelated", Array::from_f32(1.0).unwrap())]);
+        let files = BTreeMap::from([("m".to_string(), file)]);
+        let fresh = vec!["m.w".to_string()];
+        let (plan, params) =
+            Plan::open(&graph.to_string(), Weights::Pretrained { files: &files, fresh: &fresh }).unwrap();
+        assert_eq!(params[plan.index_of("m.w").unwrap()].dtype(), Dtype::Bfloat16);
     }
 
     #[test]

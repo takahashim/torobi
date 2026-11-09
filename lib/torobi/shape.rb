@@ -16,8 +16,15 @@ module Torobi
     # methods, so the two can be compared instead of remembered.
     RULES = %i[
       parameter same_as_input broadcast transpose reshape slice reduce
-      matmul take sdpa cross_entropy cast
+      matmul take sdpa cross_entropy cast quantized_matmul
     ].freeze
+
+    # The quantizations MLX has kernels for (docs/qlora.md section 3.3).
+    # Checked where a graph is written, so a width no group divides is
+    # refused with the linear's name rather than by a kernel.
+    GROUP_SIZES = [32, 64, 128].freeze
+    BITS = [2, 3, 4, 5, 6, 8].freeze
+    QUANTIZATION_MODES = %w[affine].freeze
 
     # [shape, dtype] for one emission.
     def self.infer(rule, inputs:, params:, attrs:, where:)
@@ -106,7 +113,86 @@ module Torobi
 
       def parameter = [@params.fetch(0).shape, @params.fetch(0).dtype]
 
-      def cast = [first.shape, IR::Dtype.check!(@attrs.fetch("dtype").to_sym, where: @where)]
+      # Never to u32: that is a packed weight, not a number anything
+      # could be converted into (`IR::Dtype::CASTABLE`).
+      def cast
+        dtype = @attrs.fetch("dtype").to_sym
+        unless IR::Dtype::CASTABLE.include?(dtype)
+          raise ConfigError,
+                "#{where}: cannot cast to #{dtype.inspect}; a value is one of " \
+                "#{IR::Dtype::CASTABLE.join(", ")}, and u32 is only the packed form of a " \
+                "quantized weight"
+        end
+
+        [first.shape, dtype]
+      end
+
+      # `x @ dequantize(weight)ᵀ`, with the weight packed:
+      #
+      #   x: [..., d_in], weight: u32 [d_out, d_in × bits / 32],
+      #   scales, biases: x.dtype [d_out, d_in / group_size]  ->  [..., d_out]
+      #
+      # The three arrays carry no record of how they were made, so the
+      # attributes say, and the shapes have to agree with them: a packed
+      # width that does not unpack to `d_in`, or a group count that does
+      # not divide it, is a weight quantized some other way.
+      def quantized_matmul
+        x, weight, scales, biases = @inputs
+        group_size = @attrs.fetch("group_size")
+        bits = @attrs.fetch("bits")
+        mode = @attrs.fetch("mode")
+        unless GROUP_SIZES.include?(group_size)
+          raise ConfigError,
+                "#{where}: group_size must be one of #{GROUP_SIZES.join(", ")}, got #{group_size}"
+        end
+        unless BITS.include?(bits)
+          raise ConfigError,
+                "#{where}: bits must be one of #{BITS.join(", ")}, got #{bits}"
+        end
+        unless QUANTIZATION_MODES.include?(mode)
+          raise ConfigError,
+                "#{where}: quantization mode must be #{QUANTIZATION_MODES.join(", ")}, " \
+                "got #{mode.inspect}"
+        end
+        unless weight.dtype == :u32
+          raise ConfigError, "#{where}: a quantized weight is packed u32, got #{weight.dtype}"
+        end
+        if x.shape.empty? || x.shape.last.nil?
+          raise ConfigError, "#{where}: x needs a concrete last dimension, got #{x.shape.inspect}"
+        end
+        unless weight.shape.size == 2 && scales.shape.size == 2
+          raise ConfigError,
+                "#{where}: a quantized weight and its scales are matrices, got " \
+                "#{weight.shape.inspect} and #{scales.shape.inspect}"
+        end
+
+        d_in = x.shape.last
+        d_out, packed = weight.shape
+        unless (d_in % group_size).zero?
+          raise ConfigError,
+                "#{where}: d_in #{d_in} is not a multiple of group_size #{group_size}; " \
+                "the sizes that divide it are #{GROUP_SIZES.select do |g|
+                  (d_in % g).zero?
+                end.inspect}"
+        end
+        unless packed * 32 == d_in * bits
+          raise ConfigError,
+                "#{where}: a packed weight for d_in #{d_in} at #{bits} bits is " \
+                "[#{d_out}, #{d_in * bits / 32}], got #{weight.shape.inspect}"
+        end
+        groups = [d_out, d_in / group_size]
+        unless scales.shape == groups
+          raise ConfigError,
+                "#{where}: scales must be #{groups.inspect}, got #{scales.shape.inspect}"
+        end
+        if biases && biases.shape != groups
+          raise ConfigError,
+                "#{where}: biases must be #{groups.inspect}, got #{biases.shape.inspect}"
+        end
+
+        dtype = same_dtype([x, scales, biases].compact)
+        [x.shape[0...-1] + [d_out], dtype]
+      end
 
       def same_as_input
         [first.shape, same_dtype]

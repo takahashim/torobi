@@ -119,8 +119,12 @@ module Parity
   # One case through Torobi: the hidden state at every position, and the
   # scores at the last one, which is the position a decoder is asked
   # about.
-  def run_case(config, dir, ids)
-    graph = described.causal_lm(config, seq: ids.size)
+  #
+  # `dtype:` and `quantization:` are how the graph is built when the
+  # weights are a published 4-bit file (docs/qlora.md): bf16, with the
+  # linears the file holds packed read as they are.
+  def run_case(config, dir, ids, dtype: :f32, quantization: nil)
+    graph = described.causal_lm(config, seq: ids.size, dtype:, quantization:)
     run = Torobi::GraphConfig.new(models: { m: graph }, train: [])
     Torobi::Session.open(run, pretrained: { m: File.join(dir, "model.safetensors") }) do |s|
       s.tap("m.hidden", stat: :full)
@@ -133,43 +137,50 @@ module Parity
   # Relative to the size of what is being compared: a hidden state deep
   # in a decoder is tens, and an absolute tolerance would be saying
   # something about this model rather than about the arithmetic.
-  def compare_hidden(got, want, where)
+  def compare_hidden(got, want, where, tolerance: PARITY)
     assert_equal want.size, got.size, "#{where}: positions"
     apart = got.flatten.zip(want.flatten).map { |a, b| (a - b).abs }.max
     scale = want.flatten.map(&:abs).max
-    margin("#{where} hidden", apart, scale)
+    margin("#{where} hidden", apart, scale, tolerance)
 
-    assert_operator apart / scale, :<, PARITY,
+    assert_operator apart / scale, :<, tolerance,
                     "#{where}: hidden states differ by #{apart} against #{scale}"
   end
 
   # The ids first: which tokens a model thinks come next is what it is
   # for, and two implementations that disagree about the order are not
   # the same model however close the numbers are.
-  def compare_logits(got, want, where)
+  #
+  # `ranking: :first` asks only that the next token agree, for two bf16
+  # implementations whose ninth and tenth candidates may trade places
+  # within a rounding; the scores are still compared, by id, over the
+  # whole vocabulary.
+  def compare_logits(got, want, where, tolerance: PARITY, ranking: :full)
     mine = got.each_with_index.max_by(want.size) { |value, _| value }
 
     assert_equal want.map { |t| t.fetch("id") }.first, mine.first.last,
                  "#{where}: a different token comes next"
-    assert_equal want.map { |t| t.fetch("id") }.sort, mine.map(&:last).sort,
-                 "#{where}: a different set of tokens is likely"
+    if ranking == :full
+      assert_equal want.map { |t| t.fetch("id") }.sort, mine.map(&:last).sort,
+                   "#{where}: a different set of tokens is likely"
+    end
 
-    by_id = mine.to_h { |value, id| [id, value] }
+    by_id = want.to_h { |t| [t.fetch("id"), got.fetch(t.fetch("id"))] }
     apart = want.map { |t| (by_id.fetch(t.fetch("id")) - t.fetch("value")).abs }.max
     scale = want.map { |t| t.fetch("value").abs }.max
-    margin("#{where} logits", apart, scale)
+    margin("#{where} logits", apart, scale, tolerance)
 
-    assert_operator apart / scale, :<, PARITY, "#{where}: scores differ by #{apart}"
+    assert_operator apart / scale, :<, tolerance, "#{where}: scores differ by #{apart}"
   end
 
   # How much of the tolerance was actually used. A number somebody chose
   # is worth being able to look at: run with MARGIN=1 to see what it is
   # holding, and put what it says next to TOLERANCE.
-  def margin(what, apart, scale)
+  def margin(what, apart, scale, tolerance = PARITY)
     return unless ENV["MARGIN"]
 
     warn format("%-16s max|d| %.4g of %.4g, relative %.2e (tolerance %.0e)",
-                what, apart, scale, apart / scale, PARITY)
+                what, apart, scale, apart / scale, tolerance)
   end
 
   # How far two implementations of the same arithmetic may be, in a
@@ -186,4 +197,39 @@ module Parity
   # refusing anything that is wired differently, which is off by orders
   # rather than by rounding.
   PARITY = 2e-4
+
+  # The same, for a model held in bf16 and compared with another bf16
+  # implementation of it (a published 4-bit file against mlx-lm,
+  # docs/qlora.md Phase 1).
+  #
+  # Measured (2026-11-09, Qwen2.5-0.5B-Instruct-4bit, MARGIN=1, with the
+  # model computing in bf16 throughout, docs/plan.md 15.77): the scores
+  # at the last position differ from mlx-lm's by 1.6e-2 and 1.4e-2 and
+  # the next token agrees; the hidden states differ by 4.8e-2 and 6.5e-2
+  # against mlx-lm, and by 5.1e-2 between Torobi reading the same file
+  # packed and reading it as numbers. That last number is the floor: the
+  # two readings differ only by rounding each weight to bf16 once, and
+  # still come apart this far, because Qwen2.5's residual stream holds
+  # values near 200 where a bf16 step is 1.0, and 24 layers of bf16 adds
+  # walk a few steps. Before 15.77 Torobi computed in f32 and these were
+  # smaller (3.3e-2 and 5.9e-2): the difference was then mostly mlx-lm's
+  # own bf16 error, and now it is two independent ones. The scores are a
+  # projection of that stream and average the walk out, which is why
+  # they get the tighter of the two.
+  # Anything wired differently is off by the scale itself, not by a tenth
+  # of it; the f32 comparison beside these (`PARITY_PACKED`) is what
+  # holds the wiring, and these hold the bf16 path to being the same
+  # model.
+  PARITY_BF16 = 5e-2
+  PARITY_BF16_HIDDEN = 1e-1
+
+  # The packed matmul against the same weights unpacked, both in f32.
+  # The kernel takes `scale · (x · q) + bias · Σx` per group and the
+  # other side forms `scale · q + bias` first, so the two differ in the
+  # association of f32 arithmetic and in nothing else; measured at
+  # 1.5e-4 on the hidden states and 9.3e-5 on the scores (2026-11-08),
+  # which is ten times what two implementations of the bf16 model showed
+  # (`PARITY`) and three orders below a wiring mistake. Wider than
+  # `PARITY` so another machine's kernels have room.
+  PARITY_PACKED = 1e-3
 end

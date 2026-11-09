@@ -139,11 +139,17 @@ pub type Batch = BTreeMap<String, Tensor>;
 /// The list is the Ruby side's (lib/torobi/ir/dtype.rb), and the two must
 /// agree, so it is written once here and read in both directions rather
 /// than spelled out again wherever a name is needed.
-const VOCABULARY: [(&str, Dtype); 4] = [
+///
+/// `u32` is the packed form of a quantized weight (docs/qlora.md) and
+/// nothing else: a graph never computes in it, and the boundary never
+/// carries it (`to_tensor` refuses it; `TrainState::fetch` reads the
+/// numbers it stands for instead).
+const VOCABULARY: [(&str, Dtype); 5] = [
     ("f32", Dtype::Float32),
     ("bf16", Dtype::Bfloat16),
     ("i32", Dtype::Int32),
     ("bool", Dtype::Bool),
+    ("u32", Dtype::Uint32),
 ];
 
 /// The dtype a graph means by this name.
@@ -177,6 +183,10 @@ pub fn to_tensor(array: &Array) -> Result<Tensor> {
     // here is f32 numbers: they are the numbers it holds, Ruby has no
     // bf16 to put them in, and a label that disagreed with the bytes
     // would be a trap for whoever unpacked them.
+    // A u32 array is read as f32 too: the RNG key is one, and its two
+    // words fit. A packed quantized weight is also u32, and its words as
+    // f32 are not what anyone wants; `TrainState::fetch` reads those as
+    // the numbers they stand for before they get here.
     let values = match array.dtype() {
         Dtype::Int32 => Values::I32(array.as_slice::<i32>()?.to_vec()),
         _ => Values::F32(array.as_dtype(Dtype::Float32)?.as_slice::<f32>()?.to_vec()),
@@ -314,6 +324,8 @@ mod tests {
         assert_eq!(dtype_named("bf16"), Some(Dtype::Bfloat16));
         assert_eq!(dtype_named("i32"), Some(Dtype::Int32));
         assert_eq!(dtype_named("bool"), Some(Dtype::Bool));
+        assert_eq!(dtype_named("u32"), Some(Dtype::Uint32));
+        assert_eq!(dtype_spelling(Dtype::Uint32), Some("u32"));
         assert_eq!(dtype_named("f64"), None);
     }
 }

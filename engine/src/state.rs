@@ -9,8 +9,9 @@
 //! exactly as it was (docs/plan.md section 5A.4).
 
 use anyhow::{Context, Result};
+use crate::mlxc::quantized::dequantize;
 use crate::mlxc::transforms::eval;
-use crate::mlxc::Array;
+use crate::mlxc::{Array, Dtype};
 
 use crate::checkpoint;
 use crate::optimizer::{global_norm, scaled, Config as OptimizerConfig, Optimizer};
@@ -217,8 +218,16 @@ impl TrainState {
     /// weights, and unlike the gradient norm nothing in a step reads it.
     /// Frozen parameters count, so this is the size of the model and not
     /// of what is being trained.
+    /// Over the numbers the run holds: a packed quantized weight is
+    /// words, not weights, and is left out.
     pub fn param_norm(&self) -> Result<f32> {
-        global_norm(&self.params)
+        let numbers: Vec<Array> = self
+            .params
+            .iter()
+            .filter(|array| array.dtype() != Dtype::Uint32)
+            .cloned()
+            .collect();
+        global_norm(&numbers)
     }
 
     /// What update rule this run uses, as data.
@@ -298,6 +307,12 @@ impl TrainState {
         let index = plan
             .index_of(path)
             .with_context(|| format!("no parameter named {path:?}"))?;
+        anyhow::ensure!(
+            self.params[index].dtype() != Dtype::Uint32,
+            "parameter {path:?} is a packed quantized weight, which is not replaced: it came \
+             from a file with the scales that read it, and numbers put here would not. A base \
+             that is to be moved is declared in bf16."
+        );
         let array = tensor.to_array()?;
         anyhow::ensure!(
             array.shape() == self.params[index].shape(),
@@ -316,11 +331,34 @@ impl TrainState {
 
     /// A copy of one parameter, by qualified path. Copies, not handles:
     /// nothing that lives on the device escapes this crate.
+    ///
+    /// A packed quantized weight comes back as the numbers it stands for,
+    /// in f32, as every other parameter does: the label says what the
+    /// payload is (docs/plan.md 15.51), and what a caller asking for a
+    /// weight wants is the weight, not its words. The scales and biases
+    /// that read it are the ones the graph's `quantized_matmul` names.
     pub fn fetch(&self, plan: &Plan, path: &str) -> Result<Tensor> {
         let index = plan
             .index_of(path)
             .with_context(|| format!("no parameter named {path:?}"))?;
-        to_tensor(&self.params[index])
+        let array = &self.params[index];
+        if array.dtype() != Dtype::Uint32 {
+            return to_tensor(array);
+        }
+        let packed = plan.packed.get(&index).with_context(|| {
+            format!(
+                "parameter {path:?} is a packed u32 weight that no quantized_matmul in the graph \
+                 reads, so nothing says how to read it back as numbers"
+            )
+        })?;
+        let numbers = dequantize(
+            array,
+            &self.params[packed.scales],
+            packed.biases.map(|i| &self.params[i]),
+            packed.quantization,
+            None,
+        )?;
+        to_tensor(&numbers)
     }
 
     /// One optimizer step from a loss and its gradients, as a transaction:
@@ -591,6 +629,93 @@ mod tests {
         let (loss, grads, _) =
             executor::differentiate(plan, state.pass(), &fields, &Taps::new()).unwrap();
         state.advance(&loss, &grads).unwrap()
+    }
+
+    fn open_quantized(dir: &std::path::Path) -> (Plan, TrainState) {
+        let files = std::collections::BTreeMap::from([("m".to_string(), fixtures::quantized::file(dir, true))]);
+        let (plan, params) =
+            Plan::open(&fixtures::quantized::config(), Weights::Pretrained { files: &files, fresh: &[] }).unwrap();
+        let state = TrainState::new(&plan, params, sgd(0.1), 0).unwrap();
+        (plan, state)
+    }
+
+    fn step_quantized(plan: &Plan, state: &mut TrainState) -> f32 {
+        let batch: std::collections::BTreeMap<_, _> = [fixtures::field(
+            "x",
+            &[2, fixtures::quantized::D_IN as i32],
+            &vec![0.5; 2 * fixtures::quantized::D_IN],
+        )]
+        .into_iter()
+        .collect();
+        let fields = plan.bind(&batch).unwrap();
+        let (loss, grads, _) = executor::differentiate(plan, state.pass(), &fields, &Taps::new()).unwrap();
+        state.advance(&loss, &grads).unwrap()
+    }
+
+    /// What a caller asking for the weight wants is the weight: the
+    /// numbers the packed words stand for, in the shape the linear has,
+    /// within a step of the grid of what they were made from.
+    #[test]
+    fn a_packed_weight_is_fetched_as_the_numbers_it_stands_for() {
+        use fixtures::quantized::{weight, D_IN, D_OUT};
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, state) = open_quantized(dir.path());
+        let fetched = state.fetch(&plan, "m.proj.weight").unwrap();
+        assert_eq!(fetched.shape, vec![D_OUT as i32, D_IN as i32]);
+        for (got, want) in values(&fetched).iter().zip(weight(D_OUT)) {
+            assert!((got - want).abs() <= 2.0 / 15.0, "{got} came back for {want}");
+        }
+        // The scales are bf16-or-f32 numbers and come back as they are.
+        assert_eq!(state.fetch(&plan, "m.proj.scales").unwrap().shape, vec![D_OUT as i32, (D_IN / 32) as i32]);
+    }
+
+    /// A step through a quantized base moves the adapter side (here, the
+    /// head) and nothing of the base: not the words, not the scales, not
+    /// the biases. The loss itself ran through the packed matmul.
+    #[test]
+    fn a_step_through_a_packed_base_leaves_the_base_where_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, mut state) = open_quantized(dir.path());
+        let before: Vec<Vec<f32>> = ["m.proj.weight", "m.proj.scales", "m.proj.biases"]
+            .iter()
+            .map(|path| values(&state.fetch(&plan, path).unwrap()))
+            .collect();
+        let head_before = values(&state.fetch(&plan, "m.head.weight").unwrap());
+
+        let loss = step_quantized(&plan, &mut state);
+        assert!(loss.is_finite(), "{loss}");
+        assert_eq!(state.step(), 1);
+
+        let after: Vec<Vec<f32>> = ["m.proj.weight", "m.proj.scales", "m.proj.biases"]
+            .iter()
+            .map(|path| values(&state.fetch(&plan, path).unwrap()))
+            .collect();
+        assert_eq!(before, after, "the base did not move");
+        assert_ne!(head_before, values(&state.fetch(&plan, "m.head.weight").unwrap()), "the head did");
+        assert_eq!(state.argnums(), vec![plan.index_of("m.head.weight").unwrap() as i32]);
+    }
+
+    /// The words of a packed weight are not weights: the norm is over the
+    /// numbers, and `put` is refused rather than writing numbers where
+    /// words are read.
+    #[test]
+    fn a_packed_weight_is_neither_counted_nor_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plan, mut state) = open_quantized(dir.path());
+
+        let numbers: Vec<Array> = ["m.proj.scales", "m.proj.biases", "m.emb.weight", "m.head.weight"]
+            .iter()
+            .map(|path| state.fetch(&plan, path).unwrap().to_array().unwrap())
+            .collect();
+        let want = crate::optimizer::global_norm(&numbers).unwrap();
+        assert!((state.param_norm().unwrap() - want).abs() < 1e-3 * want.max(1.0));
+
+        let words = Tensor {
+            shape: vec![fixtures::quantized::D_OUT as i32, (fixtures::quantized::D_IN * 4 / 32) as i32],
+            values: Values::F32(vec![0.0; fixtures::quantized::D_OUT * fixtures::quantized::D_IN * 4 / 32]),
+        };
+        let said = state.put(&plan, "m.proj.weight", &words).unwrap_err().to_string();
+        assert!(said.contains("packed quantized weight"), "{said}");
     }
 
     #[test]

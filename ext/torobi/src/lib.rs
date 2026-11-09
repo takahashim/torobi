@@ -600,14 +600,28 @@ impl Session {
 
     /// Writes one model's parameters as an HF-compatible fp32 safetensors
     /// file. Returns [[old_path, new_path], ...] so the caller can write
-    /// metadata that names what was saved.
+    /// metadata that names what was saved. `merge` is an adapter's scale
+    /// (`alpha / rank`) to fold it into the weights, or nil.
     fn export_model(
         ruby: &Ruby,
         rb_self: &Self,
         model: String,
         dir: String,
+        merge: Option<f64>,
     ) -> Result<RArray, Error> {
-        let pairs = rb_self.with_engine(ruby, |engine| engine.export_model(&model, &dir))?;
+        let merge = merge.map(|scale| scale as f32);
+        let pairs = rb_self.with_engine(ruby, |engine| engine.export_model(&model, &dir, merge))?;
+        Self::pairs(ruby, pairs)
+    }
+
+    /// Writes one model's adapter alone, as PEFT names it, to
+    /// `adapter_model.safetensors`. Returns the same pairs.
+    fn export_adapter(ruby: &Ruby, rb_self: &Self, model: String, dir: String) -> Result<RArray, Error> {
+        let pairs = rb_self.with_engine(ruby, |engine| engine.export_adapter(&model, &dir))?;
+        Self::pairs(ruby, pairs)
+    }
+
+    fn pairs(ruby: &Ruby, pairs: Vec<(String, String)>) -> Result<RArray, Error> {
         let out = ruby.ary_new_capa(pairs.len());
         for (old, new) in pairs {
             out.push((old, new))?;
@@ -981,7 +995,8 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("discard", method!(Session::discard, 0))?;
     class.define_method("evaluate", method!(Session::evaluate, 1))?;
     class.define_method("save", method!(Session::save, 2))?;
-    class.define_method("export_model", method!(Session::export_model, 2))?;
+    class.define_method("export_model", method!(Session::export_model, 3))?;
+    class.define_method("export_adapter", method!(Session::export_adapter, 2))?;
     class.define_method("restore", method!(Session::restore, 1))?;
     class.define_method("close", method!(Session::close, 0))?;
     class.define_method("closed?", method!(Session::closed, 0))?;

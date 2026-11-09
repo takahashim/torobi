@@ -262,6 +262,12 @@ impl Array {
         unsafe { sys::mlx_array_size(self.0) }
     }
 
+    /// The bytes the array's elements take, known from its shape and
+    /// dtype before it is evaluated.
+    pub fn nbytes(&self) -> usize {
+        unsafe { sys::mlx_array_nbytes(self.0) }
+    }
+
     pub fn shape(&self) -> &[i32] {
         let ndim = self.ndim();
         if ndim == 0 {

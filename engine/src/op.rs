@@ -18,7 +18,14 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
 use crate::graph::{parse_ref, Graph, InputSpec, NodeSpec, Ref};
+use crate::mlxc::quantized::{Mode, Quantization};
 use crate::tensor::{dtype_named, Dtype};
+
+/// The quantizations MLX has kernels for, as `lib/torobi/shape.rb` lists
+/// them: the IR refuses anything else with the linear's name, and this
+/// is what the engine would say if something got past it.
+const GROUP_SIZES: [i32; 3] = [32, 64, 128];
+const BITS: [i32; 6] = [2, 3, 4, 5, 6, 8];
 
 /// One node's operation, with its attributes already read.
 ///
@@ -72,6 +79,9 @@ pub enum Op {
 
     Cast(Dtype),
     Matmul,
+    /// `x @ dequantize(weight)ᵀ` with the weight packed (docs/qlora.md):
+    /// inputs x, the u32 weight, the scales and, for affine, the biases.
+    QuantizedMatmul(Quantization),
     Take,
 
     /// Semantic ops, kept whole: the backend decides how to realize them,
@@ -99,7 +109,7 @@ impl Op {
             | Op::CrossEntropy
             | Op::RmsNorm { .. } => (2, 2),
             Op::LayerNorm { .. } => (2, 3),
-            Op::Sdpa { .. } => (3, 4),
+            Op::Sdpa { .. } | Op::QuantizedMatmul(_) => (3, 4),
             Op::AddScalar(_)
             | Op::SubScalar(_)
             | Op::MulScalar(_)
@@ -225,6 +235,17 @@ impl Op {
                 Op::Cast(dtype_named(&name).with_context(|| format!("cast: unknown dtype {name:?}"))?)
             }
             "matmul" => Op::Matmul,
+            "quantized_matmul" => {
+                let group_size = integer(attributes, "group_size")?;
+                let bits = integer(attributes, "bits")?;
+                anyhow::ensure!(
+                    GROUP_SIZES.contains(&group_size),
+                    "quantized_matmul: group_size must be one of {GROUP_SIZES:?}, got {group_size}"
+                );
+                anyhow::ensure!(BITS.contains(&bits), "quantized_matmul: bits must be one of {BITS:?}, got {bits}");
+                let mode = Mode::parse(&string(attributes, "mode")?).map_err(|e| anyhow::anyhow!("{}", e.what()))?;
+                Op::QuantizedMatmul(Quantization { group_size, bits, mode })
+            }
             "take" => Op::Take,
             "layer_norm" => Op::LayerNorm {
                 eps: number(attributes, "eps")?,
@@ -254,6 +275,9 @@ pub struct Node {
     pub inputs: Vec<Ref>,
     /// A stable name a tap can ask for, or none.
     pub name: Option<String>,
+    /// The dtype the graph declares this node produces, which the
+    /// interpreter holds what it computed to (`interp::evaluate_tapped`).
+    pub dtype: Option<Dtype>,
 }
 
 /// A graph in the form the interpreter runs.
@@ -300,10 +324,16 @@ impl Program {
                 }
             );
 
+            let dtype = spec
+                .dtype
+                .as_deref()
+                .map(|name| dtype_named(name).with_context(|| format!("{where_}: unknown dtype {name:?}")))
+                .transpose()?;
             nodes.push(Node {
                 op,
                 inputs,
                 name: spec.name.clone(),
+                dtype,
             });
         }
 
@@ -655,6 +685,56 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(absent.nodes[0].op, Op::Sum { keepdims: false, .. }));
+    }
+
+    /// The attributes say how the weight was quantized, and the engine
+    /// reads them into the one value the kernel is called with.
+    #[test]
+    fn a_quantized_matmul_carries_its_quantization() {
+        let program = Program::resolve(
+            graph(
+                vec![node(
+                    0,
+                    "quantized_matmul",
+                    &["input:0", "input:0", "input:0", "input:0"],
+                    json!({"group_size": 64, "bits": 4, "mode": "affine"}),
+                )],
+                &[("y", "node:0")],
+            ),
+            0,
+            "m",
+        )
+        .unwrap();
+        assert!(matches!(
+            program.nodes[0].op,
+            Op::QuantizedMatmul(Quantization { group_size: 64, bits: 4, mode: Mode::Affine })
+        ));
+
+        let two_inputs = refusal(
+            vec![node(0, "quantized_matmul", &["input:0", "input:0"], json!({"group_size": 64, "bits": 4, "mode": "affine"}))],
+            &[("y", "node:0")],
+            0,
+        );
+        assert!(two_inputs.contains("takes 3 to 4"), "{two_inputs}");
+    }
+
+    /// A quantization MLX has no kernel for is refused when the plan
+    /// opens, in the words the IR uses.
+    #[test]
+    fn a_quantization_without_a_kernel_is_refused() {
+        for (attributes, fragment) in [
+            (json!({"group_size": 48, "bits": 4, "mode": "affine"}), "group_size must be one of"),
+            (json!({"group_size": 64, "bits": 7, "mode": "affine"}), "bits must be one of"),
+            (json!({"group_size": 64, "bits": 4, "mode": "mxfp4"}), "\"mxfp4\" is not one this engine reads"),
+            (json!({"group_size": 64, "bits": 4}), "\"mode\" must be a string"),
+        ] {
+            let said = refusal(
+                vec![node(0, "quantized_matmul", &["input:0", "input:0", "input:0"], attributes)],
+                &[("y", "node:0")],
+                0,
+            );
+            assert!(said.contains(fragment), "{said}");
+        }
     }
 
     #[test]

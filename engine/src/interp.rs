@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use crate::mlxc::error::Exception;
 use crate::mlxc::fast::ScaledDotProductAttentionMask as Mask;
 use crate::mlxc::ops::indexing::take_along_axis;
-use crate::mlxc::Array;
+use crate::mlxc::{Array, Dtype};
 
 use crate::graph::Ref;
 use crate::op::{qualified, Node, Op, Program};
@@ -149,6 +149,24 @@ pub fn evaluate_tapped(
             .map(|r| read(r, program, inputs, &values))
             .collect::<Result<_>>()?;
         let out = apply(node, &ins, params, &mut key)?;
+        // What was computed has the dtype the graph says, or the graph and
+        // the engine are describing two different runs. MLX promotes a
+        // bf16 array combined with an f32 one to f32 without a word, and
+        // that is how a bf16 model came to compute in f32 from its first
+        // norm on, while the graph went on saying bf16 (2026-11-09).
+        if let Some(declared) = node.dtype {
+            if out.dtype() != declared {
+                return Err(Exception::custom(format!(
+                    "{qualifier}: node {} ({:?}) computed {:?} where the graph declares {:?}. \
+                     This is the engine's mistake, not the graph's: an op mixed a dtype into its \
+                     arithmetic that the graph did not ask for.",
+                    values.len(),
+                    node.op,
+                    out.dtype(),
+                    declared
+                )));
+            }
+        }
         if let Some(name) = &node.name {
             watch.saw(qualifier, name, &out)?;
         }
@@ -185,7 +203,8 @@ fn read(
 /// One node's arithmetic. `key` is the graph's remaining randomness, split
 /// by each op that draws.
 fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) -> Result<Array> {
-    let scalar = Array::from_f32;
+    // A number from the graph, in the dtype of what it is combined with.
+    let scalar = |value: f32| constant(value, &ins[0]);
     Ok(match &node.op {
         Op::Parameter(index) => params[*index].clone(),
 
@@ -205,7 +224,7 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
         Op::Square => ins[0].square()?,
         Op::Exp => ins[0].exp()?,
         Op::Log => ins[0].log()?,
-        Op::Relu => crate::mlxc::ops::maximum(&ins[0], Array::from_f32(0.0)?)?,
+        Op::Relu => crate::mlxc::ops::maximum(&ins[0], scalar(0.0)?)?,
         Op::Sigmoid => crate::mlxc::ops::sigmoid(&ins[0])?,
         Op::Tanh => crate::mlxc::ops::tanh(&ins[0])?,
         // The exact form, not the tanh approximation: erf is what the
@@ -231,11 +250,11 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
                 Some(current) => {
                     let (next, draw) = crate::mlxc::random::split(current, 2)?;
                     *key = Some(next);
-                    let keep = scalar(1.0 - p)?;
-                    let mask = crate::mlxc::random::bernoulli(&keep, ins[0].shape(), &draw)?;
+                    let chance = Array::from_f32(1.0 - p)?;
+                    let mask = crate::mlxc::random::bernoulli(&chance, ins[0].shape(), &draw)?;
                     ins[0]
-                        .multiply(mask.as_dtype(crate::mlxc::Dtype::Float32)?)?
-                        .divide(&keep)?
+                        .multiply(mask.as_dtype(ins[0].dtype())?)?
+                        .divide(scalar(1.0 - p)?)?
                 }
             }
         }
@@ -268,6 +287,11 @@ fn apply(node: &Node, ins: &[Array], params: &[Array], key: &mut Option<Array>) 
         // the graph says where a model's precision changes.
         Op::Cast(to) => ins[0].as_dtype(*to)?,
         Op::Matmul => ins[0].matmul(&ins[1])?,
+        // The weight is a linear's [d_out, d_in], so it is always read
+        // transposed; the IR has no attribute for it (config/ops.yml).
+        Op::QuantizedMatmul(quantization) => {
+            crate::mlxc::quantized::quantized_matmul(&ins[0], &ins[1], &ins[2], ins.get(3), true, *quantization)?
+        }
         // An embedding: rows of the table, selected by i32 ids. The
         // gradient reaches only the rows that were read.
         Op::Take => ins[0].take_axis(&ins[1], 0)?,
@@ -289,33 +313,75 @@ fn slice(x: &Array, axis: i32, start: i32, length: i32) -> Result<Array> {
     x.take_axis(&Array::from_slice(&indices, &[length])?, axis)
 }
 
+/// `value` as an array of `like`'s dtype, when that is a floating dtype
+/// narrower than f32; as f32 otherwise.
+///
+/// MLX's arrays carry their dtype strongly: a bf16 array times an f32
+/// one is f32, where a Python scalar would have stayed out of the way.
+/// So a constant made as f32 and combined with a bf16 value promotes the
+/// value, and everything downstream of it, to f32.
+fn constant(value: f32, like: &Array) -> Result<Array> {
+    let array = Array::from_f32(value)?;
+    match like.dtype() {
+        Dtype::Bfloat16 | Dtype::Float16 => array.as_dtype(like.dtype()),
+        _ => Ok(array),
+    }
+}
+
+/// `x` in f32, for arithmetic whose precision should not be `x`'s own
+/// (a norm's statistics, a rotation's angles).
+fn widened(x: &Array) -> Result<Array> {
+    if x.dtype() == Dtype::Float32 {
+        Ok(x.clone())
+    } else {
+        x.as_dtype(Dtype::Float32)
+    }
+}
+
 /// Normalize over the last axis, then scale and shift.
 ///
 /// Two or three inputs: the value, the gain, and optionally the bias. Kept
 /// whole as a semantic op, so this is what it means rather than how a
 /// backend must do it.
+///
+/// In f32 whatever `x` is held in, and returned in `x`'s dtype, as MLX's
+/// own fused norms do: the mean and variance of a bf16 row are too coarse
+/// in bf16, and a result left in f32 would turn the rest of a bf16 model
+/// into an f32 one.
 fn layer_norm(ins: &[Array], eps: f32) -> Result<Array> {
-    let (x, weight) = (&ins[0], &ins[1]);
+    let (x, weight) = (widened(&ins[0])?, widened(&ins[1])?);
     let mean = x.mean_axes(&[-1], true)?;
     let centred = x.subtract(&mean)?;
     let variance = centred.square()?.mean_axes(&[-1], true)?;
     let normed = centred.divide(variance.add(Array::from_f32(eps)?)?.sqrt()?)?;
-    let scaled = normed.multiply(weight)?;
-    match ins.get(2) {
-        Some(bias) => scaled.add(bias),
-        None => Ok(scaled),
-    }
+    let scaled = normed.multiply(&weight)?;
+    let shifted = match ins.get(2) {
+        Some(bias) => scaled.add(widened(bias)?)?,
+        None => scaled,
+    };
+    narrowed(shifted, ins[0].dtype())
 }
 
 /// Scale by the root mean square of the last axis, then by the gain. No
-/// centring and no bias, which is what makes it not layer_norm.
+/// centring and no bias, which is what makes it not layer_norm. In f32,
+/// returned in `x`'s dtype, for the reason `layer_norm` is.
 fn rms_norm(x: &Array, weight: &Array, eps: f32) -> Result<Array> {
-    let scale = x
+    let wide = widened(x)?;
+    let scale = wide
         .square()?
         .mean_axes(&[-1], true)?
         .add(Array::from_f32(eps)?)?
         .rsqrt()?;
-    x.multiply(scale)?.multiply(weight)
+    narrowed(wide.multiply(scale)?.multiply(widened(weight)?)?, x.dtype())
+}
+
+/// `x` back in `dtype`, after arithmetic done wider.
+fn narrowed(x: Array, dtype: Dtype) -> Result<Array> {
+    if x.dtype() == dtype {
+        Ok(x)
+    } else {
+        x.as_dtype(dtype)
+    }
 }
 
 /// A reshape target with its 0s filled in from the array in hand.
@@ -380,11 +446,15 @@ fn rope(x: &Array, theta: f32, freqs: Option<&[f32]>) -> Result<Array> {
     let angle = Array::from_slice(&angles, &[positions, half])?;
     let (cos, sin) = (angle.cos()?, angle.sin()?);
 
-    let first = slice(x, -1, 0, half)?;
-    let second = slice(x, -1, half, half)?;
+    // Rotated in f32 and returned in `x`'s dtype, as MLX's fused rope
+    // does: the angles are f32, and multiplying a bf16 `x` by them would
+    // otherwise leave the queries and keys in f32.
+    let wide = widened(x)?;
+    let first = slice(&wide, -1, 0, half)?;
+    let second = slice(&wide, -1, half, half)?;
     let rotated_first = first.multiply(&cos)?.subtract(second.multiply(&sin)?)?;
     let rotated_second = second.multiply(&cos)?.add(first.multiply(&sin)?)?;
-    crate::mlxc::ops::concatenate(&[rotated_first, rotated_second], -1)
+    narrowed(crate::mlxc::ops::concatenate(&[rotated_first, rotated_second], -1)?, x.dtype())
 }
 
 /// Scaled dot-product attention: softmax(q k^T / sqrt(d) + mask) v.
@@ -418,12 +488,15 @@ fn sdpa(ins: &[Array], scale: Option<f32>, causal: bool) -> Result<Array> {
     } else {
         match ins.get(3) {
             // A mask is broadcast against the scores, so one written for
-            // three axes needs the head axis these just grew.
-            Some(mask) if flat && mask.ndim() == 3 => {
-                held = mask.expand_dims_axes(&[1])?;
+            // three axes needs the head axis these just grew. And it is in
+            // the scores' dtype, as mlx-lm casts it: an f32 mask added to
+            // bf16 scores would hand back f32 attention.
+            Some(mask) => {
+                let lifted = if flat && mask.ndim() == 3 { mask.expand_dims_axes(&[1])? } else { mask.clone() };
+                held = narrowed(lifted, q.dtype())?;
                 Some(Mask::Array(&held))
             }
-            other => other.map(Mask::Array),
+            None => None,
         }
     };
     // The last argument is attention sinks, which nothing here uses.
@@ -764,4 +837,149 @@ mod tests {
 
         assert!(said.contains("frequencies"), "{said}");
     }
+
+    /// One node over bf16 inputs, by the interpreter alone, with the dtype
+    /// the graph declares for it. `params` are the model's parameters, read
+    /// by `parameter` nodes ahead of the op.
+    fn through(
+        op: &str,
+        attributes: serde_json::Value,
+        inputs: &[(&str, Vec<i32>)],
+        params: Vec<crate::mlxc::Array>,
+        declared: &str,
+    ) -> Result<crate::mlxc::Array, String> {
+        use crate::mlxc::{Array, Dtype};
+        use serde_json::json;
+        crate::runtime::runtime()
+            .execute(|| {
+                let specs: Vec<_> = inputs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (name, shape))| fixtures::input(i, name, json!(shape), "bf16"))
+                    .collect();
+                let parameters: Vec<_> = params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        let mut spec = fixtures::parameter(i, &format!("p{i}"), json!(a.shape()), false);
+                        spec["dtype"] = json!("bf16");
+                        spec
+                    })
+                    .collect();
+                let mut nodes: Vec<_> = (0..params.len())
+                    .map(|i| fixtures::node(i, "parameter", json!([]), json!([i])))
+                    .collect();
+                let reads: Vec<String> = (0..inputs.len())
+                    .map(|i| format!("input:{i}"))
+                    .chain((0..params.len()).map(|i| format!("node:{i}")))
+                    .collect();
+                let mut under_test = fixtures::node(nodes.len(), op, json!(reads), json!([]));
+                under_test["attributes"] = attributes.clone();
+                under_test["dtype"] = json!(declared);
+                nodes.push(under_test);
+                let graph: crate::graph::Graph = serde_json::from_value(json!({
+                    "inputs": specs, "parameters": parameters, "nodes": nodes,
+                    "outputs": {"y": format!("node:{}", nodes.len() - 1)},
+                }))
+                .unwrap();
+                let program = crate::op::Program::resolve(graph, params.len(), "m").unwrap();
+                let fed: std::collections::BTreeMap<String, Array> = inputs
+                    .iter()
+                    .map(|(name, shape)| {
+                        let count: i32 = shape.iter().product();
+                        let values: Vec<f32> = (0..count).map(|i| (i as f32 * 0.37).sin()).collect();
+                        let array = Array::from_slice(&values, shape)?.as_dtype(Dtype::Bfloat16)?;
+                        Ok((name.to_string(), array))
+                    })
+                    .collect::<super::Result<_>>()?;
+                let mut collected = super::Tapped::new();
+                let mut watch = super::Watch::none(&mut collected);
+                Ok(super::evaluate_tapped(&program, &params, &fed, None, "m", &mut watch)
+                    .map(|mut out| out.remove("y").unwrap())
+                    .map_err(|e| e.what().to_string()))
+            })
+            .expect("the runtime should let this through")
+    }
+
+    fn bf16(shape: &[i32]) -> crate::mlxc::Array {
+        crate::mlxc::Array::ones::<f32>(shape).unwrap().as_dtype(crate::mlxc::Dtype::Bfloat16).unwrap()
+    }
+
+    /// A bf16 value through any op stays bf16. Every one of these used to
+    /// come back f32, because the number it was combined with was made
+    /// as an f32 array, and MLX promotes rather than narrows: the graph
+    /// said bf16, and the engine computed the rest of the model in f32
+    /// (2026-11-09).
+    #[test]
+    fn a_bf16_value_stays_bf16_through_every_op_that_adds_a_number_of_its_own() {
+        use crate::mlxc::Dtype;
+        use serde_json::json;
+        let row = |name: &'static str| (name, vec![2, 4]);
+        let cases: Vec<(&str, serde_json::Value, Vec<(&str, Vec<i32>)>, Vec<crate::mlxc::Array>)> = vec![
+            ("add_scalar", json!({"value": 1.0}), vec![row("x")], vec![]),
+            ("sub_scalar", json!({"value": 1.0}), vec![row("x")], vec![]),
+            ("mul_scalar", json!({"value": 2.0}), vec![row("x")], vec![]),
+            ("div_scalar", json!({"value": 2.0}), vec![row("x")], vec![]),
+            ("rdiv_scalar", json!({"value": 2.0}), vec![row("x")], vec![]),
+            ("relu", json!({}), vec![row("x")], vec![]),
+            ("gelu", json!({}), vec![row("x")], vec![]),
+            ("gelu_tanh", json!({}), vec![row("x")], vec![]),
+            ("rms_norm", json!({"eps": 1e-6}), vec![row("x")], vec![bf16(&[4])]),
+            ("layer_norm", json!({"eps": 1e-5}), vec![row("x")], vec![bf16(&[4]), bf16(&[4])]),
+            ("rope", json!({"theta": 10000.0}), vec![row("x")], vec![]),
+            (
+                "sdpa",
+                json!({"scale": null, "causal": false}),
+                vec![("q", vec![1, 2, 4]), ("k", vec![1, 2, 4]), ("v", vec![1, 2, 4]), ("mask", vec![1, 2, 2])],
+                vec![],
+            ),
+        ];
+        for (op, attributes, inputs, params) in cases {
+            let out = through(op, attributes, &inputs, params, "bf16").unwrap_or_else(|e| panic!("{op}: {e}"));
+            assert_eq!(out.dtype(), Dtype::Bfloat16, "{op}");
+        }
+    }
+
+    /// The norms take their statistics in f32 and hand back bf16: over a
+    /// row of 4096, the result is the f32 answer to bf16's own precision,
+    /// which a mean of squares summed in bf16 would not be.
+    #[test]
+    fn a_norm_of_a_bf16_row_is_computed_wide_and_returned_narrow() {
+        use crate::mlxc::Dtype;
+        let out = through("rms_norm", serde_json::json!({"eps": 0.0}), &[("x", vec![1, 4096])], vec![bf16(&[4096])], "bf16")
+            .unwrap();
+        assert_eq!(out.dtype(), Dtype::Bfloat16);
+        let values = crate::runtime::runtime()
+            .execute(|| Ok(out.as_dtype(Dtype::Float32)?.as_slice::<f32>()?.to_vec()))
+            .unwrap();
+        // The input is sin(0.37 i) held in bf16; the answer is computed
+        // here in f32 from the same bf16 values.
+        let rms = ((0..4096).map(|i| (i as f32 * 0.37).sin()).map(|v| {
+            let b = half_round(v);
+            b * b
+        }).sum::<f32>() / 4096.0).sqrt();
+        for (i, got) in values.iter().enumerate() {
+            let want = half_round((i as f32 * 0.37).sin()) / rms;
+            assert!((got - want).abs() <= 1e-2 * (1.0 + want.abs()), "{i}: {got} for {want}");
+        }
+    }
+
+    /// bf16 by truncating an f32 to its top sixteen bits, rounded to nearest.
+    fn half_round(v: f32) -> f32 {
+        let bits = v.to_bits();
+        let rounded = bits.wrapping_add(0x7fff + ((bits >> 16) & 1)) & 0xffff_0000;
+        f32::from_bits(rounded)
+    }
+
+    /// A node that computes another dtype than the graph declares is
+    /// refused where it happens, naming the node and both dtypes, rather
+    /// than carrying on as a different run from the one described.
+    #[test]
+    fn a_node_that_computes_another_dtype_than_declared_is_refused() {
+        let said = through("mul_scalar", serde_json::json!({"value": 2.0}), &[("x", vec![2, 4])], vec![], "f32")
+            .expect_err("a bf16 product declared f32");
+        assert!(said.contains("computed Bfloat16 where the graph declares Float32"), "{said}");
+        assert!(said.contains("node 0"), "{said}");
+    }
 }
+

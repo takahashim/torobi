@@ -311,9 +311,15 @@ impl SessionCore {
     }
 
     /// Writes one model's parameters as an HF-compatible fp32 safetensors
-    /// file, stripping the GraphConfig model name from each path.
-    pub(crate) fn export_model(&self, model: &str, dir: &str) -> Result<Vec<(String, String)>> {
-        crate::export::write(&self.plan, self.state.params(), model, dir)
+    /// file, stripping the GraphConfig model name from each path. `merge`
+    /// is an adapter's scale, to fold it into the weights.
+    pub(crate) fn export_model(&self, model: &str, dir: &str, merge: Option<f32>) -> Result<Vec<(String, String)>> {
+        crate::export::write(&self.plan, self.state.params(), model, dir, merge)
+    }
+
+    /// Writes one model's adapter alone, as PEFT names it.
+    pub(crate) fn export_adapter(&self, model: &str, dir: &str) -> Result<Vec<(String, String)>> {
+        crate::export::write_adapter(&self.plan, self.state.params(), model, dir)
     }
 
     /// Restores state written by [`Session::save`], refusing anything that
@@ -616,8 +622,13 @@ impl Session {
 
     /// Writes one model's parameters as an HF-compatible fp32 safetensors
     /// file, stripping the GraphConfig model name from each path.
-    pub fn export_model(&self, model: &str, dir: &str) -> Outcome<Vec<(String, String)>> {
-        self.gated(|core| core.export_model(model, dir))
+    pub fn export_model(&self, model: &str, dir: &str, merge: Option<f32>) -> Outcome<Vec<(String, String)>> {
+        self.gated(|core| core.export_model(model, dir, merge))
+    }
+
+    /// Writes one model's adapter alone, as PEFT names it.
+    pub fn export_adapter(&self, model: &str, dir: &str) -> Outcome<Vec<(String, String)>> {
+        self.gated(|core| core.export_adapter(model, dir))
     }
 
     /// Restores state written by [`Session::save`], refusing anything that
@@ -1431,7 +1442,7 @@ mod checkpoint_tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out").display().to_string();
 
-        let pairs = session.export_model("student", &out).unwrap();
+        let pairs = session.export_model("student", &out, None).unwrap();
         assert_eq!(pairs, vec![("student.scale".to_string(), "scale".to_string())]);
 
         let arrays = crate::mlxc::Array::load_safetensors(std::path::Path::new(&out).join("model.safetensors")).unwrap();
@@ -1445,7 +1456,7 @@ mod checkpoint_tests {
         let session = open(fixtures::scaled_mean());
         let dir = tempfile::tempdir().unwrap();
         let e = session
-            .export_model("elsewhere", &dir.path().display().to_string())
+            .export_model("elsewhere", &dir.path().display().to_string(), None)
             .unwrap_err();
         assert!(e.to_string().contains("no model named"), "{e}");
     }

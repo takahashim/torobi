@@ -203,6 +203,22 @@ namespace :oracle do
     reference "Qwen/Qwen2.5-0.5B", "test/oracle/qwen2.5-0.5b.forward.json"
   end
 
+  # The same model as mlx-lm publishes it at 4 bits (docs/qlora.md): what
+  # the file holds, by name, shape and dtype, and what mlx-lm answers for
+  # it. The second needs MLX, so a Mac or a CUDA machine.
+  desc "record what mlx-community/Qwen2.5-0.5B-Instruct-4bit holds, for test/oracle"
+  task :qwen2_4bit do
+    sh RbConfig.ruby, "tools/inventory.rb", "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+       "test/oracle/qwen2.5-0.5b-instruct-4bit.json"
+  end
+
+  desc "record what mlx-lm answers for the 4-bit Qwen2.5-0.5B-Instruct, for test/oracle"
+  task :qwen2_4bit_forward do
+    sh "uv", "run", "--with", "mlx-lm", "python", "tools/qlora_reference.py",
+       "--model", "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+       "--out", "test/oracle/qwen2.5-0.5b-instruct-4bit.forward.json"
+  end
+
   # The same architecture as Qwen2 with two flags moved, which is the
   # claim `Models::Llama` makes and this is what holds it to it.
   desc "record what sbintuitions/sarashina2.2-0.5b holds, for test/oracle"
