@@ -606,7 +606,12 @@ impl Source {
                     // parameter draws the same numbers wherever it sits in
                     // the declaration order.
                     let (_, mine) = crate::mlxc::random::split(key, 2)?;
-                    return crate::init::build(spec, &mine);
+                    // Drawn in f32, as every initializer draws, and held in
+                    // the declared dtype like anything read from a file.
+                    // Returned as drawn, a bf16 adapter's matrices started
+                    // f32 (2026-11-09).
+                    let drawn = crate::init::build(spec, &mine)?;
+                    return Ok(if drawn.dtype() == declared { drawn } else { drawn.as_dtype(declared)? });
                 }
                 let arrays = files.get_mut(model).with_context(|| {
                     format!("no file was given for model {model:?}")
@@ -1517,6 +1522,24 @@ mod tests {
             Err(e) => format!("{e:#}"),
         };
         assert!(said.contains("neither model.safetensors nor"), "{said}");
+    }
+
+    /// A parameter drawn from its initializer (`fresh:`) is held in the
+    /// dtype it is declared in, as one read from a file is: a bf16 LoRA's
+    /// matrices are bf16, not the f32 the draw is made in.
+    #[test]
+    fn a_fresh_parameter_is_held_in_its_declared_dtype() {
+        let (config, _) = fixtures::scaled_mean();
+        let mut graph: serde_json::Value = serde_json::from_str(&config).unwrap();
+        graph["models"]["m"]["parameters"][0]["dtype"] = json!("bf16");
+        graph["models"]["m"]["parameters"][0]["initializer"] = json!({"type": "normal", "std": 0.02});
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_parameters(dir.path(), &[("unrelated", Array::from_f32(1.0).unwrap())]);
+        let files = BTreeMap::from([("m".to_string(), file)]);
+        let fresh = vec!["m.w".to_string()];
+        let (plan, params) =
+            Plan::open(&graph.to_string(), Weights::Pretrained { files: &files, fresh: &fresh }).unwrap();
+        assert_eq!(params[plan.index_of("m.w").unwrap()].dtype(), Dtype::Bfloat16);
     }
 
     #[test]

@@ -311,4 +311,74 @@ dtype: :bf16, quantization:)
       assert_equal held[name][1] == "U32" ? :u32 : :bf16, declared[name][1], name
     end
   end
+
+  # --- the whole of it, through the engine ---
+
+  SMALL = { "vocab_size" => 11, "hidden_size" => 64, "intermediate_size" => 128,
+            "num_hidden_layers" => 2, "num_attention_heads" => 4,
+            "num_key_value_heads" => 2, "rms_norm_eps" => 1e-6, "rope_theta" => 10_000.0,
+            "tie_word_embeddings" => true, "eos_token_id" => 10 }.freeze
+
+  def safetensors(tensors)
+    offset = 0
+    header = tensors.to_h do |name, t|
+      bytes = t[:data].size * 4
+      entry = { "dtype" => "F32", "shape" => t[:shape], "data_offsets" => [offset, offset + bytes] }
+      offset += bytes
+      [name, entry]
+    end
+    json = JSON.generate(header)
+    json += " " * ((8 - (json.bytesize % 8)) % 8)
+    [json.bytesize].pack("Q<") + json + tensors.values.map { |t| t[:data].pack("e*") }.join
+  end
+
+  # What QLoRA is, end to end, on a model small enough to run anywhere:
+  # a bf16 description with its linears quantized as an f32 file is read
+  # (docs/qlora.md 3.4 (B)), an adapter drawn fresh beside them, and steps
+  # taken. Every piece of this had been tested apart; together they found
+  # that a fresh adapter was drawn in f32 and left so in a bf16 model,
+  # which the engine's dtype check refused on the first step (2026-11-09).
+  def test_a_bf16_quantized_model_with_a_fresh_adapter_takes_steps
+    skip "extension not compiled" unless defined?(Torobi::Session)
+
+    config = Torobi::Models::Llama.from_hash(SMALL)
+    seq = 4
+    rng = Random.new(5)
+    base = Torobi::Models::Llama.causal_lm(config, seq:).parameters.to_h do |spec|
+      [spec.path, { shape: spec.shape, data: Array.new(spec.shape.reduce(1, :*)) do
+        rng.rand(-0.4..0.4)
+      end }]
+    end
+    adapter = Torobi::LoRA.new(rank: 2, alpha: 4, on: %w[q_proj v_proj])
+    graph = Torobi::Models::Llama.causal_lm(config, seq:, dtype: :bf16, adapter:,
+quantization: quant)
+    run = Torobi::GraphConfig.new(
+      models: { m: graph },
+      objective: Torobi.objective(m: graph) do |g|
+        logits = g.cast(g.from_model(:m, :logits), :f32)
+        g.output :loss,
+                 g.mean(g.cross_entropy(logits, g.from_batch(:targets, [nil, seq], dtype: :i32)))
+      end
+    )
+    rows = [[3, 8, 5, 9], [4, 6, 1, 2]]
+    batch = Torobi::Models::Llama.batch(config, rows, seq:).merge(
+      targets: Torobi::TensorData.from_a([2, seq], rows.flat_map { |r| r[1..] + [10] }, dtype: :i32)
+    )
+
+    Dir.mktmpdir do |dir|
+      file = File.join(dir, "model.safetensors")
+      File.binwrite(file, safetensors(base))
+      Torobi::Session.open(run, pretrained: { m: file }, fresh: adapter.fresh(run),
+                                optimizer: { kind: :adamw, lr: 0.05 }) do |s|
+        assert_equal adapter.fresh(run).sort, s.trainable.sort, "only the adapter trains"
+        packed = "m.model.layers.0.self_attn.q_proj.weight"
+        before = s.fetch(packed).to_a
+        losses = Array.new(3) { s.step!(batch) }
+
+        losses.each { |loss| assert_predicate loss, :finite?, losses.inspect }
+        assert_operator losses.last, :<, losses.first, "the adapter learns"
+        assert_equal before, s.fetch(packed).to_a, "the packed base does not move"
+      end
+    end
+  end
 end
