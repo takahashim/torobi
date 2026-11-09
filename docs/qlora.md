@@ -43,8 +43,8 @@ adapter と活性だけに流れる。base の勾配は要らないので、量�
 
 Torobi にとっては「`linear` の中で `matmul(x, Wᵀ)` の代わりに
 `quantized_matmul(x, W_q, scales, biases)` を発行し、3 つのパラメータを `trainable: false`
-で宣言する」という話に収まる。adapter 側(`LoRA#contribution`)は `x.dtype` で A, B を
-作るので、そのまま bf16 で動く。
+で宣言する」という話に収まる。adapter 側(`LoRA#contribution`)は A, B を f32 で持ち、
+入力を f32 に広げて計算して `x.dtype` に戻す(2026-11-09 から。§9)。量子化しても変わらない。
 
 ### 1.2 どのモデルがどこに載るか
 
@@ -81,7 +81,7 @@ checkpointing が無いので、長い系列は batch 1 で測ってから言う
 
 | 部品 | どこに | 何をするか |
 | --- | --- | --- |
-| `Torobi::LoRA` | `lib/torobi/lora.rb` | `rank` / `alpha` / `on:`。`wraps?(path)` は最後のセグメントで照合、`contribution` が A, B を `x.dtype` で作る、`fresh(config)` が実パスの一覧を返す |
+| `Torobi::LoRA` | `lib/torobi/lora.rb` | `rank` / `alpha` / `on:`。`wraps?(path)` は最後のセグメントで照合、`contribution` が A, B を作る(当初は `x.dtype`、今は f32。§9)、`fresh(config)` が実パスの一覧を返す |
 | `g.adapting(adapter) { }` | `lib/torobi/dsl/builder.rb` | adapter をスコープに置く。`param` が `@adapter.trains?(path)` で trainable を落とす |
 | `g.linear` | `lib/torobi/dsl/layers.rb` | `param("#{name}.weight", [d_out, d_in], dtype: x.dtype)` → `matmul(x, wᵀ)` → bias → adapter の寄与 |
 | `causal_lm(config, adapter:, dtype:)` | `lib/torobi/models/llama.rb` ほか | モデル記述は `adapting adapter do ... end` を 1 回書くだけ |
@@ -781,3 +781,12 @@ merge した重みは **f32 で書く**(既存の export と同じ契約。§3.6
   `test/qlora_test.rb` を `MARGIN=1` で再実行すれば、差が縮むかで分かる。(3) 学習の比較は
   bf16 の run も 4 bit の run も活性が f32 だったので、両者の差の比較としては公平だが、
   数字そのものは bf16 で計算し直すと動く。0.5B の全 linear の run をやり直して確かめる。
+- **adapter を f32 で持つ(2026-11-09)。** bf16 の精度は約 0.4 % なので、学習するパラメータを
+  bf16 で持つと、更新が値の 0.2 % を下回ったところで丸めで消える。A は kaiming で 0.08 前後、
+  lr 1e-4 の Adam の更新はその 0.1 % ほどで、多くが消える。`fresh:` の dtype の直し
+  (`8919c23`)で adapter が正しく bf16 になった結果、これが表に出るはずだった。mlx-lm は
+  `tuner/lora.py` で A, B を MLX の既定の f32 で作り、`(scale * z).astype(x.dtype)` で戻して
+  いる(mlx-lm 0.32.2 のソースで確認)。Torobi も同じにした: `LoRA#contribution` が A, B を
+  f32 で宣言し、`g.cast(x, :f32)` で広げて計算し、結果を `g.cast(..., x.dtype)` で戻す。
+  f32 のモデルでは cast はノードにならない。それより前の比較の run の adapter は、不具合の
+  せいで最初から f32 だったので、この点ではもともと mlx-lm と同じ条件だった。

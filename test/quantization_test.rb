@@ -71,8 +71,8 @@ class QuantizationTest < Minitest::Test
     trainable = g.parameters.select(&:trainable).map(&:path)
 
     assert_equal %w[proj.lora_A.weight proj.lora_B.weight], trainable
-    assert_equal :bf16, g.parameters.find { |p| p.path == "proj.lora_A.weight" }.dtype,
-                 "the adapter is in the activations' dtype, not the base's"
+    assert_equal :f32, g.parameters.find { |p| p.path == "proj.lora_A.weight" }.dtype,
+                 "the adapter trains in f32, whatever the base is held in"
   end
 
   def test_the_scopes_nest_either_way_and_not_twice
@@ -310,6 +310,26 @@ dtype: :bf16, quantization:)
       assert_equal held[name][0], declared[name][0], name
       assert_equal held[name][1] == "U32" ? :u32 : :bf16, declared[name][1], name
     end
+  end
+
+  # The adapter is the one thing that trains, so on a bf16 model it is
+  # held in f32, where an Adam step on one of its entries would otherwise
+  # round away; the linear it adapts still hands on bf16, so the rest of
+  # the model is as it was. On an f32 model there is nothing to cast.
+  def test_on_a_bf16_model_the_adapter_is_f32_and_the_linear_is_still_bf16
+    config = Torobi::Models::Llama.from_hash(SMALL)
+    adapter = Torobi::LoRA.new(rank: 2, on: %w[q_proj v_proj])
+    graph = Torobi::Models::Llama.causal_lm(config, seq: 4, adapter:, dtype: :bf16)
+    by_path = graph.parameters.to_h { |p| [p.path, p] }
+
+    assert_equal [:f32], by_path.values.select { |p| adapter.adapted?(p.path) }.map(&:dtype).uniq
+    assert_equal :bf16, by_path.fetch("model.layers.0.self_attn.q_proj.weight").dtype
+    q = graph.nodes.find { |n| n.name == "model.layers.0.self_attn.q_proj" }
+
+    assert_equal :bf16, q.dtype, "what the adapted linear hands on"
+    f32 = Torobi::Models::Llama.causal_lm(config, seq: 4, adapter:)
+
+    assert_empty f32.nodes.select { |n| n.op == "cast" }, "an f32 model casts nothing"
   end
 
   # --- the whole of it, through the engine ---

@@ -76,12 +76,22 @@ module Torobi
     # `B` starts at zero, so this contributes nothing until something has
     # trained it. That is what makes an adapted model start as the model
     # it adapts.
+    #
+    # **The two matrices are f32, whatever the model is held in**, and so
+    # is their arithmetic: `x` is widened on the way in and the result is
+    # narrowed back to `x`'s dtype on the way out, so the layers around
+    # it are as they were. They are the only parameters that train, and
+    # bf16 holds a value to about 0.4%: an Adam step of 1e-4 on an entry
+    # of A near 0.08 is a change of 0.1%, which rounds away. mlx-lm makes
+    # the same choice (`tuner/lora.py`: its matrices are made in MLX's
+    # default f32 and the result is `astype(x.dtype)`). On an f32 model
+    # neither cast is a node, and nothing changes.
     def contribution(g, x, d_in:, d_out:, name:)
       a_path, b_path = paths(name)
-      a = g.param(a_path, [rank, d_in], dtype: x.dtype, init: { "type" => "kaiming_uniform" })
-      b = g.param(b_path, [d_out, rank], dtype: x.dtype, init: { "type" => "zeros" })
-      down = g.matmul(x, a.transpose(axes: [1, 0]))
-      g.matmul(down, b.transpose(axes: [1, 0])) * scale
+      a = g.param(a_path, [rank, d_in], dtype: :f32, init: { "type" => "kaiming_uniform" })
+      b = g.param(b_path, [d_out, rank], dtype: :f32, init: { "type" => "zeros" })
+      down = g.matmul(g.cast(x, :f32), a.transpose(axes: [1, 0]))
+      g.cast(g.matmul(down, b.transpose(axes: [1, 0])) * scale, x.dtype)
     end
 
     # What `fresh:` should say when starting from a published checkpoint:

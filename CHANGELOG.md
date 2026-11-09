@@ -20,6 +20,17 @@ between two versions people have.
   constants now take their input's dtype, the norms and the rotation
   are computed in f32 and returned in their input's, and the engine
   refuses a node whose result is not the dtype the graph declares.
+  The same check found two more: an optimizer step left a bf16
+  parameter in f32, and a parameter drawn fresh (a LoRA's matrices)
+  was never converted to its declared dtype. Both are held to it now.
+
+### Changed
+
+- **A LoRA's matrices are f32 on a bf16 model.** They are the only
+  parameters that train, and bf16 rounds away an Adam step on most of
+  their entries. The adapter's arithmetic is done in f32 and its result
+  cast back to the linear's dtype, as mlx-lm does; on an f32 model
+  nothing changes.
 
 ### Added
 
