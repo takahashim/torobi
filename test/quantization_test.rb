@@ -332,6 +332,64 @@ dtype: :bf16, quantization:)
     assert_empty f32.nodes.select { |n| n.op == "cast" }, "an f32 model casts nothing"
   end
 
+  # Gemma3 is the other decoder this library describes, and the one that
+  # is least like Llama: four norms a layer, norms on q and k per head, a
+  # head_dim of 256 wider than its hidden size over its heads, norms that
+  # scale by `1 + w`. None of that is a linear, and every linear it has
+  # divides by every group size, so the same quantization applies.
+  def gemma
+    Torobi::Models::Gemma3.from_hash(
+      JSON.parse(File.read(File.expand_path("oracle/gemma-3-270m.json", __dir__))).fetch("config")
+    )
+  end
+
+  def test_gemma3_holds_its_linears_quantized_and_its_adapter_in_f32
+    config = gemma
+    adapter = Torobi::LoRA.new(rank: 8,
+                               on: %w[q_proj k_proj v_proj o_proj gate_proj up_proj down_proj])
+    quantization = Torobi::Quantization.new(bits: 4, group_size: 64)
+    graph = Torobi::Models::Gemma3.causal_lm(config, seq: 8, dtype: :bf16, adapter:, quantization:)
+    by_path = graph.parameters.to_h { |p| [p.path, p] }
+
+    assert_equal 18 * 7, by_path.keys.count { |p|
+      p.end_with?(".scales")
+    }, "seven linears a layer, all held packed"
+    assert_equal [:u32], by_path.values.select { |p|
+      p.path.end_with?(".weight") && p.dtype == :u32
+    }
+                                .map(&:dtype).uniq
+    q = by_path.fetch("model.layers.0.self_attn.q_proj.weight")
+
+    assert_equal [config.attention_size, config.hidden_size * 4 / 32], q.shape,
+                 "q is [heads × head_dim, hidden] = [1024, 640], packed"
+    assert_equal :bf16, by_path.fetch("model.embed_tokens.weight").dtype,
+                 "the tied table stays numbers"
+    assert_equal adapter.fresh(Torobi::GraphConfig.new(models: { m: graph }, train: [])).map { |p|
+      p.delete_prefix("m.")
+    }.sort,
+                 graph.parameters.select(&:trainable).map(&:path).sort, "only the adapter trains"
+    assert_equal [:f32], graph.parameters.select { |p| adapter.adapted?(p.path) }.map(&:dtype).uniq
+    assert_equal [:bf16], graph.nodes.select { |n| n.op == "quantized_matmul" }.map(&:dtype).uniq,
+                 "every packed matmul hands on bf16"
+  end
+
+  # The bytes, which on this model say something else than on Qwen: its
+  # vocabulary of 262k is 63% of its parameters, and the embedding is not
+  # quantized, so quantizing the linears saves a quarter rather than half.
+  def test_gemma3_s_embedding_is_most_of_what_it_holds
+    held = lambda do |quantization|
+      graph = Torobi::Models::Gemma3.causal_lm(gemma, seq: 8, dtype: :bf16, quantization:)
+      graph.parameters.sum { |spec| spec.shape.reduce(1, :*) * BYTES.fetch(spec.dtype) }
+    end
+    bf16 = held.call(nil)
+    quantized = held.call(Torobi::Quantization.new(bits: 4, group_size: 64))
+
+    assert_in_delta 0.50, bf16 / (1024.0**3), 0.02, "gemma-3-270m in bf16"
+    assert_operator quantized.to_f / bf16, :>, 0.70,
+                    "the embedding is not quantized, and it is most of it"
+    assert_operator quantized, :<, bf16
+  end
+
   # --- the whole of it, through the engine ---
 
   SMALL = { "vocab_size" => 11, "hidden_size" => 64, "intermediate_size" => 128,

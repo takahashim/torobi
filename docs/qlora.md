@@ -844,3 +844,9 @@ CUDA(RTX 3080)で動くか。
   `LoraConfig` / `PeftConfig` が宣言している。**読んで確かめたもので、走らせてはいない。**
   クラウド環境では torch(CUDA 13 の依存込みで数 GB)を絞られた帯域で落とすことになり、
   入らなかった。走らせる確認は `tools/peft_check.py`(layout と numbers)で Mac から。
+- **Gemma3 と量子化(2026-11-09、engine 無しのテスト)**: gemma-3-270m の記述を 4 bit g64 と
+  全 linear の adapter で組むと、18 層 × 7 linear がすべて packed になり、adapter は f32、
+  packed の matmul はどれも bf16 を返す。Gemma3 の linear の幅(640、1024、2048)はどの
+  group size でも割り切れる。バイト数は bf16 0.499 GiB → 0.365 GiB(0.73 倍)にしか減らない:
+  語彙 262k の embedding がパラメータの 63 % を占め、量子化しないから。小さい Gemma で
+  QLoRA を使う意味は薄い。engine での forward と step はまだ試していない。
